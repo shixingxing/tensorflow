@@ -18,6 +18,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import math
 import numbers
 import os
 import re
@@ -167,8 +168,29 @@ class _BenchmarkRegistrar(type):
     return newclass
 
 
+@tf_export("__internal__.test.ParameterizedBenchmark", v1=[])
 class ParameterizedBenchmark(_BenchmarkRegistrar):
-  """Metaclass to generate parameterized benchmarks."""
+  """Metaclass to generate parameterized benchmarks.
+
+  Use this class as a metaclass and override the `_benchmark_parameters` to
+  generate multiple benchmark test cases. For example:
+
+  class FooBenchmark(metaclass=tf.test.ParameterizedBenchmark,
+                     tf.test.Benchmark):
+    # The `_benchmark_parameters` is expected to be a list with test cases.
+    # Each of the test case is a tuple, with the first time to be test case
+    # name, followed by any number of the parameters needed for the test case.
+    _benchmark_parameters = [
+      ('case_1', Foo, 1, 'one'),
+      ('case_2', Bar, 2, 'two'),
+    ]
+
+    def benchmark_test(self, target_class, int_param, string_param):
+      # benchmark test body
+
+  The example above will generate two benchmark test cases:
+  "benchmark_test__case_1" and "benchmark_test__case_2".
+  """
 
   def __new__(mcs, clsname, base, attrs):
     param_config_list = attrs["_benchmark_parameters"]
@@ -379,6 +401,16 @@ class TensorFlowBenchmark(Benchmark):
       lm1 = l - 1
       return (s[l//2] + s[lm1//2]) / 2.0
 
+    def _mean_and_stdev(x):
+      if not x:
+        return -1, -1
+      l = len(x)
+      mean = sum(x) / l
+      if l == 1:
+        return mean, -1
+      variance = sum([(e - mean) * (e - mean) for e in x]) / (l - 1)
+      return mean, math.sqrt(variance)
+
     median_delta = _median(deltas)
 
     benchmark_values = {
@@ -389,6 +421,10 @@ class TensorFlowBenchmark(Benchmark):
         "throughput": mbs / median_delta
     }
     self.report_benchmark(**benchmark_values)
+
+    mean_delta, stdev_delta = _mean_and_stdev(deltas)
+    unreported_extras["wall_time_mean"] = mean_delta
+    unreported_extras["wall_time_stdev"] = stdev_delta
     benchmark_values["extras"].update(unreported_extras)
     return benchmark_values
 
@@ -415,9 +451,13 @@ def _run_benchmarks(regex):
 
   Args:
     regex: The string regular expression to match Benchmark classes against.
+
+  Raises:
+    ValueError: If no benchmarks were selected by the input regex.
   """
   registry = list(GLOBAL_BENCHMARK_REGISTRY)
 
+  selected_benchmarks = []
   # Match benchmarks in registry against regex
   for benchmark in registry:
     benchmark_name = "%s.%s" % (benchmark.__module__, benchmark.__name__)
@@ -433,12 +473,16 @@ def _run_benchmarks(regex):
         continue
       full_benchmark_name = "%s.%s" % (benchmark_name, attr)
       if regex == "all" or re.search(regex, full_benchmark_name):
+        selected_benchmarks.append(full_benchmark_name)
         # Instantiate the class if it hasn't been instantiated
         benchmark_instance = benchmark_instance or benchmark()
         # Get the method tied to the class
         instance_benchmark_fn = getattr(benchmark_instance, attr)
         # Call the instance method
         instance_benchmark_fn()
+
+  if not selected_benchmarks:
+    raise ValueError("No benchmarks matched the pattern: '{}'".format(regex))
 
 
 def benchmarks_main(true_main, argv=None):

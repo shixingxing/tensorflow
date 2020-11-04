@@ -22,6 +22,7 @@ import weakref
 from tensorflow.python.util.compat import collections_abc
 
 
+# LINT.IfChange
 class _ObjectIdentityWrapper(object):
   """Wraps an object, mapping __eq__ on wrapper to "is" on wrapped.
 
@@ -30,7 +31,7 @@ class _ObjectIdentityWrapper(object):
   _ListWrapper objects to object-identity collections.
   """
 
-  __slots__ = ["_wrapped"]
+  __slots__ = ["_wrapped", "__weakref__"]
 
   def __init__(self, wrapped):
     self._wrapped = wrapped
@@ -39,10 +40,22 @@ class _ObjectIdentityWrapper(object):
   def unwrapped(self):
     return self._wrapped
 
-  def __eq__(self, other):
+  def _assert_type(self, other):
     if not isinstance(other, _ObjectIdentityWrapper):
       raise TypeError("Cannot compare wrapped object with unwrapped object")
 
+  def __lt__(self, other):
+    self._assert_type(other)
+    return id(self._wrapped) < id(other._wrapped)  # pylint: disable=protected-access
+
+  def __gt__(self, other):
+    self._assert_type(other)
+    return id(self._wrapped) > id(other._wrapped)  # pylint: disable=protected-access
+
+  def __eq__(self, other):
+    if other is None:
+      return False
+    self._assert_type(other)
     return self._wrapped is other._wrapped  # pylint: disable=protected-access
 
   def __ne__(self, other):
@@ -59,6 +72,8 @@ class _ObjectIdentityWrapper(object):
 
 
 class _WeakObjectIdentityWrapper(_ObjectIdentityWrapper):
+
+  __slots__ = ()
 
   def __init__(self, wrapped):
     super(_WeakObjectIdentityWrapper, self).__init__(weakref.ref(wrapped))
@@ -87,6 +102,8 @@ class Reference(_ObjectIdentityWrapper):
   ```
   """
 
+  __slots__ = ()
+
   # Disabling super class' unwrapped field.
   unwrapped = property()
 
@@ -109,6 +126,8 @@ class ObjectIdentityDictionary(collections_abc.MutableMapping):
   have behavior identical to built-in Python lists (including being unhashable
   and comparing based on the equality of their contents by default).
   """
+
+  __slots__ = ["_storage"]
 
   def __init__(self):
     self._storage = {}
@@ -139,6 +158,8 @@ class ObjectIdentityDictionary(collections_abc.MutableMapping):
 class ObjectIdentityWeakKeyDictionary(ObjectIdentityDictionary):
   """Like weakref.WeakKeyDictionary, but compares objects with "is"."""
 
+  __slots__ = ["__weakref__"]
+
   def _wrap_key(self, key):
     return _WeakObjectIdentityWrapper(key)
 
@@ -159,8 +180,10 @@ class ObjectIdentityWeakKeyDictionary(ObjectIdentityDictionary):
 class ObjectIdentitySet(collections_abc.MutableSet):
   """Like the built-in set, but compares objects with "is"."""
 
+  __slots__ = ["_storage", "__weakref__"]
+
   def __init__(self, *args):
-    self._storage = set([self._wrap_key(obj) for obj in list(*args)])
+    self._storage = set(self._wrap_key(obj) for obj in list(*args))
 
   @staticmethod
   def _from_storage(storage):
@@ -183,6 +206,9 @@ class ObjectIdentitySet(collections_abc.MutableSet):
   def update(self, items):
     self._storage.update([self._wrap_key(item) for item in items])
 
+  def clear(self):
+    self._storage.clear()
+
   def intersection(self, items):
     return self._storage.intersection([self._wrap_key(item) for item in items])
 
@@ -202,6 +228,8 @@ class ObjectIdentitySet(collections_abc.MutableSet):
 class ObjectIdentityWeakSet(ObjectIdentitySet):
   """Like weakref.WeakSet, but compares objects with "is"."""
 
+  __slots__ = ()
+
   def _wrap_key(self, key):
     return _WeakObjectIdentityWrapper(key)
 
@@ -217,3 +245,4 @@ class ObjectIdentityWeakSet(ObjectIdentitySet):
         self.discard(key)
       else:
         yield unwrapped
+# LINT.ThenChange(//tensorflow/python/keras/utils/object_identity.py)

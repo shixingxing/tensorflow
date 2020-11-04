@@ -17,7 +17,7 @@ limitations under the License.
 
 #include <vector>
 
-#include "tensorflow/lite/schema/schema_generated.h"
+#include "tensorflow/lite/schema/mutable/schema_generated.h"
 
 namespace tflite {
 
@@ -30,6 +30,7 @@ typedef struct {
     struct {
       int32_t dilation_w_factor;
       int32_t dilation_h_factor;
+      bool is_per_channel_quantized;
     } depthwise_conv_2d;
     struct {
       bool narrow_range;
@@ -37,6 +38,10 @@ typedef struct {
     struct {
       bool keep_num_dims;
       FullyConnectedOptionsWeightsFormat weights_format;
+      // TODO(b/156530611): Make this global when more ops support sparse
+      // computation.
+      bool sparse_weight;
+      bool asymmetric_quantize_inputs;
     } fully_connected;
     struct {
       float input1_scale;
@@ -45,12 +50,38 @@ typedef struct {
     } mul;
     struct {
       LSTMKernelType kernel_type;
+      bool asymmetric_quantize_inputs;
     } lstm;
+    struct {
+      bool half_pixel_centers;
+      bool align_corners;
+    } resize;
+    struct {
+      int32_t num_dims;
+    } single_input_op;
+    struct {
+      int32_t num_dims;
+      bool need_broadcast;
+    } broadcast;
+    struct {
+      bool pot_scale_int16;
+      int32_t num_dims;
+      bool need_broadcast;
+    } addsub;
+    struct {
+      bool is_per_channel_quantized;
+    } conv_2d;
+    struct {
+      bool asymmetric_quantize_inputs;
+    } input_quantization;
   } options;
 } OpSignature;
 
 // Returns version of builtin ops by the given signature.
 int GetBuiltinOperatorVersion(const OpSignature& op_sig);
+
+// Update operator's version of the given TFL flatbuffer model.
+void UpdateOpVersion(uint8_t* model_buffer_pointer);
 
 }  // namespace tflite
 

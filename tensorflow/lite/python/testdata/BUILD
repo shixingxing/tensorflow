@@ -1,5 +1,5 @@
-load("//tensorflow/lite:build_def.bzl", "tf_to_tflite")
-load("//tensorflow:tensorflow.bzl", "tf_py_wrap_cc")
+load("//tensorflow/lite:build_def.bzl", "DEPRECATED_tf_to_tflite")
+load("//tensorflow:tensorflow.bzl", "pybind_extension")
 
 package(
     default_visibility = ["//tensorflow:internal"],
@@ -8,7 +8,7 @@ package(
 
 exports_files(glob(["*.pb"]))
 
-tf_to_tflite(
+DEPRECATED_tf_to_tflite(
     name = "permute_float",
     src = "permute.pbtxt",
     out = "permute_float.tflite",
@@ -18,7 +18,7 @@ tf_to_tflite(
     ],
 )
 
-tf_to_tflite(
+DEPRECATED_tf_to_tflite(
     name = "permute_uint8",
     src = "permute.pbtxt",
     out = "permute_uint8.tflite",
@@ -33,7 +33,7 @@ tf_to_tflite(
     ],
 )
 
-tf_to_tflite(
+DEPRECATED_tf_to_tflite(
     name = "gather_string",
     src = "gather.pbtxt",
     out = "gather_string.tflite",
@@ -43,10 +43,22 @@ tf_to_tflite(
     ],
 )
 
+DEPRECATED_tf_to_tflite(
+    name = "gather_string_0d",
+    src = "gather_0d.pbtxt",
+    out = "gather_string_0d.tflite",
+    options = [
+        "--input_arrays=input,indices",
+        "--output_arrays=output",
+    ],
+)
+
 filegroup(
     name = "interpreter_test_data",
     srcs = [
+        "pc_conv.bin",
         ":gather_string",
+        ":gather_string_0d",
         ":permute_float",
         ":permute_uint8",
     ],
@@ -59,8 +71,9 @@ cc_library(
     srcs = ["test_delegate.cc"],
     visibility = ["//tensorflow/lite:__subpackages__"],
     deps = [
-        "//tensorflow/lite/c:c_api_internal",
+        "//tensorflow/lite/c:common",
     ],
+    alwayslink = 1,
 )
 
 cc_binary(
@@ -85,13 +98,20 @@ cc_library(
     alwayslink = 1,
 )
 
-tf_py_wrap_cc(
-    name = "test_registerer_wrapper",
+pybind_extension(
+    name = "_pywrap_test_registerer",
     srcs = [
-        "test_registerer.i",
+        "test_registerer_wrapper.cc",
     ],
+    hdrs = ["test_registerer.h"],
+    additional_exported_symbols = ["TF_TestRegisterer"],
+    link_in_framework = True,
+    module_name = "_pywrap_test_registerer",
     deps = [
         ":test_registerer",
+        "//tensorflow/lite:framework",
+        "//tensorflow/lite/kernels:builtin_ops",
         "//third_party/python_runtime:headers",
+        "@pybind11",
     ],
 )

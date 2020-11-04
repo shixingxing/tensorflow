@@ -15,6 +15,7 @@ limitations under the License.
 #include "tensorflow/core/kernels/data/tensor_dataset_op.h"
 
 #include "tensorflow/core/kernels/data/dataset_test_base.h"
+#include "tensorflow/core/kernels/data/dataset_utils.h"
 
 namespace tensorflow {
 namespace data {
@@ -29,19 +30,12 @@ class TensorDatasetParams : public DatasetParams {
                       std::move(node_name)),
         components_(std::move(components)) {}
 
-  Status GetInputs(const std::vector<Tensor*>& input_datasets,
-                   std::vector<std::unique_ptr<Tensor>>* created_tensors,
-                   gtl::InlinedVector<TensorValue, 4>* inputs) const override {
-    inputs->clear();
-    AddTensorInputs(components_, created_tensors, inputs);
-    return Status::OK();
-  }
+  std::vector<Tensor> GetInputTensors() const override { return components_; }
 
-  Status GetInputPlaceholder(
-      std::vector<string>* input_placeholder) const override {
-    input_placeholder->reserve(components_.size());
+  Status GetInputNames(std::vector<string>* input_names) const override {
+    input_names->reserve(components_.size());
     for (int i = 0; i < components_.size(); ++i) {
-      input_placeholder->emplace_back(
+      input_names->emplace_back(
           absl::StrCat(TensorDatasetOp::kComponents, "_", i));
     }
     return Status::OK();
@@ -53,7 +47,7 @@ class TensorDatasetParams : public DatasetParams {
     return Status::OK();
   }
 
-  string op_name() const override { return TensorDatasetOp::kDatasetType; }
+  string dataset_type() const override { return TensorDatasetOp::kDatasetType; }
 
  private:
   DataTypeVector TensorDtypes(const std::vector<Tensor>& input_components) {
@@ -77,7 +71,7 @@ class TensorDatasetParams : public DatasetParams {
   std::vector<Tensor> components_;
 };
 
-class TensorDatasetOpTest : public DatasetOpsTestBaseV2 {};
+class TensorDatasetOpTest : public DatasetOpsTestBase {};
 
 // Test case 1: test a dataset that represents a single tuple of plain tensors.
 TensorDatasetParams PlainTensorDatasetParams() {
@@ -241,11 +235,11 @@ TEST_P(ParameterizedIteratorSaveAndRestoreTest, SaveAndRestore) {
   const std::vector<int>& breakpoints = test_case.breakpoints;
   int cardinality = 1;
   for (int breakpoint : breakpoints) {
-    VariantTensorData data;
-    VariantTensorDataWriter writer(&data);
+    VariantTensorDataWriter writer;
     TF_EXPECT_OK(iterator_->Save(serialization_ctx.get(), &writer));
-    TF_EXPECT_OK(writer.Flush());
-    VariantTensorDataReader reader(&data);
+    std::vector<const VariantTensorData*> data;
+    writer.GetData(&data);
+    VariantTensorDataReader reader(data);
     TF_EXPECT_OK(RestoreIterator(iterator_ctx_.get(), &reader,
                                  test_case.dataset_params.iterator_prefix(),
                                  *dataset_, &iterator_));

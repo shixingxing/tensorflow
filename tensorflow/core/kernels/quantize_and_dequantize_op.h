@@ -60,6 +60,28 @@ struct QuantizeAndDequantizePerChannelFunctor {
                   typename TTypes<T, 3>::Tensor output);
 };
 
+template <typename Device, typename T>
+struct QuantizeAndDequantizeOneScaleGradientFunctor {
+  void operator()(const Device& d, typename TTypes<T>::ConstFlat gradient,
+                  typename TTypes<T>::ConstFlat input,
+                  typename TTypes<T>::ConstScalar input_min,
+                  typename TTypes<T>::ConstScalar input_max,
+                  typename TTypes<T>::Flat input_backprop,
+                  typename TTypes<T>::Scalar input_min_backprop,
+                  typename TTypes<T>::Scalar input_max_backprop);
+};
+
+template <typename Device, typename T>
+struct QuantizeAndDequantizePerChannelGradientFunctor {
+  void operator()(const Device& d, typename TTypes<T, 3>::ConstTensor gradient,
+                  typename TTypes<T, 3>::ConstTensor input,
+                  const Tensor* input_min_tensor,
+                  const Tensor* input_max_tensor,
+                  typename TTypes<T, 3>::Tensor input_backprop,
+                  typename TTypes<T>::Flat input_min_backprop,
+                  typename TTypes<T>::Flat input_max_backprop);
+};
+
 // The implementation below runs on both CPU and GPU.
 template <typename Device, typename T, typename Func,
           typename Vec = typename TTypes<T>::Vec,
@@ -81,7 +103,8 @@ void ClampScaleAndRound(const Device& d, ConstVec input, T min_range,
   switch (round_mode) {
     case ROUND_HALF_TO_EVEN:
       ClampScaleAndRound(d, input, min_range, max_range, scale, inverse_scale,
-                         Eigen::internal::scalar_round_op_google<T>(), output);
+                         Eigen::internal::scalar_round_half_to_even_op<T>(),
+                         output);
       break;
     case ROUND_HALF_UP:
       ClampScaleAndRound(d, input, min_range, max_range, scale, inverse_scale,
@@ -107,7 +130,7 @@ void ScaleAndRound(const Device& d, ConstVec input, T scale, T inverse_scale,
   switch (round_mode) {
     case ROUND_HALF_TO_EVEN:
       ScaleAndRound(d, input, scale, inverse_scale,
-                    Eigen::internal::scalar_round_op_google<T>(), output);
+                    Eigen::internal::scalar_round_half_to_even_op<T>(), output);
       break;
     case ROUND_HALF_UP:
       ScaleAndRound(d, input, scale, inverse_scale,
@@ -245,6 +268,55 @@ struct QuantizeAndDequantizePerChannelImpl {
                       output_chip);
       }
     }
+  }
+};
+
+template <typename Device, typename T>
+struct QuantizeAndDequantizeOneScaleGradientImpl {
+  static void Compute(const Device& d, typename TTypes<T>::ConstFlat gradient,
+                      typename TTypes<T>::ConstFlat input,
+                      typename TTypes<T>::ConstScalar input_min,
+                      typename TTypes<T>::ConstScalar input_max,
+                      typename TTypes<T>::Flat input_backprop,
+                      typename TTypes<T>::Scalar input_min_backprop,
+                      typename TTypes<T>::Scalar input_max_backprop) {
+    const T min_val = input_min();
+    const T max_val = input_max();
+    const auto in_range =
+        (input >= min_val && input <= max_val)
+            .select(input.constant(1.0f), input.constant(0.0f));
+    input_backprop.device(d) = gradient * in_range;
+    input_min_backprop.device(d) = input_min_backprop.constant(0.0f);
+    input_max_backprop.device(d) = input_max_backprop.constant(0.0f);
+  }
+};
+
+template <typename Device, typename T>
+struct QuantizeAndDequantizePerChannelGradientImpl {
+  static void Compute(const Device& d,
+                      typename TTypes<T, 3>::ConstTensor gradient,
+                      typename TTypes<T, 3>::ConstTensor input,
+                      const Tensor* input_min_tensor,
+                      const Tensor* input_max_tensor,
+                      typename TTypes<T, 3>::Tensor input_backprop,
+                      typename TTypes<T>::Flat input_min_backprop,
+                      typename TTypes<T>::Flat input_max_backprop) {
+    using Index = typename tensorflow::TTypes<T>::ConstTensor::Index;
+    auto input_min = input_min_tensor->vec<T>();
+    auto input_max = input_max_tensor->vec<T>();
+    int num_channels = input.dimension(1);
+    for (Index i = 0; i < num_channels; ++i) {
+      const auto gradient_chip = gradient.template chip<1>(i);
+      const auto input_chip = input.template chip<1>(i);
+      const T min_val = input_min(i);
+      const T max_val = input_max(i);
+      const auto in_range =
+          (input_chip >= min_val && input_chip <= max_val)
+              .select(input_chip.constant(1.0f), input_chip.constant(0.0f));
+      input_backprop.template chip<1>(i).device(d) = gradient_chip * in_range;
+    }
+    input_min_backprop.device(d) = input_min_backprop.constant(0.0f);
+    input_max_backprop.device(d) = input_max_backprop.constant(0.0f);
   }
 };
 

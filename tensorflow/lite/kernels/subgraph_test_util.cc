@@ -15,29 +15,60 @@ limitations under the License.
 
 #include "tensorflow/lite/kernels/subgraph_test_util.h"
 
-#include "flatbuffers/flexbuffers.h"  // TF:flatbuffers
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+#include <random>
+#include <vector>
+
+#include <gtest/gtest.h>
+#include "tensorflow/lite/c/builtin_op_data.h"
+#include "tensorflow/lite/c/common.h"
 #include "tensorflow/lite/core/subgraph.h"
+#include "tensorflow/lite/kernels/builtin_op_kernels.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
-#include "tensorflow/lite/kernels/register.h"
-#include "tensorflow/lite/kernels/test_util.h"
-#include "tensorflow/lite/model.h"
 
 namespace tflite {
 
+// Forward declaration for op kernels.
 namespace ops {
-namespace builtin {
-// ADD and MUL are used to test simple branch.
-// ADD and MUL can be used to test dynamic sized subgraphs with the
-// use of IF op.
-TfLiteRegistration* Register_ADD();
-TfLiteRegistration* Register_MUL();
-// PAD is used to test dynamic sized subgraphs.
-TfLiteRegistration* Register_PAD();
-TfLiteRegistration* Register_LESS_EQUAL();
-}  // namespace builtin
 namespace custom {
-TfLiteRegistration* Register_IF();
-TfLiteRegistration* Register_WHILE();
+
+TfLiteRegistration* Register_ASSIGN_VARIABLE();
+TfLiteRegistration* Register_READ_VARIABLE();
+
+namespace random_int {
+
+TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
+  TF_LITE_ENSURE_EQ(context, NumInputs(node), 0);
+  TF_LITE_ENSURE_EQ(context, NumOutputs(node), 1);
+
+  TfLiteTensor* output = GetOutput(context, node, 0);
+  TfLiteIntArray* outputSize = TfLiteIntArrayCreate(1);
+  outputSize->data[0] = 1;
+  // TODO(jaesung): Make output size be changeable depending on user's input to
+  // make it generic.
+  return context->ResizeTensor(context, output, outputSize);
+}
+
+TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
+  TfLiteTensor& output = context->tensors[node->outputs->data[0]];
+
+  std::random_device rd;
+  std::uniform_int_distribution<int> dist(1, 32768);
+  output.data.i32[0] = dist(rd);
+  return kTfLiteOk;
+}
+
+}  // namespace random_int
+
+TfLiteRegistration* Register_RANDOM_INT() {
+  static TfLiteRegistration r = {nullptr, nullptr, random_int::Prepare,
+                                 random_int::Eval};
+  return &r;
+}
+
 }  // namespace custom
 }  // namespace ops
 
@@ -178,7 +209,7 @@ void SubgraphBuilder::BuildIfSubgraph(Subgraph* subgraph) {
   int node_index;
   subgraph->AddNodeWithParameters(
       {kCondInput, kInput1, kInput2}, {kOutput}, {}, nullptr, 0, params,
-      ::tflite::ops::custom::Register_IF(), &node_index);
+      ::tflite::ops::builtin::Register_IF(), &node_index);
 }
 
 void SubgraphBuilder::BuildLessEqualCondSubgraph(Subgraph* subgraph, int rhs) {
@@ -336,8 +367,67 @@ void SubgraphBuilder::BuildWhileSubgraph(Subgraph* subgraph) {
 
   int node_index;
   subgraph->AddNodeWithParameters({0, 1}, {2, 3}, {}, nullptr, 0, params,
-                                  ::tflite::ops::custom::Register_WHILE(),
+                                  ::tflite::ops::builtin::Register_WHILE(),
                                   &node_index);
+}
+
+void SubgraphBuilder::BuildAssignRandomValueToVariableSubgraph(
+    Subgraph* subgraph) {
+  const int kConstResourceId = 0;
+  const int kRandomValue = 1;
+  const int kTensorCount = 3;
+
+  // Construct a graph like ths:
+  //   %1 = random_int()
+  //   variable_assign(%0, %1)
+
+  int first_new_tensor_index;
+  ASSERT_EQ(subgraph->AddTensors(kTensorCount, &first_new_tensor_index),
+            kTfLiteOk);
+  ASSERT_EQ(subgraph->SetInputs({}), kTfLiteOk);
+  ASSERT_EQ(subgraph->SetOutputs({}), kTfLiteOk);
+
+  SetupTensor(subgraph, kRandomValue, kTfLiteInt32);
+  CreateConstantInt32Tensor(subgraph, kConstResourceId, {1}, {1024});
+
+  int node_index;
+  subgraph->AddNodeWithParameters({}, {kRandomValue}, {}, nullptr, 0, nullptr,
+                                  ::tflite::ops::custom::Register_RANDOM_INT(),
+                                  &node_index);
+  subgraph->AddNodeWithParameters(
+      {kConstResourceId, kRandomValue}, {}, {}, nullptr, 0, nullptr,
+      ::tflite::ops::custom::Register_ASSIGN_VARIABLE(), &node_index);
+}
+
+void SubgraphBuilder::BuildCallOnceAndReadVariableSubgraph(Subgraph* subgraph) {
+  const int kConstResourceId = 0;
+  const int kOutput = 1;
+  const int kTensorCount = 2;
+
+  // Construct a graph like ths:
+  //   Output: %1
+  //   %1 = read_variable(%0)
+
+  int first_new_tensor_index;
+  ASSERT_EQ(subgraph->AddTensors(kTensorCount, &first_new_tensor_index),
+            kTfLiteOk);
+  ASSERT_EQ(subgraph->SetInputs({}), kTfLiteOk);
+  ASSERT_EQ(subgraph->SetOutputs({kOutput}), kTfLiteOk);
+
+  SetupTensor(subgraph, kOutput, kTfLiteInt32);
+  CreateConstantInt32Tensor(subgraph, kConstResourceId, {1}, {1024});
+
+  TfLiteCallOnceParams* params = reinterpret_cast<TfLiteCallOnceParams*>(
+      malloc(sizeof(TfLiteCallOnceParams)));
+  params->init_subgraph_index = 1;
+
+  int node_index;
+  subgraph->AddNodeWithParameters({}, {}, {}, nullptr, 0, params,
+                                  ::tflite::ops::builtin::Register_CALL_ONCE(),
+                                  &node_index);
+  subgraph->AddNodeWithParameters(
+      {kConstResourceId}, {kOutput}, {}, nullptr, 0, nullptr,
+      ::tflite::ops::custom::Register_READ_VARIABLE(), &node_index);
 }
 
 void SubgraphBuilder::CreateConstantInt32Tensor(Subgraph* subgraph,

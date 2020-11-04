@@ -18,214 +18,33 @@ limitations under the License.
 #include <stdlib.h>
 
 #include <memory>
+#include <utility>
 
 #include "absl/container/fixed_array.h"
-#include "absl/strings/str_cat.h"
-#include "tensorflow/core/common_runtime/step_stats_collector.h"
-#include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/lib/strings/str_util.h"
-#include "tensorflow/core/platform/abi.h"
-#include "tensorflow/core/platform/annotation.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "tensorflow/core/framework/step_stats.pb.h"
+#include "tensorflow/core/platform/env_time.h"
+#include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/macros.h"
-#include "tensorflow/core/platform/stringprintf.h"
+#include "tensorflow/core/platform/thread_annotations.h"
+#include "tensorflow/core/profiler/internal/cpu/annotation_stack.h"
+#include "tensorflow/core/profiler/internal/gpu/cupti_collector.h"
 #include "tensorflow/core/profiler/internal/gpu/cupti_tracer.h"
 #include "tensorflow/core/profiler/internal/gpu/cupti_wrapper.h"
-#include "tensorflow/core/profiler/internal/parse_annotation.h"
-#include "tensorflow/core/profiler/internal/profiler_interface.h"
+#include "tensorflow/core/profiler/lib/profiler_factory.h"
+#include "tensorflow/core/profiler/lib/profiler_interface.h"
+#include "tensorflow/core/profiler/protobuf/xplane.pb.h"
 #include "tensorflow/core/util/env_var.h"
 
 namespace tensorflow {
 namespace profiler {
 
-// Adapter from CuptiTraceCollector to StepStatsCollector: This class convert
-// and filter from CuptiTracerEvent to tensorflow::NodeExecStats.
-// We can not just forward event on the fly because StepStatsCollector have
-// a single mutex for all devices, Therefore we will cache events and forward
-// only when Flush().
-class StepStatsCuptiTracerAdaptor : public CuptiTraceCollector {
- public:
-  StepStatsCuptiTracerAdaptor(const CuptiTracerCollectorOptions& option,
-                              const std::string prefix, int num_gpus,
-                              uint64 start_walltime_ns, uint64 start_gpu_ns,
-                              StepStatsCollector* trace_collector)
-      : CuptiTraceCollector(option),
-        trace_collector_(trace_collector),
-        num_callback_events_(0),
-        num_activity_events_(0),
-        start_walltime_ns_(start_walltime_ns),
-        start_gpu_ns_(start_gpu_ns),
-        num_gpus_(num_gpus),
-        per_device_adaptor_(num_gpus) {
-    for (int i = 0; i < num_gpus; ++i) {  // for each device id.
-      per_device_adaptor_[i].stream_device =
-          strings::StrCat(prefix, "/device:GPU:", i, "/stream:");
-      per_device_adaptor_[i].memcpy_device =
-          strings::StrCat(prefix, "/device:GPU:", i, "/memcpy");
-      per_device_adaptor_[i].sync_device =
-          strings::StrCat(prefix, "/device:GPU:", i, "/sync");
-    }
-  }
-
-  void AddEvent(CuptiTracerEvent&& event) override {
-    if (event.device_id >= num_gpus_) return;
-    if (event.source == CuptiTracerEventSource::DriverCallback) {
-      if (num_callback_events_ > options_.max_callback_api_events) {
-        OnEventsDropped("trace collector", 1);
-        return;
-      }
-      num_callback_events_++;
-    } else {
-      if (num_activity_events_ > options_.max_activity_api_events) {
-        OnEventsDropped("trace collector", 1);
-        return;
-      }
-      num_activity_events_++;
-    }
-    per_device_adaptor_[event.device_id].AddEvent(std::move(event));
-  }
-  void OnEventsDropped(const std::string& reason, uint32 num_events) override {}
-  void Flush() override {
-    LOG(INFO) << " GpuTracer has collected " << num_callback_events_
-              << " callback api events and " << num_activity_events_
-              << " activity events.";
-    for (int i = 0; i < num_gpus_; ++i) {
-      per_device_adaptor_[i].Flush(trace_collector_, start_walltime_ns_,
-                                   start_gpu_ns_);
-    }
-  }
-
- private:
-  StepStatsCollector* trace_collector_;
-  std::atomic<int> num_callback_events_;
-  std::atomic<int> num_activity_events_;
-  uint64 start_walltime_ns_;
-  uint64 start_gpu_ns_;
-  int num_gpus_;
-
-  struct CorrelationInfo {
-    CorrelationInfo(uint32 t, uint32 e) : thread_id(t), enqueue_time_ns(e) {}
-    uint32 thread_id;
-    uint64 enqueue_time_ns;
-  };
-  struct PerDeviceAdaptor {
-    void AddEvent(CuptiTracerEvent&& event) {
-      absl::MutexLock lock(&mutex);
-      if (event.source == CuptiTracerEventSource::DriverCallback) {
-        // Cupti api callcack events were used to populate launch times etc.
-        if (event.name == "cuStreamSynchronize") {
-          events.emplace_back(std::move(event));
-        }
-        if (event.correlation_id != CuptiTracerEvent::kInvalidCorrelationId) {
-          correlation_info.insert(
-              {event.correlation_id,
-               CorrelationInfo(event.thread_id, event.start_time_ns)});
-        }
-      } else {
-        // Cupti activity events measure device times etc.
-        events.emplace_back(std::move(event));
-      }
-    }
-    void Flush(StepStatsCollector* collector, uint64 start_walltime_ns,
-               uint64 start_gpu_ns) {
-      absl::MutexLock lock(&mutex);
-      for (auto& event : events) {
-        NodeExecStats* ns = new NodeExecStats;
-        ns->set_all_start_micros(
-            (start_walltime_ns + (event.start_time_ns - start_gpu_ns)) / 1000);
-        ns->set_op_start_rel_micros(0);
-        auto elapsed_ns = event.end_time_ns - event.start_time_ns;
-        ns->set_op_end_rel_micros(elapsed_ns / 1000);
-        ns->set_all_end_rel_micros(elapsed_ns / 1000);
-
-        if (event.source == CuptiTracerEventSource::DriverCallback) {
-          DCHECK_EQ(event.name, "cuStreamSynchronize");
-          ns->set_node_name(event.name);
-          ns->set_timeline_label(absl::StrCat("ThreadId ", event.thread_id));
-          ns->set_thread_id(event.thread_id);
-          collector->Save(sync_device, ns);
-        } else {  // CuptiTracerEventSource::Activity
-          // Get launch information if available.
-          if (event.correlation_id != CuptiTracerEvent::kInvalidCorrelationId) {
-            auto it = correlation_info.find(event.correlation_id);
-            if (it != correlation_info.end()) {
-              ns->set_scheduled_micros(it->second.enqueue_time_ns / 1000);
-              ns->set_thread_id(it->second.thread_id);
-            }
-          }
-
-          auto annotation_stack = ParseAnnotationStack(event.annotation);
-          std::string kernel_name = port::MaybeAbiDemangle(event.name.c_str());
-          std::string activity_name =
-              !annotation_stack.empty()
-                  ? std::string(annotation_stack.back().name)
-                  : kernel_name;
-          ns->set_node_name(activity_name);
-          switch (event.type) {
-            case CuptiTracerEventType::Kernel: {
-              const std::string details = strings::Printf(
-                  "regs:%llu shm:%llu grid:%llu,%llu,%llu block:%llu,%llu,%llu",
-                  event.kernel_info.registers_per_thread,
-                  event.kernel_info.static_shared_memory_usage,
-                  event.kernel_info.grid_x, event.kernel_info.grid_y,
-                  event.kernel_info.grid_z, event.kernel_info.block_x,
-                  event.kernel_info.block_y, event.kernel_info.block_z);
-              ns->set_timeline_label(absl::StrCat(kernel_name, " ", details,
-                                                  "@@", event.annotation));
-              auto nscopy = new NodeExecStats(*ns);
-              collector->Save(absl::StrCat(stream_device, "all"), ns);
-              collector->Save(absl::StrCat(stream_device, event.stream_id),
-                              nscopy);
-              break;
-            }
-            case CuptiTracerEventType::MemcpyH2D:
-            case CuptiTracerEventType::MemcpyD2H:
-            case CuptiTracerEventType::MemcpyD2D:
-            case CuptiTracerEventType::MemcpyP2P: {
-              std::string details = absl::StrCat(
-                  activity_name, " bytes:", event.memcpy_info.num_bytes);
-              if (event.memcpy_info.async) {
-                absl::StrAppend(&details, " aync");
-              }
-              if (event.memcpy_info.destination != event.device_id) {
-                absl::StrAppend(&details,
-                                " to device:", event.memcpy_info.destination);
-              }
-              ns->set_timeline_label(std::move(details));
-              auto nscopy = new NodeExecStats(*ns);
-              collector->Save(memcpy_device, ns);
-              collector->Save(
-                  absl::StrCat(stream_device, event.stream_id, "<",
-                               GetTraceEventTypeName(event.type), ">"),
-                  nscopy);
-              break;
-            }
-            default:
-              ns->set_timeline_label(activity_name);
-              collector->Save(stream_device, ns);
-          }
-        }
-      }
-    }
-
-    absl::Mutex mutex;
-    std::string stream_device GUARDED_BY(mutex);
-    std::string memcpy_device GUARDED_BY(mutex);
-    std::string sync_device GUARDED_BY(mutex);
-    std::vector<CuptiTracerEvent> events GUARDED_BY(mutex);
-    absl::flat_hash_map<uint32, CorrelationInfo> correlation_info
-        GUARDED_BY(mutex);
-  };
-  absl::FixedArray<PerDeviceAdaptor> per_device_adaptor_;
-
-  TF_DISALLOW_COPY_AND_ASSIGN(StepStatsCuptiTracerAdaptor);
-};
-
 // GpuTracer for GPU.
 class GpuTracer : public profiler::ProfilerInterface {
  public:
   GpuTracer(CuptiTracer* cupti_tracer, CuptiInterface* cupti_interface)
-      : cupti_tracer_(cupti_tracer),
-        trace_collector_(&step_stats_) {
+      : cupti_tracer_(cupti_tracer) {
     VLOG(1) << "GpuTracer created.";
   }
   ~GpuTracer() override {}
@@ -234,9 +53,7 @@ class GpuTracer : public profiler::ProfilerInterface {
   Status Start() override;
   Status Stop() override;
   Status CollectData(RunMetadata* run_metadata) override;
-  profiler::DeviceType GetDeviceType() override {
-    return profiler::DeviceType::kGpu;
-  }
+  Status CollectData(XSpace* space) override;
 
  private:
   Status DoStart();
@@ -253,9 +70,7 @@ class GpuTracer : public profiler::ProfilerInterface {
 
   CuptiTracer* cupti_tracer_;
   CuptiTracerOptions options_;
-  StepStats step_stats_;
-  StepStatsCollector trace_collector_;
-  std::unique_ptr<StepStatsCuptiTracerAdaptor> step_stats_cupti_adaptor_;
+  std::unique_ptr<CuptiTraceCollector> cupti_collector_;
 };
 
 Status GpuTracer::DoStart() {
@@ -308,20 +123,22 @@ Status GpuTracer::DoStart() {
   options_.activities_selected.push_back(CUPTI_ACTIVITY_KIND_MEMCPY2);
   options_.activities_selected.push_back(CUPTI_ACTIVITY_KIND_OVERHEAD);
 
+// CUDA/CUPTI 10 have issues (leaks and crashes) with CuptiFinalize.
 #if CUDA_VERSION < 10000
   if (!trace_concurrent_kernels) options_.cupti_finalize = true;
+#elif CUDA_VERSION >= 11000
+  options_.cupti_finalize = true;
 #endif
 
   CuptiTracerCollectorOptions collector_options;
+  collector_options.num_gpus = cupti_tracer_->NumGpus();
   uint64 start_gputime_ns = CuptiTracer::GetTimestamp();
-  uint64 start_walltime_ns = tensorflow::EnvTime::Default()->NowNanos();
-  int num_gpus = cupti_tracer_->NumGpus();
-  step_stats_cupti_adaptor_ = absl::make_unique<StepStatsCuptiTracerAdaptor>(
-      collector_options, "", num_gpus, start_walltime_ns, start_gputime_ns,
-      &trace_collector_);
+  uint64 start_walltime_ns = tensorflow::EnvTime::NowNanos();
+  cupti_collector_ = CreateCuptiCollector(collector_options, start_walltime_ns,
+                                          start_gputime_ns);
 
-  tensorflow::tracing::ScopedAnnotation::Enable(true);
-  cupti_tracer_->Enable(options_, step_stats_cupti_adaptor_.get());
+  AnnotationStack::Enable(true);
+  cupti_tracer_->Enable(options_, cupti_collector_.get());
   return Status::OK();
 }
 
@@ -338,7 +155,7 @@ Status GpuTracer::Start() {
 
 Status GpuTracer::DoStop() {
   cupti_tracer_->Disable();
-  tensorflow::tracing::ScopedAnnotation::Enable(false);
+  AnnotationStack::Enable(false);
   return Status::OK();
 }
 
@@ -365,8 +182,11 @@ Status GpuTracer::CollectData(RunMetadata* run_metadata) {
       return Status::OK();
     case State::kStoppedOk: {
       // Input run_metadata is shared by profiler interfaces, we need append.
-      trace_collector_.Finalize();
-      for (auto& dev_stats : *step_stats_.mutable_dev_stats()) {
+      StepStats step_stats;
+      if (cupti_collector_) {
+        cupti_collector_->Export(&step_stats);
+      }
+      for (auto& dev_stats : *step_stats.mutable_dev_stats()) {
         run_metadata->mutable_step_stats()->add_dev_stats()->Swap(&dev_stats);
       }
       return Status::OK();
@@ -375,13 +195,45 @@ Status GpuTracer::CollectData(RunMetadata* run_metadata) {
   return errors::Internal("Invalid profiling state: ", profiling_state_);
 }
 
-}  // namespace profiler
+Status GpuTracer::CollectData(XSpace* space) {
+  VLOG(2) << "Collecting data to XSpace from GpuTracer.";
+  switch (profiling_state_) {
+    case State::kNotStarted:
+      VLOG(1) << "No trace data collected, session wasn't started";
+      return Status::OK();
+    case State::kStartedOk:
+      return errors::FailedPrecondition("Cannot collect trace before stopping");
+    case State::kStartedError:
+      LOG(ERROR) << "Cannot collect, profiler failed to start";
+      return Status::OK();
+    case State::kStoppedError:
+      VLOG(1) << "No trace data collected";
+      return Status::OK();
+    case State::kStoppedOk: {
+      std::string cupti_error = CuptiTracer::ErrorIfAny();
+      if (!cupti_error.empty()) {
+        space->add_errors(std::move(cupti_error));
+      }
+      std::string events_dropped = cupti_collector_->ReportNumEventsIfDropped();
+      if (!events_dropped.empty()) {
+        space->add_warnings(std::move(events_dropped));
+      }
+      if (cupti_collector_) {
+        uint64 end_gpu_ns = CuptiTracer::GetTimestamp();
+        cupti_collector_->Export(space, end_gpu_ns);
+      }
+      return Status::OK();
+    }
+  }
+  return errors::Internal("Invalid profiling state: ", profiling_state_);
+}
 
 // Not in anonymous namespace for testing purposes.
 std::unique_ptr<profiler::ProfilerInterface> CreateGpuTracer(
-    const profiler::ProfilerOptions& options) {
-  if (options.device_type != profiler::DeviceType::kGpu &&
-      options.device_type != profiler::DeviceType::kUnspecified)
+    const ProfileOptions& options) {
+  if (options.device_tracer_level() == 0) return nullptr;
+  if (options.device_type() != ProfileOptions::GPU &&
+      options.device_type() != ProfileOptions::UNSPECIFIED)
     return nullptr;
   profiler::CuptiTracer* cupti_tracer =
       profiler::CuptiTracer::GetCuptiTracerSingleton();
@@ -397,6 +249,7 @@ auto register_gpu_tracer_factory = [] {
   return 0;
 }();
 
+}  // namespace profiler
 }  // namespace tensorflow
 
 #endif  // GOOGLE_CUDA

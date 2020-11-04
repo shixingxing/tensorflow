@@ -22,7 +22,6 @@ import threading
 
 import numpy as np
 
-from tensorflow.python import keras
 from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.eager import backprop
 from tensorflow.python.eager import context
@@ -49,21 +48,26 @@ _ADD_OP = b"AddV2"
 _ASSIGN_ADD_VARIABLE_OP = b"AssignAddVariableOp"
 _CONSTANT_OP = b"Const"
 _COS_OP = b"Cos"
+_ENTER_OP = b"Enter"
+_EXIT_OP = b"Exit"
 _GREATER_OP = b"Greater"
 _IDENTITY_OP = b"Identity"
 _IF_OP = b"If"
 _LESS_OP = b"Less"
 _LOG_OP = b"Log"
+_MERGE_OP = b"Merge"
 _MATMUL_OP = b"MatMul"
 _MUL_OP = b"Mul"
+_NEXT_ITERATION_OP = b"NextIteration"
 _PLACEHOLDER_OP = b"Placeholder"
 _POW_OP = b"Pow"
-_READ_VARIALBE_OP = b"ReadVariableOp"
+_READ_VARIABLE_OP = b"ReadVariableOp"
 _SIN_OP = b"Sin"
 _SPARSE_TENSOR_DENSE_MATMUL_OP = b"SparseTensorDenseMatMul"
 _SQRT_OP = b"Sqrt"
 _SQUARE_OP = b"Square"
 _STATELESS_IF_OP = b"StatelessIf"
+_SWITCH_OP = b"Switch"
 _UNIQUE_OP = b"Unique"
 _VAR_HANDLE_OP = b"VarHandleOp"
 _WHILE_OP = b"While"
@@ -71,8 +75,9 @@ _WHILE_OP = b"While"
 
 class _NumpyFunctionCallback(object):
 
-  def __init__(self, instrument_graph_ops=True):
+  def __init__(self, instrument_graph_ops=True, float_only=False):
     self.instrument_graph_ops = instrument_graph_ops
+    self._float_only = float_only
     self.reset()
 
   def callback(self, op_type, inputs, attrs, outputs, op_name=None, graph=None):
@@ -101,16 +106,17 @@ class _NumpyFunctionCallback(object):
       # Instrument the graph with numpy_function.
       instrumented_outputs = []
       for output in outputs:
-        if compat.as_bytes(op_type) in (
-            _IF_OP, _STATELESS_IF_OP, _WHILE_OP, _IDENTITY_OP,
-            _VAR_HANDLE_OP):
+        if compat.as_bytes(op_type) in (_ENTER_OP, _EXIT_OP, _IF_OP, _MERGE_OP,
+                                        _NEXT_ITERATION_OP, _STATELESS_IF_OP,
+                                        _SWITCH_OP, _WHILE_OP, _IDENTITY_OP,
+                                        _VAR_HANDLE_OP, _PLACEHOLDER_OP,
+                                        _CONSTANT_OP):
           # TODO(cais): Overriding the output of StatelessIf, If and While ops
           # currently fails with error. Investigate (b/139668453).
           # Avoid instrumenting Identity ops as well, as they are inserted
           # by tf.function/AutoGraph for marshalling outputs.
           instrumented_output = output
         else:
-
           def record(ndarray_value):
             if compat.as_bytes(op_name) not in self.graph_internal_ndarrays:
               self.graph_internal_ndarrays[compat.as_bytes(op_name)] = []
@@ -118,9 +124,12 @@ class _NumpyFunctionCallback(object):
                 ndarray_value)
             return ndarray_value
 
-          instrumented_output = script_ops.numpy_function(
-              record, [output], output.dtype)
-          instrumented_output.set_shape(output.shape)
+          if self._float_only and not output.dtype.is_floating:
+            instrumented_output = output
+          else:
+            instrumented_output = script_ops.numpy_function(
+                record, [output], output.dtype)
+            instrumented_output.set_shape(output.shape)
         instrumented_outputs.append(instrumented_output)
 
       return instrumented_outputs
@@ -209,6 +218,7 @@ class OpCallbacksTest(test_util.TensorFlowTestCase):
 
     # Assert that there is no cross-talk between the main thread
     # and the created thread.
+    self.assertIn(_PLACEHOLDER_OP, instrument_1.graph_op_types)
     self.assertIn(_LOG_OP, instrument_1.graph_op_types)
     self.assertIn(_SQRT_OP, instrument_1.graph_op_types)
     self.assertNotIn(_SIN_OP, instrument_1.graph_op_types)
@@ -398,6 +408,30 @@ class OpCallbacksTest(test_util.TensorFlowTestCase):
     self.assertAllClose(log_op_outputs[0], [0.0, np.log(2.0)])
 
   @test_util.run_in_graph_and_eager_modes
+  def testPadOp(self):
+    instrument = _NumpyFunctionCallback()
+
+    op_callbacks.add_op_callback(instrument.callback)
+
+    @def_function.function
+    def my_pad(x, padding):
+      return array_ops.pad(x, padding)
+
+    x = constant_op.constant([[1, 2], [3, 4]], dtype=dtypes.float32)
+    paddings = [[1, 1], [2, 2]]
+
+    y = my_pad(x, paddings)
+    expected_output = np.array([
+        [0, 0, 0, 0, 0, 0],
+        [0, 0, 1, 2, 0, 0],
+        [0, 0, 3, 4, 0, 0],
+        [0, 0, 0, 0, 0, 0],
+    ], dtype=np.float32)
+    self.assertAllClose(y, expected_output)
+    self.assertAllClose(
+        instrument.graph_internal_ndarrays[b"Pad"][0], expected_output)
+
+  @test_util.run_in_graph_and_eager_modes
   def testSimpleGraphConstructionWithCallbackReturningNone(self):
     """Test that callbacks that return None works."""
     op_types = []
@@ -579,7 +613,10 @@ class OpCallbacksTest(test_util.TensorFlowTestCase):
     greater_op_outputs = instrument.graph_internal_ndarrays[_GREATER_OP]
     self.assertEqual(len(greater_op_outputs), 1)
     self.assertAllClose(greater_op_outputs[0], False)
-    pow_op_outputs = instrument.graph_internal_ndarrays[b"pow"]
+    # This was needed for backwards compatibility with TF2 Estimators which
+    # rely on variable names.
+    prefix = b"cond/" if context.executing_eagerly() else b""
+    pow_op_outputs = instrument.graph_internal_ndarrays[b"%spow" % prefix]
     self.assertEqual(len(pow_op_outputs), 1)
     self.assertAllClose(pow_op_outputs[0], -64.0)
 
@@ -607,9 +644,9 @@ class OpCallbacksTest(test_util.TensorFlowTestCase):
 
     # Check the graph internal ndarrays recorded at runtime.
     read_variable_op_outputs = instrument.graph_internal_ndarrays[
-        _READ_VARIALBE_OP]
+        b"while/" + _READ_VARIABLE_OP]
     self.assertAllClose(read_variable_op_outputs, [1.0, 2.0, 4.0, 8.0])
-    less_op_outputs = instrument.graph_internal_ndarrays[_LESS_OP]
+    less_op_outputs = instrument.graph_internal_ndarrays[b"while/" + _LESS_OP]
     self.assertAllClose(less_op_outputs, [True, True, True, True, False])
 
   # TODO(cais): The following isn't decorated with
@@ -687,8 +724,11 @@ class OpCallbacksTest(test_util.TensorFlowTestCase):
   @test_util.run_in_graph_and_eager_modes
   def testOverrideDTypeInFuncGraph(self):
     def to_float64(op_type, inputs, attrs, outputs, op_name=None, graph=None):
-      del op_type, inputs, attrs, op_name, graph  # Unused.
-      return [math_ops.cast(output, dtypes.float64) for output in outputs]
+      del inputs, attrs, op_name, graph  # Unused.
+      if op_type in ("Const", "Placeholder"):
+        return outputs
+      else:
+        return [math_ops.cast(output, dtypes.float64) for output in outputs]
 
     op_callbacks.add_op_callback(to_float64)
 
@@ -711,6 +751,17 @@ class OpCallbacksTest(test_util.TensorFlowTestCase):
     w = control_flow_ops.group([z])
     self.assertIsNone(w)
     self.assertEqual(instrument.eager_op_types, [_ADD_OP])
+
+  def testOpCallbackCapturesConstTensors(self):
+    instrument = _NumpyFunctionCallback()
+    op_callbacks.add_op_callback(instrument.callback)
+
+    @def_function.function
+    def times_two_plus_three(x):
+      return x * 2.0 + 3.0
+
+    self.assertAllClose(times_two_plus_three(constant_op.constant(10.0)), 23.0)
+    self.assertEqual(instrument.graph_op_types.count(b"Const"), 2)
 
   @test_util.run_in_graph_and_eager_modes
   def testOpCallbackWorksWithGradientTape(self):
@@ -738,40 +789,10 @@ class OpCallbacksTest(test_util.TensorFlowTestCase):
     self.assertIn(_COS_OP, instrument.graph_op_types)
 
     # Check the ndarrays from runtime.
-    cos_op_outputs = instrument.graph_internal_ndarrays[_COS_OP]
+    cos_op_outputs = instrument.graph_internal_ndarrays[b"gradient_tape/" +
+                                                        _COS_OP]
     self.assertEqual(len(cos_op_outputs), 1)
     self.assertAllClose(cos_op_outputs[0], np.cos(3.0 * 3.0))
-
-  @test_util.run_in_graph_and_eager_modes
-  def testKeraModelFit(self):
-    # TODO(cais): The purely PyFunc (numpy_function) based instrumentation
-    # doesn't work for the entire Keras model and its fit() call, due to some
-    # shape inference limitations. Use tfdbg's gen_debug_ops for testing
-    # instead (b/139668469).
-    instrument = _NumpyFunctionCallback(instrument_graph_ops=False)
-    op_callbacks.add_op_callback(instrument.callback)
-
-    model = keras.Sequential()
-    model.add(keras.layers.Dense(10, input_shape=(8,), activation="relu"))
-    model.add(keras.layers.BatchNormalization())
-    model.add(keras.layers.Dense(1, activation="linear"))
-    model.compile(loss="mse", optimizer="adam")
-
-    batch_size = 4
-    xs = np.ones([batch_size, 8])
-    ys = np.zeros([batch_size, 1])
-    history = model.fit(xs, ys, epochs=2, verbose=0)
-
-    # Simply assert that the training proceeded as expected and that
-    # op callbacks are invoked. We prefer not to assert on the details of the
-    # graph construction and the execution, in order to avoid future
-    # maintenance cost.
-    self.assertEqual(len(history.history["loss"]), 2)
-    self.assertTrue(instrument.graph_op_types)
-    self.assertEqual(len(instrument.graph_op_types),
-                     len(instrument.graph_op_names))
-    if context.executing_eagerly():
-      self.assertTrue(instrument.eager_op_types)
 
 
 class OpCallbacksErrorConditionsTest(test_util.TensorFlowTestCase):

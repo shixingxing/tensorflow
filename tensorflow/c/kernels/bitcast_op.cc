@@ -22,6 +22,7 @@ limitations under the License.
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/selective_registration.h"
 #include "tensorflow/core/framework/shape_inference.h"
+#include "tensorflow/core/platform/macros.h"
 
 // BitcastOp implements a bitcast kernel, creating an output tensor that shares
 // the same data buffer as the input but with a different shape and/or data
@@ -147,7 +148,7 @@ void RegisterBitcastOpKernel() {
         << "Error while registering bitcast kernel";
   }
 
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
   {
     auto* builder = TF_NewKernelBuilder("Bitcast", tensorflow::DEVICE_GPU,
                                         &BitcastOp_Create, &BitcastOp_Compute,
@@ -163,7 +164,7 @@ void RegisterBitcastOpKernel() {
 
 // A dummy static variable initialized by a lambda whose side-effect is to
 // register the bitcast kernel.
-static bool IsBitcastOpKernelRegistered = []() {
+TF_ATTRIBUTE_UNUSED static bool IsBitcastOpKernelRegistered = []() {
   if (SHOULD_REGISTER_OP_KERNEL("BitcastOp")) {
     RegisterBitcastOpKernel();
   }

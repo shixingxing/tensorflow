@@ -15,7 +15,7 @@ limitations under the License.
 #include "tensorflow/core/framework/common_shape_fns.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/shape_inference.h"
-#include "tensorflow/core/ops/ragged_to_dense_util.h"
+#include "tensorflow/core/util/ragged_to_dense_util.h"
 
 namespace tensorflow {
 
@@ -92,7 +92,8 @@ tensorflow::Status ValidateRowPartitionTypesAndShapes(
 Status RaggedTensorToSparseShapeFn(InferenceContext* c);
 Status RaggedTensorToVariantShapeFn(InferenceContext* c);
 Status RaggedTensorFromVariantShapeFn(InferenceContext* c);
-tensorflow::Status RaggedTensorToTensorShapeFn(InferenceContext* c);
+Status RaggedTensorToVariantGradientShapeFn(InferenceContext* c);
+Status RaggedTensorToTensorShapeFn(InferenceContext* c);
 
 //==============================================================================
 // Registered Ops
@@ -113,9 +114,9 @@ REGISTER_OP("RaggedTensorToVariant")
     .Input("rt_nested_splits: RAGGED_RANK * Tsplits")
     .Input("rt_dense_values: Tvalues")
     .Output("encoded_ragged: variant")
-    .Attr("RAGGED_RANK: int >= 1")
+    .Attr("RAGGED_RANK: int >= 0")
     .Attr("Tvalues: type")
-    .Attr("Tsplits: {int32, int64}")
+    .Attr("Tsplits: {int32, int64} = DT_INT64")
     .Attr("batched_input: bool")
     .SetShapeFn(RaggedTensorToVariantShapeFn);
 
@@ -124,10 +125,19 @@ REGISTER_OP("RaggedTensorFromVariant")
     .Output("output_nested_splits: output_ragged_rank * Tsplits")
     .Output("output_dense_values: Tvalues")
     .Attr("input_ragged_rank: int >= -1")
-    .Attr("output_ragged_rank: int >= 1")
+    .Attr("output_ragged_rank: int >= 0")
     .Attr("Tvalues: type")
-    .Attr("Tsplits: {int32, int64}")
+    .Attr("Tsplits: {int32, int64} = DT_INT64")
     .SetShapeFn(RaggedTensorFromVariantShapeFn);
+
+REGISTER_OP("RaggedTensorToVariantGradient")
+    .Input("encoded_ragged_grad: variant")
+    .Input("row_splits: Tsplits")
+    .Input("dense_values_shape: int32")
+    .Output("dense_values_grad: Tvalues")
+    .Attr("Tvalues: type")
+    .Attr("Tsplits: {int32, int64} = DT_INT64")
+    .SetShapeFn(RaggedTensorToVariantGradientShapeFn);
 
 REGISTER_OP("RaggedTensorToTensor")
     .Attr("T: type")
@@ -194,6 +204,18 @@ Status RaggedTensorToVariantShapeFn(InferenceContext* c) {
   } else {
     c->set_output(0, c->Scalar());
   }
+  if (batched && num_splits == 0) {
+    return errors::InvalidArgument(
+        "ragged_rank=0 is not currently supported when batched_input=true.");
+  }
+  return Status::OK();
+}
+
+Status RaggedTensorToVariantGradientShapeFn(InferenceContext* c) {
+  ShapeHandle shape;
+  TF_RETURN_IF_ERROR(
+      c->MakeShapeFromShapeTensorTreatScalarAsUnknownShape(2, &shape));
+  c->set_output(0, shape);
   return Status::OK();
 }
 
