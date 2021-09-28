@@ -80,6 +80,12 @@ TfLiteStatus copyToTensor(TfLiteContext* context, const FromT* in,
     case kTfLiteInt32:
       copyCast(in, out->data.i32, num_elements);
       break;
+    case kTfLiteUInt32:
+      copyCast(in, out->data.u32, num_elements);
+      break;
+    case kTfLiteInt16:
+      copyCast(in, out->data.i16, num_elements);
+      break;
     case kTfLiteUInt8:
       copyCast(in, out->data.uint8, num_elements);
       break;
@@ -113,6 +119,10 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
       return copyToTensor(context, input->data.i64, output, num_elements);
     case kTfLiteInt32:
       return copyToTensor(context, input->data.i32, output, num_elements);
+    case kTfLiteUInt32:
+      return copyToTensor(context, input->data.u32, output, num_elements);
+    case kTfLiteInt16:
+      return copyToTensor(context, input->data.i16, output, num_elements);
     case kTfLiteUInt8:
       return copyToTensor(context, input->data.uint8, output, num_elements);
     case kTfLiteFloat32:
@@ -128,7 +138,6 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
       // Unsupported type.
       TF_LITE_UNSUPPORTED_TYPE(context, input->type, "Cast");
   }
-  return kTfLiteOk;
 }
 }  // namespace cast
 

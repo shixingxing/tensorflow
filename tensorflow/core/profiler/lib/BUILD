@@ -1,6 +1,6 @@
 load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 load("//tensorflow/core/platform:build_config_root.bzl", "if_static")
-load("//tensorflow:tensorflow.bzl", "if_not_android", "tf_cc_test", "tf_cuda_library")
+load("//tensorflow:tensorflow.bzl", "if_libtpu", "if_not_android", "tf_cc_test", "tf_cuda_library")
 load("//tensorflow:tensorflow.bzl", "filegroup")
 load(
     "//tensorflow/core/profiler/builds:build_config.bzl",
@@ -13,7 +13,22 @@ package(
         "//tensorflow:internal",
         "//tensorflow_models:__subpackages__",
     ],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
+)
+
+cc_library(
+    name = "device_profiler_session",
+    hdrs = ["device_profiler_session.h"],
+    visibility = ["//tensorflow:internal"],
+    deps = [
+        "//tensorflow/core:lib",
+        "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core/platform",
+        "//tensorflow/core/profiler:profiler_options_proto_cc",
+    ] + if_not_android([
+        ":profiler_session",
+        "//tensorflow/core/profiler/convert:xplane_to_step_stats",
+    ]),
 )
 
 tf_profiler_pybind_cc_library_wrapper(
@@ -31,7 +46,6 @@ cc_library(
         "//tensorflow/core/profiler/protobuf:xplane_proto_cc",
         "//tensorflow/core/profiler:profiler_options_proto_cc",
         "//tensorflow/core:lib",
-        "//tensorflow/core:protos_all_cc",
     ] + if_static([
         ":profiler_session_impl",
     ]),
@@ -55,16 +69,12 @@ cc_library(
         "//tensorflow/core/profiler/protobuf:xplane_proto_cc",
         "//tensorflow/core/profiler:profiler_options_proto_cc",
         "@com_google_absl//absl/memory",
-        "@com_google_absl//absl/time",
         "//tensorflow/core:protos_all_cc",
     ] + if_not_android([
+        ":profiler_factory",
         ":profiler_lock",
         "//tensorflow/core/profiler/convert:post_process_single_host_xplane",
-        "//tensorflow/core/profiler/lib:profiler_factory",
-        "//tensorflow/core/profiler/utils:derived_timeline",
-        "//tensorflow/core/profiler/utils:group_events",
-        "//tensorflow/core/profiler/utils:xplane_utils",
-        "//tensorflow/core/profiler/utils:xplane_schema",
+        "//tensorflow/core/profiler/utils:time_utils",
     ]),
     alwayslink = True,
 )
@@ -98,6 +108,21 @@ cc_library(
     alwayslink = True,
 )
 
+tf_cc_test(
+    name = "profiler_factory_test",
+    srcs = ["profiler_factory_test.cc"],
+    deps = [
+        ":profiler_factory",
+        ":profiler_interface",
+        "//tensorflow/core:lib",
+        "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core:test",
+        "//tensorflow/core:test_main",
+        "//tensorflow/core/profiler/protobuf:xplane_proto_cc",
+        "@com_google_absl//absl/memory",
+    ],
+)
+
 cc_library(
     name = "profiler_interface",
     hdrs = ["profiler_interface.h"],
@@ -124,7 +149,7 @@ tf_cuda_library(
     visibility = ["//tensorflow:internal"],
     deps = [
         "//tensorflow/core/profiler/internal/cpu:host_tracer",
-    ],
+    ] + if_libtpu(["//tensorflow/core/profiler/internal/tpu:tpu_tracer"]),
     alwayslink = True,
 )
 
@@ -145,6 +170,7 @@ cc_library(
         "//tensorflow/core/platform",
     ] + if_not_android([
         "//tensorflow/core/profiler/internal/cpu:traceme_recorder",
+        "//tensorflow/core/profiler/utils:time_utils",
     ]),
 )
 
@@ -197,6 +223,15 @@ cc_library(
 )
 
 cc_library(
+    name = "scoped_memory_debug_annotation",
+    srcs = ["scoped_memory_debug_annotation.cc"],
+    hdrs = ["scoped_memory_debug_annotation.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+    ],
+)
+
+cc_library(
     name = "scoped_annotation",
     hdrs = ["scoped_annotation.h"],
     visibility = ["//visibility:public"],
@@ -230,19 +265,31 @@ cc_library(
     hdrs = ["profiler_lock.h"],
     copts = tf_profiler_copts(),
     visibility = ["//tensorflow/core/profiler:internal"],
+    deps = [
+        "//tensorflow/core:lib",
+        "//tensorflow/core:lib_internal",
+    ],
 )
 
 filegroup(
-    name = "mobile_srcs",
+    name = "mobile_srcs_no_runtime",
+    srcs = [
+        "scoped_annotation.h",
+        "scoped_memory_debug_annotation.cc",
+        "scoped_memory_debug_annotation.h",
+        "traceme.h",
+        "traceme_encode.h",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "mobile_srcs_only_runtime",
     srcs = [
         "annotated_traceme.h",
         "connected_traceme.h",
+        "device_profiler_session.h",
         "profiler_interface.h",
-        "profiler_session.cc",
-        "profiler_session.h",
-        "scoped_annotation.h",
-        "traceme.h",
-        "traceme_encode.h",
     ],
     visibility = ["//visibility:public"],
 )

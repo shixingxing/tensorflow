@@ -180,7 +180,7 @@ class NcclManagerTest : public ::testing::Test {
           return static_cast<Scalar>((index + 1) * value_scale);
         });
         // Starting index for this rank's tensor in the all-gathered output.
-        int32 gather_idx =
+        int32_t gather_idx =
             (node * num_ranks_per_node + i) * in_shape.num_elements();
         for (int j = 0; j < in_shape.num_elements(); ++j) {
           auto in_val = in_cpu.flat<Scalar>()(j);
@@ -504,7 +504,7 @@ TYPED_TEST(NcclManagerTest, MultipleCallers) {
   const int num_collectives_per_iteration = 10;
   const int time_limit_micros = 1 * 1000 * 1000;  // 1 second
 
-  int64 start = Env::Default()->NowMicros();
+  int64_t start = Env::Default()->NowMicros();
   srand(Env::Default()->NowMicros());
 
   for (;;) {
@@ -565,7 +565,7 @@ TYPED_TEST(NcclManagerTest, MultipleCallers) {
       this->VerifyResults(test_cases[i].get());
     }
 
-    int64 delta = Env::Default()->NowMicros() - start;
+    int64_t delta = Env::Default()->NowMicros() - start;
     if (delta > time_limit_micros) {
       LOG(INFO) << "Ran for " << delta << " microsecs, now quitting";
       break;
@@ -639,7 +639,7 @@ TEST(NcclManagerTest, CommunicatorKey) {
 }
 
 #if !TENSORFLOW_USE_ROCM
-// ROCm platform currently does not support simulating a mutli-node
+// ROCm platform currently does not support simulating a multi-node
 // environment, on a single node with multiple GPUS. So tests that rely
 // upon such simulation need to be skipped on the ROCm platform
 
@@ -664,7 +664,7 @@ TYPED_TEST(NcclManagerTest, MultiNodeSingle) {
 }
 
 #if !TENSORFLOW_USE_ROCM
-// ROCm platform currently does not support simulating a mutli-node
+// ROCm platform currently does not support simulating a multi-node
 // environment, on a single node with multiple GPUS. So tests that rely
 // upon such simulation need to be skipped on the ROCm platform
 
@@ -858,7 +858,7 @@ TYPED_TEST(NcclManagerTest, BroadcastInconsistentSource) {
 }
 
 #if !TENSORFLOW_USE_ROCM
-// ROCm platform currently does not support simulating a mutli-node
+// ROCm platform currently does not support simulating a multi-node
 // environment, on a single node with multiple GPUS. So tests that rely
 // upon such simulation need to be skipped on the ROCm platform
 
@@ -867,7 +867,7 @@ TYPED_TEST(NcclManagerTest, AbortThenReset) {
   using TestCase = typename TestFixture::TestCase;
   const int num_nodes = 2;
   std::vector<NodeState> nodes(num_nodes);
-  // First do a normal all-reduce to simulate the the case when there're
+  // First do a normal all-reduce to simulate the case when there're
   // multiple communicators.
   this->RunMultiNodeAllReduceTest(nodes, /* num_ranks_per_node */ 1);
 

@@ -3,7 +3,6 @@ syntax = "proto3";
 package tensorflow.tpu;
 
 import "tensorflow/core/protobuf/tpu/optimization_parameters.proto";
-import "tensorflow/core/protobuf/tpu/tpu_embedding_output_layout.proto";
 
 message TPUEmbeddingConfiguration {
   // Description of the various embedding tables.
@@ -11,7 +10,7 @@ message TPUEmbeddingConfiguration {
     // Name of the table.
     string name = 1;
     // Size of the vocabulary (i.e., number of rows) in the table.
-    int32 vocabulary_size = 2;
+    int64 vocabulary_size = 2;
     // The embedding dimension (i.e., the width of the embedding table).
     int32 dimension = 3;
     // Number of features mapped to this table.
@@ -104,6 +103,7 @@ message TPUEmbeddingConfiguration {
   // models to reuse embedding lookup statistics.
   string profile_data_directory = 9;
 
-  // Extended output layout information; deprecated and now ignored.
-  TPUEmbeddingOutputLayout output_layout = 8 [deprecated = true];
+  // Old TPU embedding output layout.
+  reserved "output_layout";
+  reserved 8;
 }

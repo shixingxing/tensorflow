@@ -21,6 +21,8 @@ from __future__ import print_function
 import argparse
 import sys
 
+from absl import app
+
 from google.protobuf import message
 from google.protobuf import text_format
 from tensorflow.contrib.fused_conv.ops import gen_fused_conv2d_bias_activation_op  # pylint: disable=unused-import
@@ -32,7 +34,6 @@ from tensorflow.python.framework import importer
 from tensorflow.python.framework import ops
 from tensorflow.python.grappler import cost_analyzer
 from tensorflow.python.grappler import tf_optimizer
-from tensorflow.python.platform import app
 from tensorflow.python.platform import gfile
 from tensorflow.python.training import saver
 
@@ -64,7 +65,7 @@ def get_metagraph():
               try:
                 graph_def.ParseFromString(input_data)
               except message.DecodeError:
-                raise ValueError("Invalid input file.")
+                raise ValueError(f"Invalid input file: {FLAGS.input}.")
             importer.import_graph_def(graph_def, name="")
             graph = ops.get_default_graph()
             meta_graph = saver.export_meta_graph(

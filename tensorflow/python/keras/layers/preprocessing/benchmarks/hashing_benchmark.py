@@ -13,16 +13,12 @@
 # limitations under the License.
 # ==============================================================================
 """Benchmark for Keras hashing preprocessing layer."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 
 import itertools
 import random
 import string
 import time
 
-from absl import flags
 import numpy as np
 
 from tensorflow.python import keras
@@ -34,8 +30,6 @@ from tensorflow.python.keras.layers.preprocessing import hashing
 from tensorflow.python.ops import string_ops
 from tensorflow.python.platform import benchmark
 from tensorflow.python.platform import test
-
-FLAGS = flags.FLAGS
 
 v2_compat.enable_v2_behavior()
 

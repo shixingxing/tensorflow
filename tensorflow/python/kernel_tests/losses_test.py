@@ -488,7 +488,9 @@ class SparseSoftmaxCrossEntropyLossTest(test.TestCase):
       labels = constant_op.constant([[0, 1], [2, 3]])
       weights = constant_op.constant(1.2)
 
-      with self.assertRaisesRegex(ValueError, 'mismatch'):
+      with self.assertRaisesRegex(
+          ValueError,
+          '`labels.shape.rank` must equal `logits.shape.rank - 1`'):
         losses.sparse_softmax_cross_entropy(
             labels, logits, weights=weights).eval()
 
@@ -1010,7 +1012,7 @@ class MeanPairwiseSquaredErrorTest(test.TestCase):
     self._predictions = np.array([[4, 8, 12], [8, 1, 3]])
     self._labels = np.array([[1, 9, 2], [-5, -5, 7]])
 
-    batch_size, dims = self._labels.shape
+    batch_size, dims = self._labels.shape  # pylint: disable=unpacking-non-sequence
 
     # Compute the expected loss 'manually'.
     total = np.zeros((batch_size,))

@@ -77,10 +77,11 @@ def _ConcatGradHelper(op, grad, start_value_index, end_value_index, dim_index):
     # with 0's everywhere and 1 in the concat dim position.
     # Note: Can't use sparse_to_dense since it isn't GPU-capable (for now)
     mask = array_ops.concat([
-        array_ops.fill(array_ops.expand_dims(concat_dim, 0), 0), [1],
-        array_ops.fill(shape_of_shape - concat_dim - 1, 0)
+        array_ops.zeros(
+            array_ops.expand_dims(concat_dim, 0), dtype=dtypes.int32), [1],
+        array_ops.zeros(shape_of_shape - concat_dim - 1, dtype=dtypes.int32)
     ], 0)
-    begin = array_ops.fill(shape_of_shape, 0)
+    begin = array_ops.zeros(shape_of_shape, dtype=dtypes.int32)
     return mask, begin
 
   def _ExtractInputShapes(inputs):
@@ -568,15 +569,9 @@ def _IndexedSlicesToTensorNoWarning(indexed_slices):
 def _GatherGrad(op, grad):
   """Gradient for Gather op."""
   # params can be large, so colocate the shape calculation with it.
-  #
-  # params can be very large for sparse model, array_ops.shape raises
-  # exception on the Windows platform when any dimension is larger than
-  # int32. params_shape is not used in optimizer apply_sparse gradients,
-  # so it's fine to convert it back to int32 regardless of truncation.
   params = op.inputs[0]
   with ops.colocate_with(params):
-    params_shape = array_ops.shape(params, out_type=ops.dtypes.int64)
-    params_shape = math_ops.cast(params_shape, dtypes.int32)
+    params_shape = array_ops.shape(params)
 
   # Build appropriately shaped IndexedSlices
   indices = op.inputs[1]
@@ -591,7 +586,6 @@ def _GatherGrad(op, grad):
 def _GetBatchIndices(params_shape, indices, batch_dims):
   """Addds the batch offsets to the given indices and returns the results."""
   batch_indices = indices
-  indices_ndims = indices.shape.ndims
   indices_dtype = indices.dtype.base_dtype
   casted_params_shape = math_ops.cast(params_shape, indices_dtype)
   accum_dim_value = array_ops.ones((), dtype=indices_dtype)
@@ -602,8 +596,10 @@ def _GetBatchIndices(params_shape, indices, batch_dims):
     step = array_ops.ones((), dtype=indices_dtype)
     dim_indices = math_ops.range(start, dim_value, step)
     dim_indices *= accum_dim_value
-    dim_shape = array_ops.stack(
-        [1] * (dim - 1) + [dim_value] + [1] * (indices_ndims - dim), axis=0)
+    dim_shape = array_ops.concat([
+        array_ops.tile([1], [dim - 1]), [dim_value],
+        array_ops.tile([1], [array_ops.rank(indices) - dim])
+    ], axis=0)
     batch_indices += array_ops.reshape(dim_indices, dim_shape)
 
   return batch_indices
@@ -660,6 +656,13 @@ def _GatherV2Grad(op, grad):
   batch_dims = int(op.get_attr("batch_dims"))
 
   if batch_dims < 0:
+    if indices.shape.ndims is None:
+      raise ValueError(
+          f"Currently, it is unsupported to take the gradient of tf.gather "
+          f"when batch_dims < 0 and the rank of the indices is unknown. Please "
+          f"pass a positive batch_dims or use tf.ensure_shape to update the "
+          f"shape of indices when calling tf.gather. Got "
+          f"batch_dims={batch_dims} and indices={indices}")
     batch_dims += indices.shape.ndims
 
   # For axis 0 gathers, build an appropriately shaped IndexedSlices.
@@ -697,9 +700,10 @@ def _GatherV2Grad(op, grad):
         inner_axes_indices
     ], 0)
     values_transpose = array_ops.transpose(values, transpose_dims)
+    params_shape_transpose = array_ops.gather(params_shape, transpose_dims)
 
-    params_grad = _BatchGatherGrad(params_shape, values_transpose, indices,
-                                   batch_dims, params_shape[axis])
+    params_grad = _BatchGatherGrad(params_shape_transpose, values_transpose,
+                                   indices, batch_dims, params_shape[axis])
 
     # Inverts the above transpose by moving dimension batch_dims back to its
     # original position.
@@ -760,6 +764,12 @@ def _CheckNumericsV2Grad(op, grad):
 @ops.RegisterGradient("Identity")
 def _IdGrad(_, grad):
   return grad
+
+
+@ops.RegisterGradient("_EagerConst")
+def _EagerConstGrad(_, grad):
+  raise AssertionError(
+      "This op should never interact with gradient APIs. Please file a bug.")
 
 
 @ops.RegisterGradient("RefIdentity")

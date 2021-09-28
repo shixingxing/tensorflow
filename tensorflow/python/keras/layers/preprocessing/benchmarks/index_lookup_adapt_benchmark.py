@@ -13,9 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 """Benchmark for Keras text vectorization preprocessing layer's adapt method."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 
 import collections
 import itertools
@@ -23,7 +20,6 @@ import random
 import string
 import time
 
-from absl import flags
 import numpy as np
 
 from tensorflow.python import keras
@@ -34,8 +30,6 @@ from tensorflow.python.framework import tensor_shape
 from tensorflow.python.keras.layers.preprocessing import index_lookup
 from tensorflow.python.platform import benchmark
 from tensorflow.python.platform import test
-
-FLAGS = flags.FLAGS
 
 v2_compat.enable_v2_behavior()
 

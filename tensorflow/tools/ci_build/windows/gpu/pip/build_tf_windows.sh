@@ -106,7 +106,7 @@ if [[ "$RELEASE_BUILD" == 1 ]]; then
   # Because this hurts the performance of TF, we don't override it in release build.
   export TF_OVERRIDE_EIGEN_STRONG_INLINE=0
 else
-  export TF_OVERRIDE_EIGEN_STRONG_INLINE=0
+  export TF_OVERRIDE_EIGEN_STRONG_INLINE=1
 fi
 
 if [[ "$TF_NIGHTLY" == 1 ]]; then
@@ -176,7 +176,7 @@ bazel test --announce_rc --config=opt -k --test_output=errors \
   --local_test_jobs=$TF_GPU_COUNT --test_timeout="300,450,1200,3600" \
   --flaky_test_attempts=3 \
   --output_filter=^$ \
-  -- ${TEST_TARGET} -//${PY_TEST_DIR}/tensorflow/python:timeline_test_gpu
+  -- ${TEST_TARGET} -//${PY_TEST_DIR}/tensorflow/python/client:timeline_test_gpu
 # TODO(b/140106487): apply https://developer.nvidia.com/ERR_NVGPUCTRPERM to the
 # Kokoro machines and enable timeline_test_gpu again.
 

@@ -56,13 +56,23 @@ LogisticOpTest/LogisticOpTest/Sigmoid(.+nt8)?/\d+
 LogisticOpTest/LogisticOpTest/Sigmoid/\d+
 TanhOpTest/TanhOpTest/Tanh(.+nt8)?/\d+,29
 FloatActivationsOpTest/Elu,30
+FloatActivationsOpTest/Relu
+FloatActivationsOpTest/Relu1
+FloatActivationsOpTest/Relu6
 FloatActivationsOpTest/HardSwish
+FloatActivationsOpTest/LeakyRelu,29
 QuantizedActivationsOpTest/HardSwish
 QuantizedActivationsOpTest/HardSwishBias
+-QuantizedActivationsOpTest/Relu.?Int16
+QuantizedActivationsOpTest/Relu.*
+-QuantizedActivationsOpTest/LeakyReluInt16,30
+QuantizedActivationsOpTest/LeakyRelu.*,30
 QuantizedActivationsOpTest/Relu.+nt8
 QuantizedActivationsOpTest/PRelu,29
 QuantizedActivationsOpTest/PReluSameShapes,29
 QuantizedActivationsOpTest/PReluInt8.+,30
+PReluOpTest/.*,29
+
 
 # add_test
 FloatAddOpModel/.+
@@ -160,7 +170,7 @@ DepthToSpaceOpModel/int8
 FloatDivOpTest/.+
 
 # elementwise_test
-ElementWise/Abs
+ElementWise/Abs,29
 ElementWise/Sin,29
 ElementWise/Log,29
 ElementWise/Sqrt,29
@@ -199,6 +209,7 @@ FloatFullyConnectedOpTest/FloatFullyConnectedOpTest/SimpleTest4DInput/\d+
 QuantizedFullyConnectedOpTest/QuantizedFullyConnectedOpTest/SimpleTest4dInputQuantizedUint8/\d+
 QuantizedFullyConnectedOpTest/QuantizedFullyConnectedOpTest/SimpleTest4dInputQuantizedOutputMultiplierGreaterThan1Uint8/\d+,29
 FloatFullyConnectedOpTest/FloatFullyConnectedOpTest/BlackBoxTest/\d+
+FloatFullyConnectedOpTest/SimpleTestNoBias
 
 # gather_test
 GatherOpTest/Shuffle,29
@@ -307,7 +318,8 @@ PowOpModel/.+,29
 QuantizedLstmTest/BasicQuantizedLstmTest/29
 
 # quantized_lstm op test
-IntegerLstmOpTest/NoCifg_NoPeephole_Projection_LayerNorm,30
+# Temporary disabled due to b/188515203
+//IntegerLstmOpTest/NoCifg_NoPeephole_Projection_LayerNorm,30
 
 # quantize_test
 QuantizeOpTest/UINT8,29
@@ -319,14 +331,15 @@ QuantizeOpTest/INT8,30
 
 # reduce_test
 -Dynamic.+(Mean|Sum|Prod|Max|Min)OpTest/.+
--ConstUint8(Mean|Sum)OpTest/.+
--ConstInt8MeanOpTest.NonSpecialAxisNonSameScale
--ConstInt8MeanOpTest.QuantizedDifferentScale
+-ConstUint8SumOpTest/.+
 ConstUint8(Max|Min)OpTest/.+,29
-ConstUint8(Mean)OpTest/.+
+ConstUint8(Mean)OpTest/.+,29
 -ConstInt8(Max|Min)OpTest/.+,29
--ConstMeanOpTest.*/.+
--MeanOpTestQuantized.*/.+
+ConstInt8MeanOpTest/.+,29
+-ConstMeanOpTest.*/.+Int16
+ConstMeanOpTest.*/.+,29
+-MeanOpTestQuantized.*/.+Int16
+MeanOpTestQuantized.*/.+,29
 ConstFloat(Sum|Prod|Max|Min)OpTest/NotKeepDims,29
 ConstFloat(Sum|Prod|Max|Min)OpTest/KeepDims,29
 ConstFloat(Mean|Any)OpTest/NotKeepDims
@@ -334,10 +347,11 @@ ConstFloat(Mean|Any)OpTest/KeepDims
 ConstFloat(Sum|Prod|Max|Min)OpTest/ScalarAxis,29
 
 # reshape_test
-# Acceleration would be only for the test with shape being a constant tensor
-VariedShapeSpec/ReshapeOpTest/InvalidShape/1
-VariedShapeSpec/ReshapeOpTest/RegularShapes/1
-VariedShapeSpec/ReshapeOpTest/WithStretchDimension/1
+# Acceleration would be only for the test with shape being a constant tensor or
+# as hardcoded options.
+VariedShapeSpec/ReshapeOpTest/InvalidShape/[01]
+VariedShapeSpec/ReshapeOpTest/RegularShapes/[01]
+VariedShapeSpec/ReshapeOpTest/WithStretchDimension/[01]
 
 # resize_bilinear_test
 // align_corners & half_pixel_centers are not implemented in NNAPI before API 30
@@ -384,6 +398,18 @@ SpaceToDepthOpModel/int8
 # Only accelerated when axis is a constant tensor
 SplitOpTest/SplitOpTest/.+/0,29
 
+# split_v_test
+# NNAPI does not support int16
+-SplitVOpTypedTest/3/.+
+# NNAPI does not support zero-sized slice
+-SplitVOpTypedTest/.+OneDimensional2
+# Only accelerated when both split_sizes and axis are constant
+SplitVOpTypedTest/.+/ConstSplits.+,30
+
+# squared_difference_test
+FloatSquaredDifferenceOpTest/.+,28
+(Integer|Quantized)SquaredDifferenceOpTest/.+,30
+
 # squeeze_test
 FloatSqueezeOpTest/.+,29
 
@@ -420,9 +446,8 @@ TopKV2OpTest/TopKV2OpTest/.+/0,29
 TransposeTest/.+
 
 # transpose_conv_test
--TransposeConvOpTest/TransposeConvOpTest.SimpleTestQuantizedPerChannelSingleChannel/0
--TransposeConvOpTest/TransposeConvOpTest.SimpleTestQuantizedPerChannel16x8/0
--TransposeConvOpTest/TransposeConvOpTest.TestQuantizedPerChannelMultiChannel/0
+-TransposeConvOpTest/TransposeConvOpTest.SimpleTestQuantizedPerChannel16x8/.+
+TransposeConvOpTest/TransposeConvOpTest..*Bias.*/0,29
 # Const tensor only
 TransposeConvOpTest/TransposeConvOpTest/.+/0,29
 

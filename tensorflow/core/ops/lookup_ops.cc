@@ -309,7 +309,9 @@ REGISTER_OP("LookupTableImportV2")
 
       ShapeHandle keys;
       TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 1, &keys));
-      TF_RETURN_IF_ERROR(c->Merge(keys, c->input(2), &keys));
+      DimensionHandle unused;
+      TF_RETURN_IF_ERROR(
+          c->Merge(c->Dim(keys, 0), c->Dim(c->input(2), 0), &unused));
       return Status::OK();
     });
 
@@ -348,6 +350,13 @@ REGISTER_OP("HashTableV2")
     .Attr("container: string = ''")
     .Attr("shared_name: string = ''")
     .Attr("use_node_name_sharing: bool = false")
+    .Attr("key_dtype: type")
+    .Attr("value_dtype: type")
+    .SetIsStateful()
+    .SetShapeFn(ScalarOutput);
+
+REGISTER_OP("AnonymousHashTable")
+    .Output("table_handle: resource")
     .Attr("key_dtype: type")
     .Attr("value_dtype: type")
     .SetIsStateful()
@@ -480,6 +489,7 @@ REGISTER_OP("InitializeTableFromTextFile")
     .Attr("value_index: int >= -2")
     .Attr("vocab_size: int >= -1 = -1")
     .Attr("delimiter: string = '\t'")
+    .Attr("offset: int = 0")
     .SetShapeFn([](InferenceContext* c) {
       ShapeHandle handle;
       TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 1, &handle));
@@ -497,20 +507,11 @@ REGISTER_OP("InitializeTableFromTextFileV2")
     .Attr("value_index: int >= -2")
     .Attr("vocab_size: int >= -1 = -1")
     .Attr("delimiter: string = '\t'")
+    .Attr("offset: int = 0")
     .SetShapeFn([](InferenceContext* c) {
       ShapeHandle handle;
       TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 0, &handle));
 
-      TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 0, &handle));
-      return Status::OK();
-    });
-
-REGISTER_OP("InitializeTableFromDataset")
-    .Input("table_handle: resource")
-    .Input("dataset: variant")
-    .SetShapeFn([](InferenceContext* c) {
-      ShapeHandle handle;
-      TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 0, &handle));
       TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 0, &handle));
       return Status::OK();
     });

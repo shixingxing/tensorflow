@@ -20,10 +20,10 @@ limitations under the License.
 #include "mlir/Dialect/StandardOps/IR/Ops.h"  // from @llvm-project
 #include "mlir/IR/Attributes.h"  // from @llvm-project
 #include "mlir/IR/Builders.h"  // from @llvm-project
-#include "mlir/IR/StandardTypes.h"  // from @llvm-project
+#include "mlir/IR/BuiltinTypes.h"  // from @llvm-project
 #include "mlir/Pass/Pass.h"  // from @llvm-project
 #include "tensorflow/compiler/mlir/lite/ir/tfl_ops.h"
-#include "tensorflow/lite/tools/optimize/sparsity/format_converter.h"
+#include "tensorflow/lite/kernels/internal/utils/sparsity_format_converter.h"
 
 //===----------------------------------------------------------------------===//
 // The DenseToSparse Pass.
@@ -39,11 +39,11 @@ const float kBlockOverRandomSparsityRatio = 0.9;
 
 Eigen::half APFloatToEigenHalf(const APFloat& val) {
   uint16_t raw_data = val.bitcastToAPInt().getZExtValue();
-  return Eigen::half_impl::raw_uint16_to_half(raw_data);
+  return Eigen::numext::bit_cast<Eigen::half>(raw_data);
 }
 
 APFloat EigenHalfToAPFloat(const Eigen::half& val) {
-  uint16_t raw_data = val.x;
+  uint16_t raw_data = Eigen::numext::bit_cast<uint16_t>(val);
   return APFloat(APFloat::IEEEhalf(), APInt(16, raw_data));
 }
 
@@ -116,7 +116,7 @@ float CalculateBlockSparsity(const ElementsAttr& attr, const ShapedType& type,
                          &b_size);
 
   if (type.getElementType().isF32()) {
-    tflite::optimize::sparsity::FormatConverter<float> format_converter(
+    tflite::internal::sparsity::FormatConverter<float> format_converter(
         shape, traversal_order, format, b_size, b_map);
     std::vector<float> data;
     data.reserve(type.getNumElements());
@@ -126,7 +126,7 @@ float CalculateBlockSparsity(const ElementsAttr& attr, const ShapedType& type,
         GetSparsity(type.getNumElements() - format_converter.GetData().size(),
                     type.getNumElements());
   } else if (type.getElementType().isF16()) {
-    tflite::optimize::sparsity::FormatConverter<Eigen::half> format_converter(
+    tflite::internal::sparsity::FormatConverter<Eigen::half> format_converter(
         shape, traversal_order, format, b_size, b_map);
     std::vector<Eigen::half> data;
     data.reserve(type.getNumElements());
@@ -137,7 +137,7 @@ float CalculateBlockSparsity(const ElementsAttr& attr, const ShapedType& type,
         GetSparsity(type.getNumElements() - format_converter.GetData().size(),
                     type.getNumElements());
   } else if (type.getElementType().isa<quant::QuantizedType>()) {
-    tflite::optimize::sparsity::FormatConverter<int8_t> format_converter(
+    tflite::internal::sparsity::FormatConverter<int8_t> format_converter(
         shape, traversal_order, format, b_size, b_map);
     std::vector<int8_t> data;
     data.reserve(type.getNumElements());
@@ -175,6 +175,9 @@ InspectResult InspectWeight(
   } else if (auto cst = dyn_cast<QConstOp>(inst)) {
     attr = cst.value();
     type = cst.getType().cast<ShapedType>();
+  } else {
+    result.can_compress = false;
+    return result;
   }
 
   // Currently we only support compressing weights of ops:
@@ -222,6 +225,8 @@ std::vector<T> BuildSparsityParameterAttribute(
   } else if (auto cst = dyn_cast<QConstOp>(inst)) {
     attr = cst.value();
     type = cst.getType().cast<ShapedType>();
+  } else {
+    assert(false && "Expected a constant-like op");
   }
   const int dims_count = type.getRank();
   std::vector<int> shape(dims_count);
@@ -236,11 +241,11 @@ std::vector<T> BuildSparsityParameterAttribute(
   PopulateEncodingParams(block_size, &traversal_order, &format, &b_map,
                          &b_size);
 
-  tflite::optimize::sparsity::FormatConverter<T> format_converter(
+  tflite::internal::sparsity::FormatConverter<T> format_converter(
       shape, traversal_order, format, b_size, b_map);
   format_converter.DenseToSparse(dense_buffer);
-  auto metadata = format_converter.GetDimMetadata();
-  auto compressed_data = format_converter.GetData();
+  const auto& metadata = format_converter.GetDimMetadata();
+  const auto& compressed_data = format_converter.GetData();
   const int dim_size = metadata.size() / 2;
   std::vector<Attribute> dim_metadata(traversal_order.size());
   for (int i = 0; i < dim_size; i++) {
@@ -280,6 +285,16 @@ std::vector<T> BuildSparsityParameterAttribute(
 //          sparsity, and add Densify() op to fall back to dense execution.
 struct DenseToSparse : public PassWrapper<DenseToSparse, FunctionPass> {
   void runOnFunction() override;
+
+  StringRef getArgument() const final {
+    // This is the argument used to refer to the pass in
+    // the textual format (on the commandline for example).
+    return "tfl-dense-to-sparse";
+  }
+  StringRef getDescription() const final {
+    // This is a brief description of the pass.
+    return "Convert dense tensor to sparse format.";
+  }
 };
 
 void DenseToSparse::runOnFunction() {
@@ -381,7 +396,7 @@ void DenseToSparse::runOnFunction() {
       } else if (auto cst = dyn_cast<QConstOp>(inst)) {
         auto attr = cst.value();
         auto type = cst.getType().cast<ShapedType>();
-        std::vector<int8_t> dense_data(type.getNumElements());
+        std::vector<int8_t> dense_data;
         dense_data.reserve(type.getNumElements());
         for (const auto& val : attr.getValues<int8_t>())
           dense_data.push_back(val);
@@ -418,8 +433,7 @@ std::unique_ptr<OperationPass<FuncOp>> CreateDenseToSparsePass() {
   return absl::make_unique<DenseToSparse>();
 }
 
-static PassRegistration<DenseToSparse> pass(
-    "tfl-dense-to-sparse", "Convert dense tensor to sparse format.");
+static PassRegistration<DenseToSparse> pass;
 
 }  // namespace TFL
 }  // namespace mlir
