@@ -259,7 +259,7 @@ StatusOr<mlir::Operation*> HloFunctionImporter::ImportInstructionImpl(
       mlir::Operation* new_operation =
           func_builder->create<mlir::mhlo::ConstOp>(loc, attr.ValueOrDie());
       for (auto attr : attributes) {
-        new_operation->setAttr(attr.first, attr.second);
+        new_operation->setAttr(attr.getName(), attr.getValue());
       }
       return new_operation;
     }
@@ -347,6 +347,27 @@ StatusOr<mlir::Operation*> HloFunctionImporter::ImportInstructionImpl(
     }
     case HloOpcode::kCustomCall: {
       auto custom_call = Cast<HloCustomCallInstruction>(instruction);
+      if (custom_call->layout_constrained()) {
+        TF_ASSIGN_OR_RETURN(
+            mlir::ArrayAttr operand_layouts,
+            ExtractLayoutsFromShapes(custom_call->operand_shapes_with_layout(),
+                                     builder_));
+        attributes.push_back(
+            builder_->getNamedAttr("operand_layouts", operand_layouts));
+        mlir::ArrayAttr result_layouts;
+        if (custom_call->shape().IsTuple()) {
+          TF_ASSIGN_OR_RETURN(
+              result_layouts,
+              ExtractLayoutsFromTuple(custom_call->shape(), builder_));
+        } else {
+          TF_ASSIGN_OR_RETURN(
+              result_layouts,
+              ExtractLayoutsFromShapes({custom_call->shape()}, builder_));
+        }
+        attributes.push_back(
+            builder_->getNamedAttr("result_layouts", result_layouts));
+      }
+
       TF_ASSIGN_OR_RETURN(
           auto mlir_api_version,
           ConvertCustomCallApiVersion(custom_call->api_version()));
@@ -654,7 +675,7 @@ StatusOr<mlir::Operation*> HloFunctionImporter::ImportInstructionImpl(
           .getOperation();
     }
     case HloOpcode::kRng: {
-      auto shape = func_builder->create<mlir::ConstantOp>(
+      auto shape = func_builder->create<mlir::mhlo::ConstOp>(
           loc, Convert(result_type.cast<RankedTensorType>().getShape()));
       switch (instruction->random_distribution()) {
         case xla::RNG_UNIFORM:
@@ -738,6 +759,10 @@ StatusOr<mlir::Operation*> HloFunctionImporter::ImportInstructionImpl(
           .getOperation();
     }
     case HloOpcode::kReduceWindow: {
+      llvm::SmallVector<Type, 4> return_types = {result_type};
+      if (mlir::TupleType tuple_ty = result_type.dyn_cast<mlir::TupleType>()) {
+        return_types = llvm::to_vector<6>(tuple_ty.getTypes());
+      }
       llvm::SmallVector<int64_t, 4> sizes, strides, base_dilations,
           win_dilations;
       llvm::SmallVector<int64_t, 8> padding;
@@ -759,10 +784,18 @@ StatusOr<mlir::Operation*> HloFunctionImporter::ImportInstructionImpl(
           "window_dilations", ConvertDimensions(win_dilations)));
       attributes.push_back(ConvertPadding(padding));
       auto reduce = func_builder->create<mlir::mhlo::ReduceWindowOp>(
-          loc, result_type, operands, attributes);
+          loc, return_types, operands, attributes);
       TF_RETURN_IF_ERROR(
           ImportAsRegion(*instruction->to_apply(), &reduce.body()));
-      return reduce.getOperation();
+
+      // Check if the output needs to be tupled.
+      if (return_types.size() == 1 && return_types.front() == result_type) {
+        return reduce.getOperation();
+      }
+
+      return func_builder
+          ->create<mlir::mhlo::TupleOp>(loc, result_type, reduce.getResults())
+          .getOperation();
     }
     case HloOpcode::kMap: {
       auto op = func_builder->create<mlir::mhlo::MapOp>(
@@ -827,8 +860,8 @@ StatusOr<mlir::Operation*> HloFunctionImporter::ImportInstructionImpl(
     case HloOpcode::kAdd: {
       // HLO add ops on PRED elements are actually boolean or, but MHLO dialect
       // AddOps on i1 are just addition with overflow; so, we have to implement
-      // the special behavior of HLO add ops on PRED here by creating an OrOp
-      // instead.
+      // the special behavior of HLO add ops on PRED here by creating an
+      // arith::OrIOp instead.
       if (instruction->shape().element_type() == PRED) {
         return func_builder
             ->create<mlir::mhlo::OrOp>(loc, result_type, operands, attributes)
@@ -836,6 +869,21 @@ StatusOr<mlir::Operation*> HloFunctionImporter::ImportInstructionImpl(
       } else {
         return func_builder
             ->create<mlir::mhlo::AddOp>(loc, result_type, operands, attributes)
+            .getOperation();
+      }
+    }
+    case HloOpcode::kAfterAll: {
+      // HLO AfterAll ops without any token input are used to just create a
+      // token. MHLO has a special op CreateToken for this case.
+      if (instruction->operands().empty()) {
+        return func_builder
+            ->create<mlir::mhlo::CreateTokenOp>(loc, result_type, operands,
+                                                attributes)
+            .getOperation();
+      } else {
+        return func_builder
+            ->create<mlir::mhlo::AfterAllOp>(loc, result_type, operands,
+                                             attributes)
             .getOperation();
       }
     }
@@ -851,7 +899,6 @@ StatusOr<mlir::Operation*> HloFunctionImporter::ImportInstructionImpl(
       // part of the HLO instruction. They are only a convenience in the XLA
       // builder API.
       NO_ATTRIBUTE_CASE(kAbs, AbsOp);
-      NO_ATTRIBUTE_CASE(kAfterAll, AfterAllOp);
       NO_ATTRIBUTE_CASE(kAnd, AndOp);
       NO_ATTRIBUTE_CASE(kAtan2, Atan2Op);
       NO_ATTRIBUTE_CASE(kBitcastConvert, BitcastConvertOp);
@@ -954,6 +1001,12 @@ StatusOr<mlir::Operation*> HloFunctionImporter::ImportInstructionImpl(
   }
 }
 
+void SetXlaShape(mlir::Operation* op, const Shape& shape) {
+  op->setAttr("xla_shape",
+              mlir::Builder(op->getContext())
+                  .getStringAttr(shape.ToString(/*print_layout=*/true)));
+}
+
 StatusOr<mlir::Operation*> HloFunctionImporter::ImportInstructionWithLayout(
     const HloInstruction* instruction,
     const llvm::SmallVectorImpl<mlir::Value>& operands,
@@ -967,12 +1020,15 @@ StatusOr<mlir::Operation*> HloFunctionImporter::ImportInstructionWithLayout(
   //
   // Minor-to-major is a permutation of [0, rank), presenting tensor dimensions
   // in physical minor-to-major order.
-  if (instruction->shape().IsArray() &&
-      !instruction->shape().layout().minor_to_major().empty() &&
-      instruction->shape().layout() !=
-          LayoutUtil::MakeDescendingLayout(
-              instruction->shape().dimensions().size())) {
-    SetLayoutForMlir(op, instruction->shape());
+  if (instruction->shape().IsArray()) {
+    if (!instruction->shape().layout().minor_to_major().empty() &&
+        instruction->shape().layout() !=
+            LayoutUtil::MakeDescendingLayout(
+                instruction->shape().dimensions().size())) {
+      SetXlaShape(op, instruction->shape());
+    }
+  } else {
+    SetXlaShape(op, instruction->shape());
   }
   return op;
 }
@@ -1123,7 +1179,7 @@ StatusOr<mlir::Attribute> HloFunctionImporter::ConvertShapeToMlirLayout(
   if (shape.IsToken()) return builder_->getUnitAttr();
   if (shape.IsTuple()) {
     std::vector<mlir::Attribute> tuple_layouts;
-    for (int64_t i = 0; i < shape.tuple_shapes_size(); i++) {
+    for (int i = 0; i < shape.tuple_shapes_size(); i++) {
       TF_ASSIGN_OR_RETURN(mlir::Attribute layout,
                           ConvertShapeToMlirLayout(shape.tuple_shapes(i)));
       tuple_layouts.push_back(layout);

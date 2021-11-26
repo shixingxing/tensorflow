@@ -45,7 +45,6 @@ load(
     "tf_cc_tests",
     "tf_copts",  # @unused
     "tf_cuda_library",
-    "tf_native_cc_binary",
 )
 load(
     "@local_config_rocm//rocm:build_defs.bzl",
@@ -61,6 +60,9 @@ load("//tensorflow:tensorflow.bzl", "filegroup")
 
 # buildifier: disable=same-origin-load
 load("//tensorflow:tensorflow.bzl", "get_compatible_with_portable")
+
+# buildifier: disable=same-origin-load
+load("//tensorflow:tensorflow.bzl", "tf_native_cc_shared_library")
 
 package(
     default_visibility = [
@@ -212,9 +214,20 @@ cc_library(
 )
 
 # Used by //tensorflow/python/platform:platform.
-tf_native_cc_binary(
+tf_native_cc_shared_library(
     name = "_cpu_feature_guard.so",
-    linkshared = True,
+    static_deps = [
+        # copybara:comment_begin(oss only)
+        "@bazel_tools//:__subpackages__",
+        "@com_google_absl//:__subpackages__",
+        "@eigen_archive//:__subpackages__",
+        "@hwloc//:__subpackages__",
+        "@local_config_cuda//:__subpackages__",
+        "@nsync//:__subpackages__",
+        "@snappy//:__subpackages__",
+        "//:__subpackages__",
+        # copybara:comment_end
+    ],
     deps = [
         "//tensorflow/core/platform:cpu_feature_guard",
     ],
@@ -297,26 +310,17 @@ cc_library(
 )
 
 cc_library(
-    name = "error",
-    srcs = ["error.cc"],
-    hdrs = ["error.h"],
-    deps = [
-        ":platform",
-        ":status",
-        ":strcat",
-        ":types",
-    ],
-)
-
-cc_library(
     name = "errors",
+    srcs = ["errors.cc"],
     hdrs = ["errors.h"],
     deps = [
         ":logging",
         ":macros",
+        ":platform",
         ":status",
         ":str_util",
         ":strcat",
+        ":types",
         "@com_google_absl//absl/strings",
     ],
 )
@@ -861,9 +865,9 @@ cc_library(
     testonly = True,
     hdrs = ["test_benchmark.h"],
     deps = [
-        "@com_google_benchmark//:benchmark",
         ":platform",
-    ] + tf_testing_deps("test_benchmark"),
+        "@com_google_benchmark//:benchmark",
+    ],
 )
 
 cc_library(
@@ -1544,7 +1548,6 @@ filegroup(
         "crash_analysis.h",
         "dynamic_annotations.h",
         "env.h",
-        "error.h",
         "errors.h",
         "file_statistics.h",
         "file_system.h",
@@ -1777,8 +1780,7 @@ filegroup(
         "env.cc",
         "env.h",
         "env_time.h",
-        "error.cc",
-        "error.h",
+        "errors.cc",
         "errors.h",
         "file_statistics.h",
         "file_system.cc",

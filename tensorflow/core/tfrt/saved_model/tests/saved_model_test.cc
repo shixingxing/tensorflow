@@ -746,15 +746,22 @@ TEST(SavedModelTest, Error) {
       status.error_message(), "You must feed a value for placeholder tensor"));
 }
 
-class SavedModelPowTest : public testing::TestWithParam<std::string> {};
+struct PowTestParam {
+  std::string path;
+  bool run_placer_grappler_on_functions;
+};
+
+class SavedModelPowTest : public testing::TestWithParam<PowTestParam> {};
 
 TEST_P(SavedModelPowTest, Pow) {
   std::string saved_model_dir =
-      tensorflow::GetDataDependencyFilepath(GetParam());
+      tensorflow::GetDataDependencyFilepath(GetParam().path);
 
   auto runtime = DefaultTfrtRuntime(/*num_threads=*/1);
   auto options = DefaultSavedModelOptions(runtime.get());
   options.compile_options.enable_grappler = true;
+  options.run_placer_grappler_on_functions =
+      GetParam().run_placer_grappler_on_functions;
 
   tensorflow::Status status;
   auto saved_model =
@@ -776,8 +783,36 @@ TEST_P(SavedModelPowTest, Pow) {
 
 INSTANTIATE_TEST_SUITE_P(
     SavedModelPowTest, SavedModelPowTest,
-    testing::Values("tensorflow/core/tfrt/saved_model/tests/pow",
-                    "tensorflow/core/tfrt/saved_model/tests/pow_v2"));
+    testing::Values(
+        PowTestParam{"tensorflow/core/tfrt/saved_model/tests/pow", false},
+        PowTestParam{"tensorflow/core/tfrt/saved_model/tests/pow_v2", false},
+        PowTestParam{"tensorflow/core/tfrt/saved_model/tests/pow_v2", true}));
+
+TEST(SavedModelPowTest, MapDataset) {
+  std::string saved_model_dir = tensorflow::GetDataDependencyFilepath(
+      "tensorflow/core/tfrt/saved_model/tests/data");
+
+  auto runtime = DefaultTfrtRuntime(/*num_threads=*/1);
+  auto options = DefaultSavedModelOptions(runtime.get());
+  options.compile_options.enable_grappler = true;
+
+  tensorflow::Status status;
+  auto saved_model =
+      SavedModelImpl::LoadSavedModel(options, saved_model_dir,
+                                     /*tags=*/{"serve"}, &status);
+  TF_CHECK_OK(status);
+
+  std::vector<int32_t> data = {2};
+  std::vector<tensorflow::Tensor> inputs;
+  inputs.push_back(
+      CreateTfTensor<int32_t>(/*shape=*/{}, absl::MakeConstSpan(data)));
+
+  std::vector<tensorflow::Tensor> outputs;
+  TF_ASSERT_OK(saved_model->Run({}, "serving_default", inputs, &outputs));
+  ASSERT_EQ(outputs.size(), 1);
+
+  EXPECT_THAT(GetTfTensorData<int32_t>(outputs[0]), testing::ElementsAre(3));
+}
 
 TEST(SavedModelTest, ControlFlowV1) {
   // This test checks that loading a savedmodel with V1 control flows works

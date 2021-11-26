@@ -14,10 +14,6 @@
 # ==============================================================================
 """Various classes representing distributed values for PS."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import contextlib
 import copy
 import threading
@@ -746,8 +742,8 @@ class RestoredDistributedTable(DistributedTable):
       # been created. We store them in '_restored_function' and set them to the
       # distributed tables when they're created in
       # `self._maybe_build_distributed_table.create_copy`.
-      if load_context.in_load_context or ("RestoredStaticHashtable"
-                                          in self._wrapped.__class__.__name__):
+      if load_context.in_load_context() or (
+          "RestoredStaticHashtable" in self._wrapped.__class__.__name__):
 
         if not hasattr(self, "_restored_function"):
           self._restored_function = {}

@@ -14,17 +14,11 @@
 # ==============================================================================
 """Unit tests for TensorFlow "Eager" Mode's Tensor class."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import copy
 import re
 import sys
-import unittest
 
 import numpy as np
-import six
 
 from tensorflow.python import pywrap_tfe
 from tensorflow.python.eager import context
@@ -189,10 +183,6 @@ class TFETensorTest(test_util.TensorFlowTestCase):
     self.assertFalse(bool(_create_tensor([0.])))
     self.assertTrue(bool(_create_tensor([1])))
     self.assertTrue(bool(_create_tensor([1.])))
-
-  @unittest.skipUnless(six.PY2, "long has been removed in PY3")
-  def testLong(self):
-    self.assertEqual(long(_create_tensor(long(42))), 42)
 
   def testIndex(self):
     self.assertEqual([42][_create_tensor(0)], 42)

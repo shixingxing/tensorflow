@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "tensorflow/compiler/tf2tensorrt/convert/utils.h"
 
+#if GOOGLE_CUDA && GOOGLE_TENSORRT
+
 #include "absl/strings/ascii.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status.h"
@@ -22,39 +24,6 @@ limitations under the License.
 
 namespace tensorflow {
 namespace tensorrt {
-
-Status TrtPrecisionModeToName(const TrtPrecisionMode mode, string* name) {
-  switch (mode) {
-    case TrtPrecisionMode::FP32:
-      *name = "FP32";
-      break;
-    case TrtPrecisionMode::FP16:
-      *name = "FP16";
-      break;
-    case TrtPrecisionMode::INT8:
-      *name = "INT8";
-      break;
-    default:
-      *name = "UNKNOWN";
-      return errors::OutOfRange("Unknown precision mode");
-  }
-  return Status::OK();
-}
-
-Status TrtPrecisionModeFromName(const string& name, TrtPrecisionMode* mode) {
-  if (name == "FP32") {
-    *mode = TrtPrecisionMode::FP32;
-  } else if (name == "FP16") {
-    *mode = TrtPrecisionMode::FP16;
-  } else if (name == "INT8") {
-    *mode = TrtPrecisionMode::INT8;
-  } else {
-    return errors::InvalidArgument("Invalid precision mode name: ", name);
-  }
-  return Status::OK();
-}
-
-#if GOOGLE_CUDA && GOOGLE_TENSORRT
 
 string DebugString(const nvinfer1::Dims& dims) {
   string out = StrCat("nvinfer1::Dims(nbDims=", dims.nbDims, ", d=");
@@ -94,12 +63,6 @@ string DebugString(const nvinfer1::DataType trt_dtype) {
     default:
       return "Invalid TRT data type";
   }
-}
-
-string DebugString(const TrtPrecisionMode mode) {
-  string mode_str;
-  TF_CHECK_OK(TrtPrecisionModeToName(mode, &mode_str));
-  return StrCat("TrtPrecisionMode::", mode_str);
 }
 
 string DebugString(const nvinfer1::Permutation& permutation, int len) {
@@ -239,40 +202,6 @@ int GetNumberOfEngineInputs(const nvinfer1::ICudaEngine* engine) {
   return n_input / n_profiles;
 }
 
-string ProfileStrategyToName(const ProfileStrategy strategy) {
-  switch (strategy) {
-    case ProfileStrategy::kRange:
-      return "Range";
-    case ProfileStrategy::kOptimal:
-      return "Optimal";
-    case ProfileStrategy::kRangeOptimal:
-      return "Range+Optimal";
-    case ProfileStrategy::kImplicitBatchModeCompatible:
-      return "ImplicitBatchModeCompatible";
-  }
-  return "Unknown";
-}
-
-Status ProfileStrategyFromName(const string& name, ProfileStrategy* strategy) {
-  string name_lowercase(name);
-  std::transform(name.begin(), name.end(), name_lowercase.begin(),
-                 [](unsigned char c) { return std::tolower(c); });
-  if (name_lowercase == "range") {
-    *strategy = ProfileStrategy::kRange;
-  } else if (name_lowercase == "optimal") {
-    *strategy = ProfileStrategy::kOptimal;
-  } else if (name_lowercase == "range+optimal") {
-    *strategy = ProfileStrategy::kRangeOptimal;
-  } else if (name_lowercase == "implicitbatchmodecompatible") {
-    *strategy = ProfileStrategy::kImplicitBatchModeCompatible;
-  } else {
-    return errors::InvalidArgument("Invalid profile strategy: ", name);
-  }
-  return Status::OK();
-}
-
-#endif
-
 absl::string_view GetDeviceName(const Node* node) {
   if (node->has_assigned_device_name()) {
     return node->assigned_device_name();
@@ -314,3 +243,5 @@ absl::optional<DeviceNameUtils::ParsedName> MergeIfCompatible(
 
 }  // namespace tensorrt
 }  // namespace tensorflow
+
+#endif  // GOOGLE_CUDA && GOOGLE_TENSORRT

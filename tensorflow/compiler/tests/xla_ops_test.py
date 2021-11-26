@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for XLA op wrappers."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import functools
 
 from absl.testing import parameterized
@@ -56,6 +52,8 @@ class XlaOpsNumericalTest(xla_test.XLATestCase, parameterized.TestCase):
       equality_fn(result, expected, rtol=1e-3)
 
   def testAdd(self):
+    if xla_test.test.is_built_with_rocm():
+      self.skipTest('Broken with rocm')
     for dtype in self.numeric_types:
       self._assertOpOutputMatchesExpected(
           xla.add,
@@ -388,7 +386,6 @@ class XlaOpsNumericalTest(xla_test.XLATestCase, parameterized.TestCase):
           args=(np.arange(12, dtype=np.int32).astype(dtype).reshape([3, 4]),),
           expected=np.array([0, 45, 120, 231], dtype=dtype))
 
-  @test_util.disable_mlir_bridge('Not supported yet')
   def testVariadicReduceKahanSum(self):
     for dtype in set(self.numeric_types).intersection(
         set([np.float32, np.complex64])):
@@ -458,7 +455,6 @@ class XlaOpsNumericalTest(xla_test.XLATestCase, parameterized.TestCase):
           args=(xs,), expected=dtype(0),
           equality_fn=error_term_equality)
 
-  @test_util.disable_mlir_bridge('Not supported yet')
   def testVariadicReduceV2SingleOp(self):
 
     @def_function.function
@@ -493,7 +489,6 @@ class XlaOpsNumericalTest(xla_test.XLATestCase, parameterized.TestCase):
           args=(values,),
           expected=np.array(27, dtype=dtype))
 
-  @test_util.disable_mlir_bridge('Not supported yet')
   def testVariadicReduceV2DifferentTypes(self):
     # Two ops, with different dtypes
     @def_function.function
@@ -598,7 +593,6 @@ class XlaOpsNumericalTest(xla_test.XLATestCase, parameterized.TestCase):
                         [[673, 674], [683, 684], [693, 694]]]),
               dtype=dtype))
 
-  @test_util.disable_mlir_bridge('Error handling')
   def testDynamicSliceWithIncorrectStartIndicesShape(self):
     with self.session() as session:
       with self.test_scope():
@@ -609,10 +603,9 @@ class XlaOpsNumericalTest(xla_test.XLATestCase, parameterized.TestCase):
         session.run(output)
       self.assertRegex(
           invalid_arg_error.exception.message,
-          (r'start_indices must be a vector with length equal to input rank, '
-           r'but input rank is 3 and start_indices has shape \[2\].*'))
+          (r'op has mismatched number of slice sizes \(3\) and number of start'
+           r' indices \(2\)'))
 
-  @test_util.disable_mlir_bridge('Error handling')
   def testDynamicSliceWithIncorrectSizeIndicesShape(self):
     with self.session() as session:
       with self.test_scope():
@@ -623,8 +616,8 @@ class XlaOpsNumericalTest(xla_test.XLATestCase, parameterized.TestCase):
         session.run(output)
       self.assertRegex(
           invalid_arg_error.exception.message,
-          (r'size_indices must be a vector with length equal to input rank, '
-           r'but input rank is 3 and size_indices has shape \[2\].*'))
+          (r'op has mismatched number of slice sizes \(2\) and number of start'
+           r' indices \(3\)'))
 
 
 class XlaOpsShapeInferenceTest(xla_test.XLATestCase, parameterized.TestCase):

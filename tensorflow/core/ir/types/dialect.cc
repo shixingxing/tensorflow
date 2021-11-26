@@ -74,8 +74,7 @@ Attribute TFTypeDialect::parseAttribute(DialectAsmParser &parser,
   if (failed(parser.parseKeyword(&attr_tag))) return Attribute();
   {
     Attribute attr;
-    auto parse_result =
-        generatedAttributeParser(getContext(), parser, attr_tag, type, attr);
+    auto parse_result = generatedAttributeParser(parser, attr_tag, type, attr);
     if (parse_result.hasValue()) return attr;
   }
   parser.emitError(parser.getNameLoc(), "unknown tf_type attribute");
@@ -169,8 +168,7 @@ Type TFTypeDialect::parseType(DialectAsmParser &parser) const {
   }
 
   Type genType;
-  auto parse_result =
-      generatedTypeParser(getContext(), parser, type_tag, genType);
+  auto parse_result = generatedTypeParser(parser, type_tag, genType);
   if (parse_result.hasValue()) return genType;
   parser.emitError(parser.getNameLoc(),
                    "unknown type in TF graph dialect: " + type_tag);
@@ -201,8 +199,7 @@ void TFTypeDialect::printType(Type type, DialectAsmPrinter &printer) const {
 // Attributes
 //===----------------------------------------------------------------------===//
 
-Attribute VersionAttr::parse(MLIRContext *context, DialectAsmParser &parser,
-                             Type) {
+Attribute VersionAttr::parse(AsmParser &parser, Type) {
   if (failed(parser.parseLess())) return {};
 
   int32_t producer, min_consumer;
@@ -227,12 +224,12 @@ Attribute VersionAttr::parse(MLIRContext *context, DialectAsmParser &parser,
   }
   if (failed(parser.parseGreater())) return {};
 
-  return VersionAttr::get(context, producer, min_consumer, bad_consumers);
+  return VersionAttr::get(parser.getContext(), producer, min_consumer,
+                          bad_consumers);
 }
 
-void VersionAttr::print(DialectAsmPrinter &printer) const {
+void VersionAttr::print(AsmPrinter &printer) const {
   llvm::raw_ostream &os = printer.getStream();
-  os << getMnemonic();
   os << "<producer = " << getProducer()
      << ", min_consumer = " << getMinConsumer();
   ArrayRef<int32_t> badConsumers = getBadConsumers();
@@ -250,11 +247,11 @@ void VersionAttr::print(DialectAsmPrinter &printer) const {
 // or
 //   #tf.func<"", {attr = "value"}>
 // in case of null symbol ref.
-void FuncAttr::print(DialectAsmPrinter &os) const {
+void FuncAttr::print(AsmPrinter &os) const {
   if (getName().getRootReference().getValue().empty())
-    os << "func<\"\", " << getAttrs() << ">";
+    os << "<\"\", " << getAttrs() << ">";
   else
-    os << "func<" << getName() << ", " << getAttrs() << ">";
+    os << "<" << getName() << ", " << getAttrs() << ">";
 }
 
 // Parses a #tf.func attribute of the following format:
@@ -263,8 +260,7 @@ void FuncAttr::print(DialectAsmPrinter &os) const {
 //
 // where the first element is a SymbolRefAttr and the second element is a
 // DictionaryAttr.
-Attribute FuncAttr::parse(MLIRContext *context, DialectAsmParser &parser,
-                          Type type) {
+Attribute FuncAttr::parse(AsmParser &parser, Type type) {
   if (failed(parser.parseLess())) return {};
   llvm::SMLoc loc = parser.getCurrentLocation();
   Attribute name, dict;
@@ -279,7 +275,7 @@ Attribute FuncAttr::parse(MLIRContext *context, DialectAsmParser &parser,
              "attribute";
       return {};
     }
-    name = SymbolRefAttr::get(context, "");
+    name = SymbolRefAttr::get(parser.getContext(), "");
   }
   if (!name.isa<SymbolRefAttr>()) {
     parser.emitError(loc) << "expected symbol while parsing tf.func attribute";
@@ -293,16 +289,15 @@ Attribute FuncAttr::parse(MLIRContext *context, DialectAsmParser &parser,
     return {};
   }
   if (failed(parser.parseGreater())) return {};
-  return FuncAttr::get(context, name.cast<SymbolRefAttr>(),
+  return FuncAttr::get(parser.getContext(), name.cast<SymbolRefAttr>(),
                        dict.cast<DictionaryAttr>());
 }
 
-void PlaceholderAttr::print(DialectAsmPrinter &os) const {
-  os << "placeholder<" << StringAttr::get(getContext(), getValue()) << ">";
+void PlaceholderAttr::print(AsmPrinter &os) const {
+  os << "<" << StringAttr::get(getContext(), getValue()) << ">";
 }
 
-Attribute PlaceholderAttr::parse(MLIRContext *context, DialectAsmParser &parser,
-                                 Type type) {
+Attribute PlaceholderAttr::parse(AsmParser &parser, Type type) {
   if (failed(parser.parseLess())) return {};
   std::string content;
   if (failed(parser.parseOptionalString(&content))) {
@@ -311,11 +306,11 @@ Attribute PlaceholderAttr::parse(MLIRContext *context, DialectAsmParser &parser,
     return {};
   }
   if (failed(parser.parseGreater())) return {};
-  return PlaceholderAttr::get(context, content);
+  return PlaceholderAttr::get(parser.getContext(), content);
 }
 
-void ShapeAttr::print(DialectAsmPrinter &os) const {
-  os << "shape<";
+void ShapeAttr::print(AsmPrinter &os) const {
+  os << "<";
   if (hasRank()) {
     auto print_dim = [&](int64_t dim) {
       if (dim > -1)
@@ -330,8 +325,7 @@ void ShapeAttr::print(DialectAsmPrinter &os) const {
   os << ">";
 }
 
-Attribute ShapeAttr::parse(MLIRContext *context, DialectAsmParser &parser,
-                           Type type) {
+Attribute ShapeAttr::parse(AsmParser &parser, Type type) {
   if (failed(parser.parseLess())) return {};
 
   if (succeeded(parser.parseOptionalStar())) {
@@ -341,7 +335,7 @@ Attribute ShapeAttr::parse(MLIRContext *context, DialectAsmParser &parser,
              "attribute";
       return {};
     }
-    return ShapeAttr::get(context, llvm::None);
+    return ShapeAttr::get(parser.getContext(), llvm::None);
   }
 
   SmallVector<int64_t> shape;
@@ -365,7 +359,7 @@ Attribute ShapeAttr::parse(MLIRContext *context, DialectAsmParser &parser,
         return {};
     }
   }
-  return ShapeAttr::get(context, llvm::makeArrayRef(shape));
+  return ShapeAttr::get(parser.getContext(), llvm::makeArrayRef(shape));
 }
 
 // Get or create a shape attribute.

@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tensor-like objects that are composed from tf.Tensors."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import abc
 
 import six
@@ -89,6 +85,9 @@ class CompositeTensor(object):
     ])
     return list(set(consumers))
 
+  def __tf_tracing_type__(self, context):
+    return self._type_spec.__tf_tracing_type__(context)
+
 
 _pywrap_utils.RegisterType("CompositeTensor", CompositeTensor)
 
@@ -109,7 +108,7 @@ def replace_composites_with_components(structure):
   if isinstance(structure, CompositeTensor):
     return replace_composites_with_components(
         structure._type_spec._to_components(structure))  # pylint: disable=protected-access
-  elif not nest.is_sequence(structure):
+  elif not nest.is_nested(structure):
     return structure
   else:
     return nest.map_structure(
