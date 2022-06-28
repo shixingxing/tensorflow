@@ -244,6 +244,7 @@ tf_kernel_library(
         "gpu_op_div_no_nan.cc",
         "gpu_op_equal.cc",
         "gpu_op_floor_div.cc",
+        "gpu_op_floor_mod.cc",
         "gpu_op_greater.cc",
         "gpu_op_greater_equal.cc",
         "gpu_op_left_shift.cc",
@@ -284,6 +285,7 @@ tf_kernel_library(
         ":gpu_div_no_nan_kernels",
         ":gpu_equal_kernels",
         ":gpu_floor_div_kernels",
+        ":gpu_floor_mod_kernels",
         ":gpu_greater_equal_kernels",
         ":gpu_greater_kernels",
         ":gpu_left_shift_kernels",
@@ -530,13 +532,14 @@ cc_library(
 
 tf_cuda_cc_test(
     name = "gpu_unary_ops_test",
-    size = "small",
+    size = "medium",
     srcs = ["gpu_unary_ops_test.cc"],
     extra_copts = if_mlir_generated_experimental_kernels_enabled([
         "-DMLIR_GENERATED_EXPERIMENTAL_KERNELS_ENABLED",
     ]) + if_mlir_generated_gpu_kernels_enabled(
         ["-DMLIR_GENERATED_GPU_KERNELS_ENABLED"],
     ),
+    shard_count = 20,
     tags = tf_cuda_tests_tags() + [
         "no_cuda_asan",  # TODO(b/171341759): re-enable.
         "no_cuda",  # TODO(b/196608406): re-enable
@@ -651,6 +654,7 @@ gpu_kernel_library(
         "f32",
         "f64",
     ],
+    unroll_factors = "16B",
 )
 
 gpu_kernel_library(
@@ -792,6 +796,19 @@ gpu_kernel_library(
     unroll_factors = "4",
 )
 
+# TODO: enable when supported in the pipeline
+# gpu_kernel_library(
+#     name = "gpu_atanh_kernels_experimental",
+#     op = "atanh",
+#     tile_size = "256",
+#     types = [
+#         "f32",
+#         "f64",
+#     ],
+#     unroll_factors = "4",
+#     jit_i64_indexed_for_large_tensors_types = ["f16"],
+# )
+
 gpu_kernel_library(
     name = "gpu_conj_kernels",
     op = "conj",
@@ -805,6 +822,10 @@ gpu_kernel_library(
 
 gpu_kernel_library(
     name = "gpu_cosh_kernels",
+    jit_types = [
+        "c64",
+        "c128",
+    ],
     op = "cosh",
     tile_size = "256",
     types = [
@@ -944,6 +965,10 @@ gpu_kernel_library(
 
 gpu_kernel_library(
     name = "gpu_sinh_kernels",
+    jit_types = [
+        "c64",
+        "c128",
+    ],
     op = "sinh",
     tile_size = "256",
     types = [
@@ -1078,6 +1103,7 @@ gpu_kernel_library(
         "c64",
         "c128",
     ],
+    unroll_factors = "16B",
 )
 
 gpu_kernel_library(
@@ -1107,13 +1133,13 @@ gpu_kernel_library(
         "i32",
         "i64",
     ],
+    unroll_factors = "4",
     # For complex MulOp kernels, we don't use unrolling, it would only cause
     # slowdowns.
-    types_with_unrolling_disabled = [
-        "c64",
-        "c128",
-    ],
-    unroll_factors = "4",
+    unroll_factors_override = {
+        "c64": None,
+        "c128": None,
+    },
 )
 
 gpu_kernel_library(
@@ -1127,13 +1153,13 @@ gpu_kernel_library(
         "c64",
         "c128",
     ],
+    unroll_factors = "4",
     # For complex MulNoNanOp kernels, we don't use unrolling, it would only
     # cause slowdowns.
-    types_with_unrolling_disabled = [
-        "c64",
-        "c128",
-    ],
-    unroll_factors = "4",
+    unroll_factors_override = {
+        "c64": None,
+        "c128": None,
+    },
 )
 
 # Bitwise operations.
@@ -1179,7 +1205,7 @@ gpu_kernel_library(
 gpu_kernel_library(
     name = "gpu_atan2_kernels",
     op = "atan2",
-    tile_size = "256,1,1",
+    tile_size = "256",
     types = [
         "f16",
         "f32",
@@ -1322,6 +1348,26 @@ gpu_kernel_library(
     unroll_factors = "4",
 )
 
+gpu_kernel_library(
+    name = "gpu_floor_mod_kernels",
+    jit_types = [
+        "i8",
+        "i16",
+        "i64",
+        "ui8",
+        "ui16",
+        "ui32",
+        "ui64",
+        "f16",
+        "f32",
+        "f64",
+    ],
+    op = "floor_mod",
+    tile_size = "1024",
+    types = [],
+    unroll_factors = "4",
+)
+
 # Kernels that support all floating-point types.
 [
     gpu_kernel_library(
@@ -1389,6 +1435,10 @@ gpu_kernel_library(
 [
     gpu_kernel_library(
         name = "gpu_" + op + "_kernels",
+        jit_types = [
+            "c64",
+            "c128",
+        ],
         op = op,
         tile_size = "256",
         types = [
@@ -1408,10 +1458,12 @@ gpu_kernel_library(
     name = "gpu_cast_kernels",
     op = "cast",
     # We generate all combinations of input types/output types from the set
-    # {i1, i8, i16, i32, i64, ui8, ui16, ui32, ui64, f16, f32, f64}. The easiest
-    # way to do this is to repeat each input type 12 times and match it with the
-    # 12 different output types (thus, the list of 12 different output types
-    # needs to be repeated 12 times as well).
+    # {i1, i8, i16, i32, i64, ui8, ui16, ui32, ui64, f16, f32, f64, c64, c128}
+    # to the set
+    # {i1, i8, i16, i32, i64, ui8, ui16, ui32, ui64, f16, f32, f64, c64, c128}.
+    # The easiest way to do this is to repeat each input type 14 times and match
+    # it with the 14 different output types (thus, the list of 14 different
+    # output types needs to be repeated 14 times).
     output_types = [
         "i1",
         "i8",
@@ -1425,11 +1477,14 @@ gpu_kernel_library(
         "f16",
         "f32",
         "f64",
-    ] * 12,
+        "c64",
+        "c128",
+    ] * 14,
     tile_size = "256",
-    types = ["i1"] * 12 + ["i8"] * 12 + ["i16"] * 12 + ["i32"] * 12 +
-            ["i64"] * 12 + ["ui8"] * 12 + ["ui16"] * 12 + ["ui32"] * 12 +
-            ["ui64"] * 12 + ["f16"] * 12 + ["f32"] * 12 + ["f64"] * 12,
+    types = ["i1"] * 14 + ["i8"] * 14 + ["i16"] * 14 + ["i32"] * 14 +
+            ["i64"] * 14 + ["ui8"] * 14 + ["ui16"] * 14 + ["ui32"] * 14 +
+            ["ui64"] * 14 + ["f16"] * 14 + ["f32"] * 14 + ["f64"] * 14 +
+            ["c64"] * 14 + ["c128"] * 14,
 )
 
 gpu_kernel_library(
@@ -1683,13 +1738,13 @@ gpu_kernel_library(
         "c64",
         "c128",
     ],
+    unroll_factors = "4",
     # For complex XlogyOp kernels, we don't use unrolling, it would only cause
     # slowdowns.
-    types_with_unrolling_disabled = [
-        "c64",
-        "c128",
-    ],
-    unroll_factors = "4",
+    unroll_factors_override = {
+        "c64": None,
+        "c128": None,
+    },
 )
 
 gpu_kernel_library(
@@ -1717,13 +1772,13 @@ gpu_kernel_library(
         "c64",
         "c128",
     ],
+    unroll_factors = "4",
     # For complex Xlog1pyOp kernels, we don't use unrolling, it would only cause
     # slowdowns.
-    types_with_unrolling_disabled = [
-        "c64",
-        "c128",
-    ],
-    unroll_factors = "4",
+    unroll_factors_override = {
+        "c64": None,
+        "c128": None,
+    },
 )
 
 cpu_kernel_library(

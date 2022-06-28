@@ -78,6 +78,7 @@ tf_gen_op_libs(
         "no_op",
         "parsing_ops",
         "random_grad",
+        "random_index_shuffle_ops",
         "random_ops",
         "special_math_ops",
         "stateful_random_ops",
@@ -286,6 +287,7 @@ cc_library(
         ":no_op_op_lib",
         ":parsing_ops_op_lib",
         ":ragged_ops",
+        ":random_index_shuffle_ops_op_lib",
         ":random_ops_op_lib",
         ":resource_variable_ops_op_lib",
         ":risc_ops_op_lib",
@@ -361,12 +363,12 @@ cc_library(
     name = "math_grad",
     srcs = [
         "math_grad.cc",
-        "random_grad.cc",
         "stateless_random_grad.cc",
     ],
     linkstatic = 1,  # Needed since alwayslink is broken in bazel b/27630669
     deps = [
         ":math_ops_op_lib",
+        ":random_grad_op_lib",
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
@@ -504,6 +506,7 @@ tf_cc_test(
         "spectral_ops_test.cc",
         "state_ops_test.cc",
         "string_ops_test.cc",
+        "tpu_cross_replica_ops_test.cc",
         "training_ops_test.cc",
     ],
     linkstatic = tf_kernel_tests_linkstatic(),
