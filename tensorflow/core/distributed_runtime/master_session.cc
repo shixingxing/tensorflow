@@ -43,7 +43,6 @@ limitations under the License.
 #include "tensorflow/core/framework/tensor_description.pb.h"
 #include "tensorflow/core/graph/graph_partition.h"
 #include "tensorflow/core/graph/tensor_id.h"
-#include "tensorflow/core/lib/core/blocking_counter.h"
 #include "tensorflow/core/lib/core/notification.h"
 #include "tensorflow/core/lib/core/refcount.h"
 #include "tensorflow/core/lib/core/status.h"
@@ -55,15 +54,16 @@ limitations under the License.
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/lib/strings/strcat.h"
 #include "tensorflow/core/lib/strings/stringprintf.h"
+#include "tensorflow/core/platform/blocking_counter.h"
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/macros.h"
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/tracing.h"
 #include "tensorflow/core/protobuf/config.pb.h"
-#include "tensorflow/core/protobuf/coordination_config.pb.h"
 #include "tensorflow/core/public/session_options.h"
 #include "tensorflow/core/util/device_name_utils.h"
+#include "tensorflow/tsl/protobuf/coordination_config.pb.h"
 
 namespace tensorflow {
 
@@ -527,18 +527,17 @@ class RunManyGraphs {
     Call* call = get(index);
     call->done = true;
     auto resp = call->resp.get();
-    if (resp->status_code() != error::Code::OK) {
+    if (resp->status_code() != absl::StatusCode::kOk) {
       // resp->status_code will only be non-OK if s.ok().
       mutex_lock l(mu_);
       Status resp_status = call->resp->status();
       ReportBadStatus(errors::CreateWithUpdatedMessage(
           resp_status, strings::StrCat("From ", *call->worker_name, ":\n",
-                                       resp_status.error_message())));
+                                       resp_status.message())));
     } else if (!s.ok()) {
       mutex_lock l(mu_);
       ReportBadStatus(errors::CreateWithUpdatedMessage(
-          s, strings::StrCat("From ", *call->worker_name, ":\n",
-                             s.error_message())));
+          s, strings::StrCat("From ", *call->worker_name, ":\n", s.message())));
     }
     pending_.DecrementCount();
   }

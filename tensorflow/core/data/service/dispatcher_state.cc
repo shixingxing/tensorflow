@@ -23,7 +23,6 @@ limitations under the License.
 #include "absl/container/flat_hash_map.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
-#include "absl/types/optional.h"
 #include "tensorflow/core/data/service/common.h"
 #include "tensorflow/core/data/service/journal.h"
 #include "tensorflow/core/data/service/journal.pb.h"
@@ -83,6 +82,9 @@ Status DispatcherState::Apply(const Update& update) {
     case Update::kFinishTask:
       FinishTask(update.finish_task());
       break;
+    case Update::kSnapshot:
+      Snapshot(update.snapshot());
+      break;
     case Update::UPDATE_TYPE_NOT_SET:
       return errors::Internal("Update type not set.");
   }
@@ -93,13 +95,10 @@ Status DispatcherState::Apply(const Update& update) {
 void DispatcherState::RegisterDataset(
     const RegisterDatasetUpdate& register_dataset) {
   std::string dataset_id = register_dataset.dataset_id();
-  int64_t fingerprint = register_dataset.fingerprint();
-  auto dataset = std::make_shared<Dataset>(dataset_id, fingerprint,
-                                           register_dataset.metadata());
+  auto dataset =
+      std::make_shared<Dataset>(dataset_id, register_dataset.metadata());
   DCHECK(!datasets_by_id_.contains(dataset_id));
   datasets_by_id_[dataset_id] = dataset;
-  DCHECK(!datasets_by_fingerprint_.contains(fingerprint));
-  datasets_by_fingerprint_[fingerprint] = dataset;
   UpdateNextAvailableDatasetId();
 }
 
@@ -139,7 +138,7 @@ Status DispatcherState::JobFromId(int64_t job_id,
     return errors::NotFound("Job with id ", job_id, " not found");
   }
   job = it->second;
-  return Status::OK();
+  return OkStatus();
 }
 
 Status DispatcherState::JobByName(const std::string& job_name,
@@ -149,7 +148,7 @@ Status DispatcherState::JobByName(const std::string& job_name,
     return errors::NotFound("Job with name ", job_name, " not found");
   }
   job = it->second;
-  return Status::OK();
+  return OkStatus();
 }
 
 void DispatcherState::CreateIteration(
@@ -178,7 +177,8 @@ void DispatcherState::ProduceSplit(const ProduceSplitUpdate& produce_split) {
   DCHECK(iteration->distributed_epoch_state.has_value());
   DistributedEpochState& state = iteration->distributed_epoch_state.value();
   int64_t provider_index = produce_split.split_provider_index();
-  DCHECK_EQ(produce_split.repetition(), state.repetitions[provider_index]);
+  DCHECK_GE(produce_split.repetition(), state.repetitions[provider_index]);
+  state.repetitions[provider_index] = produce_split.repetition();
   if (produce_split.finished()) {
     state.repetitions[provider_index]++;
     state.indices[provider_index] = 0;
@@ -330,16 +330,6 @@ Status DispatcherState::DatasetFromId(
   return OkStatus();
 }
 
-Status DispatcherState::DatasetFromFingerprint(
-    uint64 fingerprint, std::shared_ptr<const Dataset>& dataset) const {
-  auto it = datasets_by_fingerprint_.find(fingerprint);
-  if (it == datasets_by_fingerprint_.end()) {
-    return errors::NotFound("Dataset fingerprint ", fingerprint, " not found");
-  }
-  dataset = it->second;
-  return OkStatus();
-}
-
 Status DispatcherState::WorkerFromAddress(
     const std::string& address, std::shared_ptr<const Worker>& worker) const {
   auto it = workers_.find(address);
@@ -477,6 +467,10 @@ Status DispatcherState::ValidateWorker(absl::string_view worker_address) const {
 StatusOr<int64_t> DispatcherState::GetWorkerIndex(
     absl::string_view worker_address) const {
   return worker_index_resolver_.GetWorkerIndex(worker_address);
+}
+
+void DispatcherState::Snapshot(const SnapshotUpdate& snapshot) {
+  snapshot_paths_.insert(snapshot.path());
 }
 
 }  // namespace data

@@ -16,6 +16,7 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_XLA_PYTHON_TPU_DRIVER_CLIENT_TPU_CLIENT_H_
 #define TENSORFLOW_COMPILER_XLA_PYTHON_TPU_DRIVER_CLIENT_TPU_CLIENT_H_
 
+#include <array>
 #include <functional>
 #include <memory>
 #include <string>
@@ -36,7 +37,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/status.h"
 #include "tensorflow/compiler/xla/statusor.h"
 #include "tensorflow/compiler/xla/util.h"
-#include "tensorflow/core/platform/threadpool.h"
+#include "tensorflow/tsl/platform/threadpool.h"
 
 namespace xla {
 
@@ -45,6 +46,41 @@ inline const char* TpuPlatform() {
   return kTpuPlatform;
 }
 
+class TpuDeviceDescription : public PjRtDeviceDescription {
+ public:
+  TpuDeviceDescription(int id, int process_index,
+                       const std::array<int, 3>& coords, int core_on_chip);
+
+  const std::array<int, 3>& coords() const { return coords_; }
+  int core_on_chip() const { return core_on_chip_; }
+
+  absl::string_view DebugString() const override { return debug_string_; }
+
+  absl::string_view ToString() const override { return to_string_; }
+
+  int id() const override { return id_; }
+
+  int process_index() const override { return process_index_; }
+
+  absl::string_view device_kind() const override { return device_kind_; }
+
+  const absl::flat_hash_map<std::string, PjRtDeviceAttribute>& Attributes()
+      const override {
+    return attributes_;
+  }
+
+ private:
+  const int id_;
+  const int process_index_;
+  const std::array<int, 3> coords_;
+  // Index of the core of the same chip.
+  int core_on_chip_;
+  const std::string device_kind_ = "Cloud TPU";
+  std::string debug_string_;
+  std::string to_string_;
+  const absl::flat_hash_map<std::string, PjRtDeviceAttribute> attributes_ = {};
+};
+
 class PyTpuClient;
 
 class TpuDevice : public PjRtDevice {
@@ -52,12 +88,12 @@ class TpuDevice : public PjRtDevice {
   TpuDevice(int id, int process_index, const std::array<int, 3>& coords,
             int core_on_chip);
 
-  const std::array<int, 3>& coords() const { return coords_; }
-  int core_on_chip() const { return core_on_chip_; }
+  const TpuDeviceDescription& description() const override {
+    return description_;
+  }
 
-  std::string DebugString() const override;
-
-  std::string ToString() const override;
+  const std::array<int, 3>& coords() const { return description().coords(); }
+  int core_on_chip() const { return description().core_on_chip(); }
 
   static xla::StatusOr<std::vector<std::shared_ptr<xla::PjRtDevice>>>
   GetTpuDevices(const tpu_driver::SystemInfo& system_info);
@@ -68,13 +104,7 @@ class TpuDevice : public PjRtDevice {
 
   bool IsAddressable() const override { return false; }
 
-  int id() const override { return id_; }
-
-  int process_index() const override { return process_index_; }
-
   int local_hardware_id() const override { return -1; }
-
-  absl::string_view device_kind() const override { return device_kind_; }
 
   Status TransferToInfeed(const LiteralSlice& literal) override {
     return Unimplemented("Infeed not yet implemented via this API");
@@ -89,19 +119,8 @@ class TpuDevice : public PjRtDevice {
     return nullptr;
   }
 
-  const absl::flat_hash_map<std::string, PjRtDeviceAttribute>& Attributes()
-      const override {
-    return attributes_;
-  }
-
  private:
-  const int id_;
-  const int process_index_;
-  const std::array<int, 3> coords_;
-  const std::string device_kind_ = "Cloud TPU";
-  const absl::flat_hash_map<std::string, PjRtDeviceAttribute> attributes_ = {};
-  // Index of the core of the same chip.
-  int core_on_chip_;
+  TpuDeviceDescription description_;
   PyTpuClient* tpu_client_;
 };
 
@@ -152,7 +171,7 @@ class PyTpuClient : public std::enable_shared_from_this<PyTpuClient> {
 
   tpu_driver::TpuDriver* driver() { return driver_.get(); }
 
-  tensorflow::thread::ThreadPool* GetThreadPool() { return pool_.get(); }
+  tsl::thread::ThreadPool* GetThreadPool() { return pool_.get(); }
 
  protected:
   std::string platform_name_;
@@ -168,7 +187,7 @@ class PyTpuClient : public std::enable_shared_from_this<PyTpuClient> {
   int process_index_;
 
   // A thread pool for scheduling core executions in parallel.
-  std::unique_ptr<tensorflow::thread::ThreadPool> pool_;
+  std::unique_ptr<tsl::thread::ThreadPool> pool_;
 };
 
 // Manages a buffer shared amongst multiple users. Buffers are asynchronously
@@ -186,6 +205,7 @@ struct TpuSharedBuffer final {
 
   ~TpuSharedBuffer() {
     std::vector<tpu_driver::Event*> events;
+    events.reserve(wait_for_use.size());
     for (const auto& e : wait_for_use) {
       events.push_back(e.get());
     }
@@ -311,6 +331,21 @@ class PyTpuBuffer {
   std::shared_ptr<HostValue> host_value_ ABSL_GUARDED_BY(mu_);
 };
 
+// A dummy token that is always ready. PyTpuExecutable::Execute() is blocking
+// until the computation finishes.
+class PyTpuToken {
+ public:
+  PyTpuToken() {}
+  Status Await() { return OkStatus(); }
+};
+
+class PyShardedTpuToken {
+ public:
+  PyShardedTpuToken() {}
+  Status Await() { return OkStatus(); }
+  PyTpuToken GetPyToken(int i) { return PyTpuToken(); }
+};
+
 // Represents a compiled computation that can be executed given handles to
 // device-allocated literals. Wraps an XLA LocalExecutable.
 class PyTpuExecutable {
@@ -369,6 +404,13 @@ class PyTpuExecutable {
   StatusOr<std::vector<std::unique_ptr<PyTpuBuffer>>> Execute(
       absl::Span<PyTpuBuffer* const> argument_handles);
 
+  StatusOr<std::pair<std::vector<std::unique_ptr<PyTpuBuffer>>, PyTpuToken>>
+  ExecuteWithToken(absl::Span<PyTpuBuffer* const> argument_handles) {
+    TF_ASSIGN_OR_RETURN(auto results, Execute(argument_handles));
+    return std::pair<std::vector<std::unique_ptr<PyTpuBuffer>>, PyTpuToken>(
+        std::move(results), PyTpuToken());
+  }
+
   // Execute on local devices. Takes a sequence of argument lists (one argument
   // list per local device) and returns a tuple of results (one result per local
   // device). The number of argument lists must be equal to the local device
@@ -380,6 +422,18 @@ class PyTpuExecutable {
   StatusOr<std::vector<std::vector<std::unique_ptr<PyTpuBuffer>>>>
   ExecuteShardedOnLocalDevices(
       absl::Span<const std::vector<PyTpuBuffer*>> args);
+
+  StatusOr<std::pair<std::vector<std::vector<std::unique_ptr<PyTpuBuffer>>>,
+                     PyShardedTpuToken>>
+  ExecuteShardedOnLocalDevicesWithTokens(
+      absl::Span<const std::vector<PyTpuBuffer*>> args) {
+    TF_ASSIGN_OR_RETURN(auto results, ExecuteShardedOnLocalDevices(args));
+
+    TF_RET_CHECK(!args.empty());
+    return std::pair<std::vector<std::vector<std::unique_ptr<PyTpuBuffer>>>,
+                     PyShardedTpuToken>(std::move(results),
+                                        PyShardedTpuToken());
+  }
 
   void Delete() { executables_.clear(); }
 

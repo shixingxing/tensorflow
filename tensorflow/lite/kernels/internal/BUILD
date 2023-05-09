@@ -2,9 +2,10 @@ load("@bazel_skylib//lib:selects.bzl", "selects")
 load("//tensorflow:tensorflow.bzl", "transitive_hdrs")
 load("//tensorflow/lite:build_def.bzl", "tflite_copts")
 load("//tensorflow/lite:special_rules.bzl", "tflite_extra_arm_config_settings", "tflite_portable_test_suite_combined")
-load("//tensorflow:tensorflow.bzl", "get_compatible_with_portable")
+load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable")
 
 package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     default_visibility = [
         "//visibility:public",
     ],
@@ -51,6 +52,17 @@ cc_library(
 )
 
 cc_library(
+    name = "runtime_shape",
+    srcs = ["runtime_shape.cc"],
+    hdrs = ["runtime_shape.h"],
+    compatible_with = get_compatible_with_portable(),
+    copts = tflite_copts(),
+    deps = [
+        ":compatibility",
+    ],
+)
+
+cc_library(
     name = "types",
     hdrs = [
         "runtime_shape.h",
@@ -60,12 +72,14 @@ cc_library(
     copts = tflite_copts(),
     deps = [
         ":compatibility",
+        ":runtime_shape",
     ],
 )
 
 cc_library(
     name = "legacy_types",
     hdrs = ["legacy_types.h"],
+    compatible_with = get_compatible_with_portable(),
     copts = tflite_copts(),
     deps = [
         ":types",
@@ -257,7 +271,7 @@ selects.config_setting_group(
 
 cc_library(
     name = "common",
-    srcs = [],
+    srcs = ["common.cc"],
     hdrs = ["common.h"],
     compatible_with = get_compatible_with_portable(),
     copts = tflite_copts(),
@@ -265,6 +279,7 @@ cc_library(
         ":cppmath",
         ":cpu_check",
         ":types",
+        "//tensorflow/lite/core:macros",
         "@gemmlowp//:fixedpoint",
     ],
 )
@@ -287,6 +302,7 @@ cc_library(
         "optimized/integer_ops/depthwise_conv_hybrid_3x3_filter.h",
         "optimized/integer_ops/fully_connected.h",
         "optimized/integer_ops/leaky_relu.h",
+        "optimized/integer_ops/lut.h",
         "optimized/integer_ops/mean.h",
         "optimized/integer_ops/mul.h",
         "optimized/integer_ops/pooling.h",
@@ -297,9 +313,11 @@ cc_library(
         "optimized/reduce.h",
         "optimized/resize_bilinear.h",
         "optimized/sparse_ops/fully_connected.h",
+        "reduce_common.h",
     ],
     compatible_with = get_compatible_with_portable(),
     copts = tflite_copts(),
+    defines = ["EIGEN_NEON_GEBP_NR=4"],
     deps = [
         ":avx2_quantization_utils",
         ":common",
@@ -307,16 +325,19 @@ cc_library(
         ":cppmath",
         ":cpu_check",
         ":quantization_util",
+        ":reduce_utils",
         ":reference_base",
         ":strided_slice_logic",
         ":tensor",
         ":tensor_utils",
         ":transpose_utils",
         ":types",
-        "//tensorflow/lite/c:common",
+        "//tensorflow/lite:macros",
+        "//tensorflow/lite/core/c:common",
         "//tensorflow/lite/kernels:cpu_backend_context",
         "//tensorflow/lite/kernels:cpu_backend_gemm",
         "//tensorflow/lite/kernels:cpu_backend_threadpool",
+        "//tensorflow/lite/kernels:kernel_util",
         "//third_party/eigen3",
         "@gemmlowp//:fixedpoint",
         "@ruy//ruy/profiler:instrumentation",
@@ -335,6 +356,7 @@ cc_library(
         "optimized/legacy_optimized_ops.h",
         "optimized/optimized_ops.h",
     ],
+    compatible_with = get_compatible_with_portable(),
     copts = tflite_copts(),
     deps = [
         ":common",
@@ -349,7 +371,8 @@ cc_library(
         ":tensor_utils",
         ":transpose_utils",
         ":types",
-        "//tensorflow/lite/c:common",
+        "//tensorflow/lite:macros",
+        "//tensorflow/lite/core/c:common",
         "//tensorflow/lite/kernels:cpu_backend_context",
         "//tensorflow/lite/kernels:cpu_backend_gemm",
         "//tensorflow/lite/kernels:cpu_backend_threadpool",
@@ -371,8 +394,8 @@ cc_library(
         ":common",
         ":optimized_base",
         ":types",
-        "//tensorflow/core/kernels:eigen_spatial_convolutions-inl",
-        "//tensorflow/lite/c:common",
+        "//tensorflow/lite/core/c:common",
+        "//tensorflow/tsl/framework/convolution:eigen_spatial_convolutions-inl",
         "//third_party/eigen3",
     ],
 )
@@ -500,9 +523,23 @@ cc_library(
 )
 
 cc_library(
+    name = "reference_comparisons",
+    srcs = ["reference/comparisons.cc"],
+    hdrs = ["reference/comparisons.h"],
+    compatible_with = get_compatible_with_portable(),
+    copts = tflite_copts(),
+    deps = [
+        ":common",
+        ":types",
+        "//tensorflow/lite/core/c:common",
+    ],
+)
+
+cc_library(
     name = "reference_base",
     srcs = [],
     hdrs = [
+        "reduce_common.h",
         "reference/add.h",
         "reference/add_n.h",
         "reference/arg_min_max.h",
@@ -541,6 +578,7 @@ cc_library(
         "reference/integer_ops/fully_connected.h",
         "reference/integer_ops/l2normalization.h",
         "reference/integer_ops/logistic.h",
+        "reference/integer_ops/lut.h",
         "reference/integer_ops/mean.h",
         "reference/integer_ops/mul.h",
         "reference/integer_ops/pooling.h",
@@ -548,8 +586,8 @@ cc_library(
         "reference/integer_ops/transpose_conv.h",
         "reference/l2normalization.h",
         "reference/leaky_relu.h",
-        "reference/logistic.h",
         "reference/log_softmax.h",
+        "reference/logistic.h",
         "reference/lstm_cell.h",
         "reference/maximum_minimum.h",
         "reference/mul.h",
@@ -565,6 +603,7 @@ cc_library(
         "reference/resize_bilinear.h",
         "reference/resize_nearest_neighbor.h",
         "reference/round.h",
+        "reference/select.h",
         "reference/slice.h",
         "reference/softmax.h",
         "reference/space_to_batch_nd.h",
@@ -581,8 +620,8 @@ cc_library(
             "reference/integer_ops/dequantize.h",
             "reference/integer_ops/log_softmax.h",
             "reference/reference_ops.h",
-            "reference/string_comparisons.h",
             "reference/sparse_ops/fully_connected.h",
+            "reference/string_comparisons.h",
         ],
     }),
     compatible_with = get_compatible_with_portable(),
@@ -601,12 +640,13 @@ cc_library(
         ":constants",
         ":cppmath",
         ":quantization_util",
+        ":reference_comparisons",
         ":strided_slice_logic",
         ":tensor",
         ":tensor_utils",
         ":types",
         "//tensorflow/lite:string_util",
-        "//tensorflow/lite/c:common",
+        "//tensorflow/lite/core/c:common",
         "//tensorflow/lite/kernels:kernel_util",
         "//tensorflow/lite/kernels:op_macros",
         "//tensorflow/lite/kernels/internal/utils:sparsity_format_converter",
@@ -667,6 +707,7 @@ cc_library(
         "reference/requantize.h",
         "reference/resize_nearest_neighbor.h",
         "reference/round.h",
+        "reference/select.h",
         "reference/slice.h",
         "reference/softmax.h",
         "reference/space_to_batch_nd.h",
@@ -678,6 +719,7 @@ cc_library(
         "reference/transpose.h",
         "reference/transpose_conv.h",
     ],
+    compatible_with = get_compatible_with_portable(),
     copts = tflite_copts(),
     # We are disabling parse_headers for this header-only target so that the
     # external and internal builds are consistent. The primary issue here is
@@ -694,17 +736,31 @@ cc_library(
         ":legacy_types",
         ":quantization_util",
         ":reference_base",
+        ":reference_comparisons",
         ":strided_slice_logic",
         ":tensor",
         ":tensor_utils",
         ":types",
         "//tensorflow/lite:string_util",
-        "//tensorflow/lite/c:common",
+        "//tensorflow/lite/core/c:common",
         "//tensorflow/lite/kernels:op_macros",
         "//tensorflow/lite/kernels/internal/utils:sparsity_format_converter",
         "//third_party/eigen3",
         "@gemmlowp",
         "@ruy//ruy/profiler:instrumentation",
+    ],
+)
+
+cc_library(
+    name = "tensor_ctypes",
+    srcs = ["tensor_ctypes.cc"],
+    hdrs = ["tensor_ctypes.h"],
+    compatible_with = get_compatible_with_portable(),
+    copts = tflite_copts(),
+    deps = [
+        ":types",
+        "//tensorflow/lite/core:macros",
+        "//tensorflow/lite/core/c:common",
     ],
 )
 
@@ -722,9 +778,11 @@ cc_library(
     compatible_with = get_compatible_with_portable(),
     copts = tflite_copts(),
     deps = [
+        ":tensor_ctypes",
         ":types",
+        "//tensorflow/lite:macros",
         "//tensorflow/lite:string_util",
-        "//tensorflow/lite/c:common",
+        "//tensorflow/lite/core/c:common",
     ],
 )
 
@@ -742,9 +800,11 @@ cc_library(
     }),
     copts = tflite_copts(),
     deps = [
+        ":tensor_ctypes",
         ":types",
+        "//tensorflow/lite:macros",
         "//tensorflow/lite:string_util",
-        "//tensorflow/lite/c:common",
+        "//tensorflow/lite/core/c:common",
     ],
 )
 
@@ -806,7 +866,7 @@ cc_library(
         ":cpu_check",
         ":neon_tensor_utils",
         ":portable_tensor_utils",
-        "//tensorflow/lite/c:common",
+        "//tensorflow/lite/core/c:common",
         "//tensorflow/lite/kernels:cpu_backend_context",
         "//tensorflow/lite/kernels:cpu_backend_gemm",
         "//tensorflow/lite/kernels:op_macros",
@@ -834,8 +894,17 @@ cc_library(
     copts = tflite_copts(),
     deps = [
         ":tensor_utils",
-        "//tensorflow/lite/c:common",
+        "//tensorflow/lite/core/c:common",
     ],
+)
+
+cc_library(
+    name = "reduce_utils",
+    hdrs = [
+        "optimized/reduce_utils.h",
+    ],
+    compatible_with = get_compatible_with_portable(),
+    copts = tflite_copts(),
 )
 
 # Audio support classes imported directly from TensorFlow.
@@ -861,6 +930,43 @@ cc_library(
     ],
 )
 
+# This target is helpful to allow builds that can not use Eigen. See
+# http://b/269699951 for more information. Ideally we could call this target
+# portable_tensor_utils but that name is already being used for
+# reference/portable_tensor_utils.cc and more.
+cc_library(
+    name = "tensor_utils_no_eigen",
+    srcs = [
+        "portable_tensor_utils.cc",
+    ],
+    hdrs = [
+        "portable_tensor_utils.h",
+    ],
+    compatible_with = get_compatible_with_portable(),
+    copts = tflite_copts() + NEON_FLAGS_IF_APPLICABLE,
+    deps = [
+        ":cpu_check",
+        "//tensorflow/lite/core/c:common",
+    ] + selects.with_or({
+        (
+            ":arm_any",
+        ): [":neon_tensor_utils"],
+        (
+            ":x86_any",
+        ): [
+            ":portable_tensor_utils",  # If SSSE3 isn't available, we fall back to portable
+            ":sse_tensor_utils",
+        ],
+        (
+            "//tensorflow/lite:tf_lite_static_memory",
+            "//conditions:default",
+        ): [":portable_tensor_utils"],
+    }),
+)
+
+# Without adding portable_tensor_utils.h in the exported headers, targets will
+# run into layering check build failure unless they list both :tensor_utils and
+# :tensor_utils_no_eigen in their deps which can be quite confusing.
 cc_library(
     name = "tensor_utils",
     srcs = [
@@ -874,8 +980,9 @@ cc_library(
     copts = tflite_copts() + NEON_FLAGS_IF_APPLICABLE,
     deps = [
         ":cpu_check",
+        ":tensor_utils_no_eigen",
+        "//tensorflow/lite/core/c:common",
         "//third_party/eigen3",
-        "//tensorflow/lite/c:common",
     ] + selects.with_or({
         (
             ":arm_any",
@@ -921,7 +1028,7 @@ cc_test(
         ":common",
         ":quantization_util",
         ":tensor_utils",
-        "//tensorflow/lite/c:common",
+        "//tensorflow/lite/core/c:common",
         "//tensorflow/lite/kernels:cpu_backend_context",
         "//tensorflow/lite/kernels:test_util",
         "@com_google_googletest//:gtest_main",
@@ -1060,7 +1167,6 @@ cc_test(
     srcs = [
         "strided_slice_logic_test.cc",
     ],
-    shard_count = 4,
     deps = [
         ":strided_slice_logic",
         "@com_google_googletest//:gtest_main",
@@ -1216,6 +1322,27 @@ cc_test(
     deps = [
         ":avx2_quantization_utils",
         ":common",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "reduce_utils_test",
+    srcs = ["optimized/reduce_utils_test.cc"],
+    deps = [
+        ":common",
+        ":reduce_utils",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "runtime_shape_test",
+    srcs = ["runtime_shape_test.cc"],
+    deps = [
+        ":types",
+        "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/types:span",
         "@com_google_googletest//:gtest_main",
     ],
 )

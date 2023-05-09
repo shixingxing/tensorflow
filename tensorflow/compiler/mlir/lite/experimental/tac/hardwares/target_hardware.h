@@ -12,8 +12,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-#ifndef TENSORFLOW_COMPILER_MLIR_LITE_EXPERIMENTAL_TARGET_HARDWARE_H_
-#define TENSORFLOW_COMPILER_MLIR_LITE_EXPERIMENTAL_TARGET_HARDWARE_H_
+#ifndef TENSORFLOW_COMPILER_MLIR_LITE_EXPERIMENTAL_TAC_HARDWARES_TARGET_HARDWARE_H_
+#define TENSORFLOW_COMPILER_MLIR_LITE_EXPERIMENTAL_TAC_HARDWARES_TARGET_HARDWARE_H_
 
 #include <functional>
 #include <memory>
@@ -93,6 +93,8 @@ class TargetHardware {
   // Returns TypeId for the provided hardware.
   // Usually should be something like mlir::TypeID::get<MyType>()
   virtual mlir::TypeID GetTypeId() const = 0;
+
+  virtual void GetDependentDialects(mlir::DialectRegistry& registry) const {}
 
  protected:
   // All registered hardware ops.
@@ -204,4 +206,4 @@ std::string GetHardwareName(const TargetHardware* hardware);
 }  // namespace TFL
 }  // namespace mlir
 
-#endif  // TENSORFLOW_COMPILER_MLIR_LITE_EXPERIMENTAL_TARGET_HARDWARE_H_
+#endif  // TENSORFLOW_COMPILER_MLIR_LITE_EXPERIMENTAL_TAC_HARDWARES_TARGET_HARDWARE_H_
