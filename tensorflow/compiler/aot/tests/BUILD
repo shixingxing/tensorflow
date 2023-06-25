@@ -69,18 +69,18 @@ py_binary(
     srcs_version = "PY3",
     deps = [
         "//tensorflow/core:protos_all_py",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client",
-        "//tensorflow/python:cond",
-        "//tensorflow/python:control_flow_assert",
-        "//tensorflow/python:control_flow_ops",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:nn_ops",
-        "//tensorflow/python:session",
-        "//tensorflow/python:training",
-        "//tensorflow/python:variable_v1",
-        "//tensorflow/python:variables",
+        "//tensorflow/python/client",
+        "//tensorflow/python/client:session",
+        "//tensorflow/python/framework:for_generated_wrappers",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:cond",
+        "//tensorflow/python/ops:control_flow_assert",
+        "//tensorflow/python/ops:control_flow_ops",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops:nn_ops",
+        "//tensorflow/python/ops:variable_v1",
+        "//tensorflow/python/ops:variables",
+        "//tensorflow/python/training",
         "@absl_py//absl:app",
         "@six_archive//:six",
     ],
@@ -91,7 +91,6 @@ genrule(
     testonly = 1,
     outs = [
         "test_graph_tfadd.pb",
-        "test_debuginfo_tfadd.pb",
         "test_graph_tfadd_with_ckpt.ckpt",
         "test_graph_tfadd_with_ckpt.pb",
         "test_graph_tfadd_with_ckpt_saver.ckpt",
@@ -437,6 +436,7 @@ tf_cc_test(
     tags = [
         "manual",
         "no_mac",  # TODO(b/228273415)
+        "not_run:arm",
     ],
     deps = [
         ":test_graph_tfadd",
@@ -510,6 +510,7 @@ tf_cc_test(
     tags = [
         "manual",
         "no_mac",  # TODO(b/228273415)
+        "not_run:arm",
     ],
     deps = [
         ":test_graph_tfadd_mlir_bridge",

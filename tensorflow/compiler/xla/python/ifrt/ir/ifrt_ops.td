@@ -22,11 +22,12 @@ include "mlir/IR/BuiltinTypes.td"
 include "mlir/IR/SymbolInterfaces.td"
 include "mlir/Interfaces/CallInterfaces.td"
 include "tensorflow/compiler/xla/python/ifrt/ir/ifrt_dialect.td"
+include "tensorflow/compiler/xla/python/ifrt/ir/ifrt_interfaces.td"
 
 class Ifrt_Op<string mnemonic, list<Trait> traits = []> :
     Op<Ifrt_Dialect, mnemonic, traits>;
 
-def Ifrt_ReshardOp : Ifrt_Op<"Reshard"> {
+def Ifrt_ReshardOp : Ifrt_Op<"Reshard", [NestedInIfrtFunc]> {
   let summary = "Reshards a host tensor or device array";
   let description = [{
     Copies the host tensor or device array to a new sharding.
@@ -46,7 +47,8 @@ def Ifrt_ReshardOp : Ifrt_Op<"Reshard"> {
   let hasVerifier = 1;
 }
 
-def Ifrt_AssembleOp : Ifrt_Op<"Assemble", [AttrSizedOperandSegments]> {
+def Ifrt_AssembleOp
+    : Ifrt_Op<"Assemble", [AttrSizedOperandSegments, NestedInIfrtFunc]> {
   let summary = "Assembles single device arrays to a sharded array";
   let description = [{
     Builds a larger array out of individual per-device arrays.
@@ -67,7 +69,7 @@ def Ifrt_AssembleOp : Ifrt_Op<"Assemble", [AttrSizedOperandSegments]> {
   let hasVerifier = 1;
 }
 
-def Ifrt_DisassembleOp : Ifrt_Op<"Disassemble"> {
+def Ifrt_DisassembleOp : Ifrt_Op<"Disassemble", [NestedInIfrtFunc]> {
   let summary = "Disassembles a sharded array to single device arrays";
   let description = [{
     Breaks an array up into per-device arrays.
@@ -94,6 +96,8 @@ def IoAliasesAttr : TypedArrayAttrBase<
 
 def Ifrt_CallOp : Ifrt_Op<"Call",
     [AttrSizedOperandSegments,
+     NestedInIfrtFunc,
+     IfrtCallLike<"::mlir::func::FuncOp">,
      DeclareOpInterfaceMethods<CallOpInterface>,
      DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Call some function on a set of devices";
@@ -122,7 +126,7 @@ def Ifrt_CallOp : Ifrt_Op<"Call",
     Variadic<Ifrt_ControlType>:$control_inputs,
 
     SymbolRefAttr:$callee,
-    DenseI64ArrayAttr:$devices,
+    DenseI32ArrayAttr:$devices,
     DefaultValuedAttr<IoAliasesAttr, "{}">:$io_aliases);
   let results = (outs
     Variadic<Ifrt_ArrayType>:$outputs,
@@ -136,6 +140,8 @@ def Ifrt_CallOp : Ifrt_Op<"Call",
 
 def Ifrt_CallLoadedExecutableOp : Ifrt_Op<"CallLoadedExecutable",
     [AttrSizedOperandSegments,
+     NestedInIfrtFunc,
+     IfrtCallLike<"LoadedExecutableOp">,
      DeclareOpInterfaceMethods<CallOpInterface>,
      DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Call some loaded executable";
@@ -180,14 +186,14 @@ def Ifrt_LoadedExecutableOp : Ifrt_Op<"LoadedExecutable",
   let arguments = (ins
     SymbolNameAttr: $sym_name,
     TypeAttrOf<FunctionType>: $function_type,
-    DenseI64ArrayAttr:$devices
+    DenseI32ArrayAttr:$devices
   );
 
   let assemblyFormat = "$sym_name attr-dict `:` $function_type";
   let hasVerifier = 1;
 }
 
-def Ifrt_AfterOp : Ifrt_Op<"After"> {
+def Ifrt_AfterOp : Ifrt_Op<"After", [NestedInIfrtFunc]> {
   let summary = "Get a control handle for array materialization.";
   let description = [{
     When depending on the `control_output`, the op will be not be scheduled until

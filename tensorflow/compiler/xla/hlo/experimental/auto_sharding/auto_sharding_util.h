@@ -439,7 +439,9 @@ Shape ComputeIntermediateShape(const HloSharding& src_sharding,
 // Also fix the resharding between 1d and 2d logical mesh.
 void FixMixedMeshShapeReshardingGetTupleElement(
     HloInstruction* inst, const HloSharding& dst_sharding,
-    const Array<int64_t>& device_mesh);
+    const Array<int64_t>& device_mesh,
+    absl::flat_hash_map<std::string, std::vector<HloSharding>>*
+        preserve_shardings);
 
 void FixMixedMeshShapeResharding(HloInstruction* inst, int operand_num,
                                  const HloSharding& dst_sharding,
@@ -582,9 +584,19 @@ double ReshardingCostMixedMeshShape(
 // If a sharding is [8, 4] for the complete mesh shape, we convert it to [8, 1]
 // given [1, 8, 1] as the partial mesh shape.
 // total_num_devices should equal to the product of mesh_shape elements.
-bool AdjustShardingsWithPartialMeshShape(
+StatusOr<bool> AdjustShardingsWithPartialMeshShape(
     const std::vector<HloInstruction*>& instructions,
-    const std::vector<int64_t>& mesh_shape, int64_t total_num_devices);
+    const std::vector<int64_t>& mesh_shape, int64_t total_num_devices,
+    bool crash_on_error);
+
+inline bool AdjustShardingsWithPartialMeshShape(
+    const std::vector<HloInstruction*>& instructions,
+    const std::vector<int64_t>& mesh_shape, int64_t total_num_devices) {
+  auto result = AdjustShardingsWithPartialMeshShape(instructions, mesh_shape,
+                                                    total_num_devices, true);
+  CHECK(result.ok());
+  return *result;
+}
 
 // Decompose mesh shapes into partial mesh shapes so that we can solve the auto
 // sharding problem iteratively. Returns partial mesh shapes with larger
@@ -603,6 +615,13 @@ bool IsEntryComputationInputOrOutput(const HloModule* module,
 // multiple mesh shapes is enabled.
 std::vector<std::vector<int64_t>> CreateDifferentMeshShapesToTry(
     int64_t num_devices, int num_mesh_dims, bool symmetrical_mesh_dims);
+
+// Statically estimate the execution counts of HLO ops. This matters for while
+// loops, and we use a constant iteration count for all while loops for this
+// approximation.
+absl::flat_hash_map<const HloInstruction*, int64_t>
+ComputeInstructionExecutionCounts(const HloModule* module,
+                                  int64_t loop_iteration_count_estimate);
 }  // namespace spmd
 }  // namespace xla
 

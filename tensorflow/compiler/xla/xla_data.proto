@@ -199,6 +199,10 @@ message LayoutProto {
   // error.
   repeated TileProto tiles = 6;
 
+  // (Optional) Bit size of each element. When unspecified or being 0, default
+  // to ShapeUtil::ByteSizeOfPrimitiveType.
+  int64 element_size_in_bits = 7;
+
   // Memory space where this array resides. The integer field is interpreted in
   // a backend-specific manner.
   int64 memory_space = 8;
@@ -234,8 +238,6 @@ message LayoutProto {
   reserved "format";
   reserved 5;
   reserved "max_sparse_elements";
-  reserved 7;
-  reserved "element_size_in_bits";
 }
 // LINT.ThenChange( \
 //     https://www.tensorflow.org/code/tensorflow/compiler/xla/shape_util.cc,      \
@@ -760,6 +762,7 @@ message OpSharding {
   repeated int64 tile_assignment_dimensions = 3;
   // Flattened list of device IDs. The order of flattening is the same as used
   // by IndexUtil::MultiToLinearIndex(tile_assignment_shape).
+  // Only one of tile_assignment_devices and iota_dimensions shall be non-empty.
   repeated int64 tile_assignment_devices = 4;
   // If type == TUPLE, the sub-shardings, one per leaf node in the tuple shape,
   // in pre-order. The tuple shape could be nested; here we store just a
@@ -786,6 +789,15 @@ message OpSharding {
   // in [2,2,2,2] represents a subgrouping in replicate, manual,
   // unreduced sharding type respectively.
   repeated Type last_tile_dims = 8;
+
+  // Dimensions used to reshape the 1D iota array of device IDs.
+  // Only one of tile_assignment_devices and iota_reshape_dims shall be
+  // non-empty.
+  repeated int64 iota_reshape_dims = 9;
+
+  // Dimension permutations to transposed the iota array reshaped to
+  // iota_reshape_dims. This must have the same size as iota_reshape_dims.
+  repeated int32 iota_transpose_perm = 10;
 }
 // LINT.ThenChange()
 

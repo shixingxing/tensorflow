@@ -75,8 +75,10 @@ module attributes {tf.versions = {bad_consumers = [], min_consumer = 0 : i32, pr
 
 XlaComputation GetTestXlaComputation() {
   XlaBuilder xla_builder("test");
-  XlaOp add = xla::Add(xla::ConstantR0<float>(&xla_builder, 1.0),
-                       xla::ConstantR0<float>(&xla_builder, 2.0));
+  auto param =
+      Parameter(&xla_builder, 0, ShapeUtil::MakeScalarShape(xla::F32), "a");
+
+  XlaOp add = xla::Add(param, xla::ConstantR0<float>(&xla_builder, 2.0));
 
   std::vector<XlaOp> tuple_values;
   tuple_values.push_back(add);
@@ -99,8 +101,7 @@ class Tf2XlaRewriterTestPeer {
       : op_builder_(op),
         empty_rewriter_(op_builder_),
         tf2xla_rewriter_(op, empty_rewriter_,
-                         /*device_type=*/"XLA_CPU_JIT",
-                         /*use_tf2xla_hlo_importer=*/true) {}
+                         /*device_type=*/"XLA_CPU_JIT") {}
 
   tsl::StatusOr<TupleOp> ImportXlaComputationIntoModule(
       XlaComputation& computation) {
@@ -129,15 +130,15 @@ class Tf2XlaRewriterTest : public ::testing::Test {
     return tsl::OkStatus();
   }
 
-  Status LegalizeSingleOp(bool use_tf2xla_hlo_importer, Operation& op) {
+  Status LegalizeSingleOp(Operation& op) {
     SourceMgrDiagnosticHandler sourceMgrHandler(source_manager_, &context_);
 
     OpBuilder op_builder(&op);
     EmptyPatternRewriter pattern_rewriter(op_builder);
 
-    LogicalResult result = Tf2XlaRewriter::RewriteOp(
-        &op, pattern_rewriter,
-        /*device_type=*/"XLA_CPU_JIT", use_tf2xla_hlo_importer);
+    LogicalResult result =
+        Tf2XlaRewriter::RewriteOp(&op, pattern_rewriter,
+                                  /*device_type=*/"XLA_CPU_JIT");
     if (!result.succeeded()) {
       return tsl::errors::Internal("Failed to rewrite op");
     }
@@ -145,8 +146,7 @@ class Tf2XlaRewriterTest : public ::testing::Test {
     return tsl::OkStatus();
   }
 
-  Status LegalizeModule(bool use_tf2xla_hlo_importer,
-                        std::string module_string = kMlirModuleStr) {
+  Status LegalizeModule(std::string module_string = kMlirModuleStr) {
     TF_EXPECT_OK(CreateMlirModule(module_string));
     FuncOp main = module_->lookupSymbol<mlir::func::FuncOp>("main");
     if (!main) {
@@ -159,7 +159,7 @@ class Tf2XlaRewriterTest : public ::testing::Test {
         return WalkResult::advance();
       }
 
-      if (!LegalizeSingleOp(use_tf2xla_hlo_importer, *op).ok()) {
+      if (!LegalizeSingleOp(*op).ok()) {
         return WalkResult::interrupt();
       }
 
@@ -201,12 +201,8 @@ class Tf2XlaRewriterTest : public ::testing::Test {
   llvm::SourceMgr source_manager_;
 };
 
-TEST_F(Tf2XlaRewriterTest, LegalizesOp) {
-  TF_EXPECT_OK(LegalizeModule(/*use_tf2xla_hlo_importer=*/false));
-}
-
 TEST_F(Tf2XlaRewriterTest, LegalizesOpWithTf2xlaHloImporter) {
-  TF_EXPECT_OK(LegalizeModule(/*use_tf2xla_hlo_importer=*/true));
+  TF_EXPECT_OK(LegalizeModule());
 
   int num_tuple_ops = 0;
   module_->walk([&num_tuple_ops](TupleOp tuple_op) { num_tuple_ops += 1; });
@@ -287,11 +283,10 @@ TEST_F(Tf2XlaRewriterTest, InsertsConstantParameters) {
     }
   })";
 
-  TF_ASSERT_OK(
-      LegalizeModule(/*use_tf2xla_hlo_importer=*/true, kModuleWithConstParam));
+  TF_ASSERT_OK(LegalizeModule(kModuleWithConstParam));
 }
 
-TEST_F(Tf2XlaRewriterTest, DISABLED_ImportsPrivateFunctions) {
+TEST_F(Tf2XlaRewriterTest, ErrorsWithInvalidNumberOfParametersToArgs) {
   XlaBuilder builder("test_builder");
   XlaComputation to_apply;
   {
@@ -315,9 +310,9 @@ TEST_F(Tf2XlaRewriterTest, DISABLED_ImportsPrivateFunctions) {
   EXPECT_EQ(computation.proto().computations_size(), 2);
 
   TF_ASSERT_OK(CreateMlirModule());
-  TF_ASSERT_OK_AND_ASSIGN(TupleOp root_tuple,
-                          ImportXlaComputationIntoModule(computation));
-  EXPECT_TRUE(root_tuple);
+  tsl::StatusOr<TupleOp> status_or_tuple_op =
+      ImportXlaComputationIntoModule(computation);
+  EXPECT_FALSE(status_or_tuple_op.ok());
 }
 
 }  // namespace mhlo

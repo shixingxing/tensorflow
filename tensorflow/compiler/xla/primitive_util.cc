@@ -66,7 +66,8 @@ int UnderflowExponent(PrimitiveType type) {
   // |std::numeric_limits<float>::min_exponent| is defined as: "minimum negative
   // integer such that radix raised to the power one less than that integer is a
   // normalized floating-point number." as such it does not actually yield the
-  // minimum exponent but the exponent of the first integer which overflows.
+  // minimum exponent but one above the minimum exponent that a normalized
+  // number can have.
   switch (type) {
     case F32:
       return std::numeric_limits<float>::min_exponent;
@@ -113,35 +114,6 @@ int OverflowExponent(PrimitiveType type) {
   }
 }
 
-bool IsSignedIntegralType(PrimitiveType type) {
-  return type == S4 || type == S8 || type == S16 || type == S32 || type == S64;
-}
-
-bool IsUnsignedIntegralType(PrimitiveType type) {
-  return type == U4 || type == U8 || type == U16 || type == U32 || type == U64;
-}
-
-bool IsIntegralType(PrimitiveType type) {
-  return IsUnsignedIntegralType(type) || IsSignedIntegralType(type);
-}
-
-xla::PrimitiveType UnsignedIntegralTypeForBitWidth(int64_t src_bitwidth) {
-  switch (src_bitwidth) {
-    case 4:
-      return xla::U4;
-    case 8:
-      return xla::U8;
-    case 16:
-      return xla::U16;
-    case 32:
-      return xla::U32;
-    case 64:
-      return xla::U64;
-    default:
-      return xla::PRIMITIVE_TYPE_INVALID;
-  }
-}
-
 xla::PrimitiveType SignedIntegralTypeForBitWidth(int64_t src_bitwidth) {
   switch (src_bitwidth) {
     case 4:
@@ -156,18 +128,6 @@ xla::PrimitiveType SignedIntegralTypeForBitWidth(int64_t src_bitwidth) {
       return xla::S64;
     default:
       return xla::PRIMITIVE_TYPE_INVALID;
-  }
-}
-
-PrimitiveType ComplexComponentType(PrimitiveType complex_type) {
-  switch (complex_type) {
-    case C64:
-      return F32;
-    case C128:
-      return F64;
-    default:
-      LOG(FATAL) << "Primitive type is not complex: "
-                 << PrimitiveType_Name(complex_type);
   }
 }
 

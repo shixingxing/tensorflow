@@ -117,6 +117,7 @@ cc_library(
         "sharding_param.cc",
     ],
     hdrs = [
+        "constants.h",
         "ifrt_dialect.h",
         "ifrt_interfaces.h",
         "ifrt_ops.h",
@@ -131,5 +132,17 @@ cc_library(
         "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Support",
+    ],
+)
+
+cc_library(
+    name = "compile_options",
+    srcs = ["compile_options.cc"],
+    hdrs = ["compile_options.h"],
+    visibility = ["//tensorflow/compiler/xla/python/ifrt:friends"],
+    deps = [
+        "//tensorflow/compiler/xla/python/ifrt",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@llvm-project//llvm:Support",
     ],
 )

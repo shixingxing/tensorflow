@@ -119,7 +119,6 @@ cc_library(
         ":common",
         "//tensorflow/compiler/mlir/lite:tensorflow_lite",
         "//tensorflow/compiler/mlir/lite/quantization:quantization_lib",
-        "//tensorflow/compiler/mlir/lite/quantization/ir:QuantOps",
         "//tensorflow/compiler/mlir/tensorflow",
         "//tensorflow/compiler/mlir/tensorflow:verification_utils",
         "@llvm-project//llvm:Support",
@@ -189,7 +188,6 @@ cc_library(
         ":device_transform_patterns",
         "//tensorflow/compiler/mlir/lite:tensorflow_lite",
         "//tensorflow/compiler/mlir/lite/experimental/tac/hardwares:target_hardware",
-        "//tensorflow/compiler/mlir/lite/quantization/ir:QuantOps",
         "//tensorflow/compiler/mlir/tensorflow",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:FuncDialect",
@@ -232,6 +230,7 @@ cc_library(
         "transforms/get_alternative_subgraph.cc",
         "transforms/pick_subgraphs.cc",
         "transforms/raise_target_subgraphs.cc",
+        "transforms/tac_filter.cc",
         "transforms/target_annotation.cc",
     ],
     hdrs = [
@@ -243,6 +242,7 @@ cc_library(
         ":common",
         ":cost_model",
         ":device_transform",
+        ":tac_filter_cc_proto",
         ":tac_importer_exporter",
         "//tensorflow/compiler/mlir/lite:tensorflow_lite",
         "//tensorflow/compiler/mlir/lite:tf_tfl_passes",
@@ -253,6 +253,7 @@ cc_library(
         "//tensorflow/compiler/mlir/tensorflow:tensorflow_analysis",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
+        "@com_google_protobuf//:protobuf_headers",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:ArithDialect",
         "@llvm-project//mlir:FuncDialect",
@@ -379,4 +380,16 @@ py_library(
     deps = [
         "//tensorflow/compiler/mlir/lite/experimental/tac/py_wrapper:_pywrap_tac_wrapper",
     ],
+)
+
+proto_library(
+    name = "tac_filter_proto",
+    srcs = ["tac_filter.proto"],
+    compatible_with = get_compatible_with_cloud(),
+)
+
+cc_proto_library(
+    name = "tac_filter_cc_proto",
+    compatible_with = get_compatible_with_cloud(),
+    deps = [":tac_filter_proto"],
 )

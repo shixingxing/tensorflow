@@ -184,9 +184,11 @@ class Pooling3DOp : public UnaryOp<T> {
                                    GetTensorDim(stride_, data_format_, '1'),
                                    GetTensorDim(stride_, data_format_, '0')}};
     std::array<int64_t, 3> padding, out;
+    std::array<int64_t, 3> dilations{1, 1, 1};
 
-    OP_REQUIRES_OK(context, Get3dOutputSize(input_size, window, stride,
-                                            padding_, &out, &padding));
+    OP_REQUIRES_OK(context,
+                   Get3dOutputSizeV2(input_size, window, dilations, stride,
+                                     padding_, &out, &padding));
 
     TensorShape out_shape;
     OP_REQUIRES_OK(context, ShapeFromFormatWithStatus(
@@ -362,9 +364,11 @@ class MaxPooling3dGradOp : public OpKernel {
                                    GetTensorDim(stride_, data_format_, '1'),
                                    GetTensorDim(stride_, data_format_, '0')}};
     std::array<int64_t, 3> out, padding;
+    std::array<int64_t, 3> dilations{1, 1, 1};
 
-    OP_REQUIRES_OK(context, Get3dOutputSize(input_size, window, stride,
-                                            padding_, &out, &padding));
+    OP_REQUIRES_OK(context,
+                   Get3dOutputSizeV2(input_size, window, dilations, stride,
+                                     padding_, &out, &padding));
 
     const int64_t depth = GetTensorDim(tensor_in, data_format_, 'C');
     const int64_t in_batch = GetTensorDim(tensor_in, data_format_, 'N');
@@ -497,6 +501,11 @@ class AvgPooling3dGradOp : public OpKernel {
     OP_REQUIRES(context, ksize_.size() == 5,
                 errors::InvalidArgument("Sliding window ksize field must "
                                         "specify 5 dimensions"));
+    for (std::size_t i = 0; i < ksize_.size(); ++i) {
+      OP_REQUIRES(
+          context, ksize_[i] > 0,
+          errors::InvalidArgument("ksize must be positive, got: ", ksize_[i]));
+    }
     OP_REQUIRES_OK(context, context->GetAttr("strides", &stride_));
     OP_REQUIRES(context, stride_.size() == 5,
                 errors::InvalidArgument("Sliding window stride field must "
@@ -546,9 +555,11 @@ class AvgPooling3dGradOp : public OpKernel {
                                    GetTensorDim(stride_, data_format_, '1'),
                                    GetTensorDim(stride_, data_format_, '0')}};
     std::array<int64_t, 3> padding, out;
+    std::array<int64_t, 3> dilations{1, 1, 1};
 
-    OP_REQUIRES_OK(context, Get3dOutputSize(input_size, window, stride,
-                                            padding_, &out, &padding));
+    OP_REQUIRES_OK(context,
+                   Get3dOutputSizeV2(input_size, window, dilations, stride,
+                                     padding_, &out, &padding));
 
     LaunchAvgPooling3dGradOp<Device, T>::launch(
         context, output_shape, out_backprop, window, stride, out, padding,
