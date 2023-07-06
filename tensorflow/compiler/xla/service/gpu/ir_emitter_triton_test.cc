@@ -21,6 +21,7 @@ limitations under the License.
 
 #include "llvm/IR/LLVMContext.h"
 #include "mlir/IR/MLIRContext.h"  // from @llvm-project
+#include "tensorflow/compiler/xla/autotuning.pb.h"
 #include "tensorflow/compiler/xla/error_spec.h"
 #include "tensorflow/compiler/xla/hlo/ir/hlo_computation.h"
 #include "tensorflow/compiler/xla/service/gpu/backend_configs.pb.h"
@@ -33,7 +34,6 @@ limitations under the License.
 #include "tensorflow/tsl/platform/status_matchers.h"
 #include "tensorflow/tsl/platform/statusor.h"
 #include "tensorflow/tsl/platform/tensor_float_32_utils.h"
-#include "tensorflow/tsl/protobuf/autotuning.pb.h"
 
 namespace xla {
 namespace gpu {
@@ -157,7 +157,7 @@ ENTRY entry {
   llvm::Module llvm_module("module", llvm_ctx);
   mlir::MLIRContext mlir_context;
 
-  tensorflow::AutotuneResult::TritonGemmKey config;
+  AutotuneResult::TritonGemmKey config;
   config.set_block_m(16);
   config.set_block_n(32);
   config.set_block_k(512);
@@ -169,10 +169,8 @@ ENTRY entry {
                     se::CudaComputeCapability{se::CudaComputeCapability::AMPERE,
                                               /*minor=*/0},
                     dev_info, config, &llvm_module, &MatMul, mlir_context),
-      tsl::testing::StatusIs(
-          tsl::error::RESOURCE_EXHAUSTED,
-          absl::StrFormat("Requires too much shared memory: 294912 > %d",
-                          dev_info.shared_memory_per_block_optin)));
+      tsl::testing::StatusIs(tsl::error::RESOURCE_EXHAUSTED,
+                             "Shared memory size limit exceeded."));
 
   config.set_block_m(64);
   config.set_block_n(128);
@@ -585,7 +583,7 @@ ENTRY entry {
   mlir::MLIRContext mlir_context;
 
   // Fails if the tiling is too complex.
-  tensorflow::AutotuneResult::TritonGemmKey config;
+  AutotuneResult::TritonGemmKey config;
   config.set_block_m(512);
   config.set_block_n(512);
   config.set_block_k(32);
@@ -611,6 +609,33 @@ ENTRY entry {
                                               /*minor=*/0},
                     dev_info, config, &llvm_module, &MatMul, mlir_context)
           .status());
+}
+
+// This test should be updated when fixes for
+// https://github.com/openai/triton/issues/1864 are applied.
+TEST_F(TritonGemmTest, TritonCompilerCanFailOnConstants) {
+  EXPECT_THAT(GetOptimizedModule(R"(
+HloModule m, is_scheduled=true
+
+triton_gemm___computation {
+  parameter_0 = f32[92,11]{1,0} parameter(0)
+  c = f32[] constant(0)
+  b = f32[11,63] broadcast(c)
+  ROOT _.1 = f32[92,63]{1,0} dot(parameter_0, b),
+    lhs_contracting_dims={1}, rhs_contracting_dims={0}
+}
+
+ENTRY e {
+  p0 = f32[92,11]{1,0} parameter(0)
+  ROOT triton_gemm__ = f32[92,63]{1,0} fusion(p0), kind=kCustom,
+    calls=triton_gemm___computation,
+    backend_config={"kind":"__triton_gemm",
+                    "triton_gemm_config":{"block_m":"16","block_n":"64",
+                                          "block_k":"16","split_k":"1",
+                                          "num_stages":"3","num_warps":"2"}}
+})"),
+              tsl::testing::StatusIs(tsl::error::INTERNAL,
+                                     "Failed to compile Triton kernel."));
 }
 
 class TritonGemmTestAny : public TritonGemmTest {
@@ -1367,45 +1392,6 @@ ENTRY e {
                                       /*run_hlo_passes=*/false));
 }
 
-TEST_F(CompareTest, TritonDotFusionCanHaveOnlyLHSParameter) {
-  const std::string kHloTextTest = R"(
-HloModule m, is_scheduled=true
-
-triton_gemm___computation {
-  parameter_0 = f32[92,11]{1,0} parameter(0)
-  c = f32[] constant(123)
-  b = f32[11,63] broadcast(c)
-  ROOT _.1 = f32[92,63]{1,0} dot(parameter_0, b),
-    lhs_contracting_dims={1}, rhs_contracting_dims={0}
-}
-
-ENTRY e {
-  p0 = f32[92,11]{1,0} parameter(0)
-  ROOT triton_gemm__ = f32[92,63]{1,0} fusion(p0), kind=kCustom,
-    calls=triton_gemm___computation,
-    backend_config={"kind":"__triton_gemm",
-                    "triton_gemm_config":{"block_m":"16","block_n":"64",
-                                          "block_k":"16","split_k":"1",
-                                          "num_stages":"3","num_warps":"2"}}
-})";
-
-  const std::string kHloTextRef = R"(
-HloModule m, is_scheduled=true
-
-ENTRY triton_gemm___computation {
-  constant = f32[] constant(123)
-  parameter_0 = f32[92,11]{1,0} parameter(0)
-  broadcast = f32[11,63]{1,0} broadcast(constant), dimensions={}
-  ROOT custom-call = f32[92,63]{1,0} custom-call(parameter_0, broadcast),
-    custom_call_target="__cublas$gemm",
-    backend_config={"alpha_real":1,"beta":0,"dot_dimension_numbers":{"lhs_contracting_dimensions":["1"],"rhs_contracting_dimensions":["0"],"lhs_batch_dimensions":[],"rhs_batch_dimensions":[]},"alpha_imag":0,"precision_config":{"operand_precision":["DEFAULT","DEFAULT"]},"epilogue":"DEFAULT"}
-})";
-
-  EXPECT_TRUE(RunAndCompareTwoModules(kHloTextRef, kHloTextTest,
-                                      ErrorSpec{/*aabs=*/1e-2, /*arel=*/1e-2},
-                                      /*run_hlo_passes=*/false));
-}
-
 TEST_F(CompareTest, TritonDotFusionCanHaveNoParametersAtAll) {
   const std::string kHloTextTest = R"(
 HloModule m, is_scheduled=true
@@ -1445,6 +1431,171 @@ ENTRY triton_gemm___computation {
                                       ErrorSpec{/*aabs=*/1e-6, /*arel=*/1e-6},
                                       /*run_hlo_passes=*/false));
 }
+
+TEST_F(CompareTest, TritonDotFusionCanHaveManyParameters) {
+  const std::string kHloTextTest = R"(
+HloModule m
+
+triton_gemm_dot_computation {
+  tmp_1 = pred[3,32]{1,0} parameter(0)
+  tmp_2 = f32[3,32]{1,0} parameter(1)
+  tmp_3 = f32[3,32]{1,0} parameter(2)
+  tmp_4 = f32[3,32]{1,0} select(tmp_1, tmp_2, tmp_3)
+  tmp_5 = f32[3,32]{1,0} parameter(3)
+  tmp_6 = f32[3,32]{1,0} multiply(tmp_4, tmp_5)
+  tmp_7 = f32[3,32]{1,0} parameter(4)
+  tmp_8 = f32[3,32]{1,0} maximum(tmp_6, tmp_7)
+  tmp_9 = f32[3,57]{1,0} parameter(9)
+  tmp_10 = f32[3,57]{1,0} parameter(10)
+  tmp_11 = f32[3,57]{1,0} multiply(tmp_9, tmp_10)
+  tmp_12 = f32[3,57]{1,0} parameter(11)
+  tmp_13 = f32[3,57]{1,0} add(tmp_11, tmp_12)
+  tmp_14 = pred[3,57]{1,0} parameter(5)
+  tmp_15 = f32[3,57]{1,0} parameter(6)
+  tmp_16 = f32[3,57]{1,0} parameter(7)
+  tmp_17 = f32[3,57]{1,0} select(tmp_14, tmp_15, tmp_16)
+  tmp_18 = f32[3,57]{1,0} parameter(8)
+  tmp_19 = f32[3,57]{1,0} multiply(tmp_17, tmp_18)
+  tmp_20 = f32[3,57]{1,0} negate(tmp_19)
+  tmp_21 = f32[3,57]{1,0} add(tmp_13, tmp_20)
+  ROOT tmp_22 = f32[32,57]{0,1} dot(tmp_8, tmp_21), lhs_contracting_dims={0}, rhs_contracting_dims={0}
+}
+
+ENTRY e {
+  tmp_1 = pred[3,32]{1,0} parameter(0)
+  tmp_2 = f32[3,32]{1,0} parameter(1)
+  tmp_3 = f32[3,32]{1,0} parameter(2)
+  tmp_5 = f32[3,32]{1,0} parameter(3)
+  tmp_7 = f32[3,32]{1,0} parameter(4)
+  tmp_14 = pred[3,57]{1,0} parameter(5)
+  tmp_15 = f32[3,57]{1,0} parameter(6)
+  tmp_16 = f32[3,57]{1,0} parameter(7)
+  tmp_18 = f32[3,57]{1,0} parameter(8)
+  tmp_9 = f32[3,57]{1,0} parameter(9)
+  tmp_10 = f32[3,57]{1,0} parameter(10)
+  tmp_12 = f32[3,57]{1,0} parameter(11)
+  ROOT r = f32[32,57]{0,1} fusion(tmp_1, tmp_2, tmp_3, tmp_5, tmp_7, tmp_14, tmp_15, tmp_16, tmp_18, tmp_9, tmp_10, tmp_12), kind=kCustom,
+    calls=triton_gemm_dot_computation,
+    backend_config={"kind":"__triton_gemm",
+                    "triton_gemm_config":{"block_m":"64","block_n":"64",
+                                          "block_k":"64","split_k":"1",
+                                          "num_stages":"1","num_warps":"4"}}
+})";
+
+  const std::string kHloTextRef = R"(
+HloModule m
+
+fused_computation {
+  param_5.1 = f32[3,57]{1,0} parameter(5)
+  param_6 = f32[3,57]{1,0} parameter(6)
+  multiply.4 = f32[3,57]{1,0} multiply(param_5.1, param_6)
+  param_4.2 = f32[3,57]{1,0} parameter(4)
+  add.3 = f32[3,57]{1,0} add(multiply.4, param_4.2)
+  param_1.4 = pred[3,57]{1,0} parameter(1)
+  param_2.2 = f32[3,57]{1,0} parameter(2)
+  param_3.1 = f32[3,57]{1,0} parameter(3)
+  select.2 = f32[3,57]{1,0} select(param_1.4, param_2.2, param_3.1)
+  param_0.1 = f32[3,57]{1,0} parameter(0)
+  multiply.3 = f32[3,57]{1,0} multiply(select.2, param_0.1)
+  negate.1 = f32[3,57]{1,0} negate(multiply.3)
+  ROOT add.2 = f32[3,57]{1,0} add(add.3, negate.1)
+}
+
+fused_computation.1 {
+  param_2.4 = pred[3,32]{1,0} parameter(2)
+  param_3.2 = f32[3,32]{1,0} parameter(3)
+  param_4.3 = f32[3,32]{1,0} parameter(4)
+  select.3 = f32[3,32]{1,0} select(param_2.4, param_3.2, param_4.3)
+  param_1.7 = f32[3,32]{1,0} parameter(1)
+  multiply.5 = f32[3,32]{1,0} multiply(select.3, param_1.7)
+  param_0.3 = f32[3,32]{1,0} parameter(0)
+  ROOT maximum.1 = f32[3,32]{1,0} maximum(multiply.5, param_0.3)
+}
+
+ENTRY e {
+  tmp_18 = f32[3,57]{1,0} parameter(8)
+  tmp_16 = f32[3,57]{1,0} parameter(7)
+  tmp_15 = f32[3,57]{1,0} parameter(6)
+  tmp_14 = pred[3,57]{1,0} parameter(5)
+  tmp_12 = f32[3,57]{1,0} parameter(11)
+  tmp_10 = f32[3,57]{1,0} parameter(10)
+  tmp_9 = f32[3,57]{1,0} parameter(9)
+  tmp_7 = f32[3,32]{1,0} parameter(4)
+  tmp_5 = f32[3,32]{1,0} parameter(3)
+  tmp_3 = f32[3,32]{1,0} parameter(2)
+  tmp_2 = f32[3,32]{1,0} parameter(1)
+  tmp_1 = pred[3,32]{1,0} parameter(0)
+  fusion.1 = f32[3,32]{1,0} fusion(tmp_7, tmp_5, tmp_1, tmp_2, tmp_3), kind=kLoop, calls=fused_computation.1
+  fusion = f32[3,57]{1,0} fusion(tmp_18, tmp_14, tmp_15, tmp_16, tmp_12, /*index=5*/tmp_9, tmp_10), kind=kLoop, calls=fused_computation
+  ROOT custom-call = f32[32,57]{0,1} custom-call(fusion.1, fusion),
+    custom_call_target="__cublas$gemm",
+    backend_config={"alpha_real":1,"beta":0,"dot_dimension_numbers":{"lhs_contracting_dimensions":["0"],"rhs_contracting_dimensions":["0"],"lhs_batch_dimensions":[],"rhs_batch_dimensions":[]},"alpha_imag":0,"precision_config":{"operand_precision":["DEFAULT","DEFAULT"]},"epilogue":"DEFAULT"}
+})";
+
+  EXPECT_TRUE(RunAndCompareTwoModules(kHloTextRef, kHloTextTest,
+                                      ErrorSpec{/*aabs=*/1e-4, /*arel=*/1e-4},
+                                      /*run_hlo_passes=*/false));
+}
+
+TEST_F(CompareTest, PredToBF16ConversionWorks) {
+  if (!GetCudaComputeCapability().IsAtLeast(
+          se::CudaComputeCapability::AMPERE)) {
+    GTEST_SKIP() << "No BF16 before Ampere.";
+  }
+  const std::string kHloTextTest = R"(
+HloModule m, is_scheduled=true
+
+triton_gemm_computation {
+  parameter_0 = bf16[92,11]{1,0} parameter(0)
+  parameter_1 = s32[11,63]{1,0} parameter(1)
+  parameter_2 = s32[11,63]{1,0} parameter(2)
+  f1.1 = pred[11,63]{1,0} compare(parameter_1, parameter_2), direction=GE
+  c.1 = bf16[11,63]{1,0} convert(f1.1)
+  ROOT _.1 = bf16[92,63]{1,0} dot(parameter_0, c.1),
+    lhs_contracting_dims={1}, rhs_contracting_dims={0}
+}
+
+ENTRY e {
+  p0 = bf16[92,11]{1,0} parameter(0)
+  p1 = s32[11,63]{1,0} parameter(1)
+  p2 = s32[11,63]{1,0} parameter(2)
+  ROOT triton_gemm__ = bf16[92,63]{1,0} fusion(p0, p1, p2), kind=kCustom,
+    calls=triton_gemm_computation,
+    backend_config={"kind":"__triton_gemm",
+                    "triton_gemm_config":{"block_m":"32","block_n":"16",
+                                          "block_k":"32","split_k":"1",
+                                          "num_stages":"1","num_warps":"4"}}
+})";
+
+  const std::string kHloTextRef = R"(
+HloModule m, is_scheduled=true
+
+fused_computation {
+  p0 = s32[11,63]{1,0} parameter(0)
+  p1 = s32[11,63]{1,0} parameter(1)
+  f.1 = pred[11,63]{1,0} compare(p0, p1), direction=GE
+  ROOT convert.1 = bf16[11,63]{1,0} convert(f.1)
+}
+
+ENTRY e {
+  p2 = s32[11,63]{1,0} parameter(2)
+  p1 = s32[11,63]{1,0} parameter(1)
+  p0 = bf16[92,11]{1,0} parameter(0)
+  fusion = bf16[11,63]{1,0} fusion(p1, p2), kind=kLoop, calls=fused_computation
+  ROOT custom-call = bf16[92,63]{1,0} custom-call(p0, fusion),
+    custom_call_target="__cublas$gemm",
+    backend_config={"alpha_real":1,"beta":0,"dot_dimension_numbers":
+      {"lhs_contracting_dimensions":["1"],"rhs_contracting_dimensions":["0"],
+      "lhs_batch_dimensions":[],"rhs_batch_dimensions":[]},
+      "alpha_imag":0,"precision_config":
+      {"operand_precision":["DEFAULT","DEFAULT"]},"epilogue":"DEFAULT"}
+})";
+
+  EXPECT_TRUE(RunAndCompareTwoModules(kHloTextRef, kHloTextTest,
+                                      ErrorSpec{/*aabs=*/1e-6, /*arel=*/1e-6},
+                                      /*run_hlo_passes=*/false));
+}
+
 class TritonSoftmaxTest : public GpuCodegenTest {
  public:
   DebugOptions GetDebugOptionsForTest() override {
@@ -1482,8 +1633,12 @@ ENTRY main {
 )";
 
   MatchOptimizedHlo(hlo_text, R"(
-; CHECK: fusion(%[[P0:[^,]*]])
-; CHECK-SAME: kind=kCustom
+; CHECK:    ENTRY
+; CHECK:      %[[P0:.*]] = f32[127,125]{1,0} parameter(0)
+; CHECK:      ROOT
+; CHECK-SAME: fusion(%[[P0]])
+; CHECK-SAME:   kind=kCustom
+; CHECK-SAME:   __triton_softmax
 )");
   EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec(1e-6, 1e-6)));
 }
@@ -1516,13 +1671,17 @@ ENTRY main {
 )";
 
   MatchOptimizedHlo(hlo_text, R"(
-; CHECK: fusion(%[[P0:[^,]*]])
-; CHECK-SAME: kind=kCustom
+; CHECK:    ENTRY
+; CHECK:      %[[P0:.*]] = f32[127,5]{1,0} parameter(0)
+; CHECK:      ROOT
+; CHECK-SAME: fusion(%[[P0]])
+; CHECK-SAME:   kind=kCustom
+; CHECK-SAME:   __triton_softmax
 )");
   EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec(1e-6, 1e-6)));
 }
 
-TEST_F(TritonSoftmaxTest, CanFuseAndEmitExactSoftmaxF16) {
+TEST_F(TritonSoftmaxTest, CanFuseAndEmitFirstSoftmaxDiamondF16) {
   const std::string& hlo_text = R"(
 HloModule softmax
 max_computation {
@@ -1540,18 +1699,17 @@ ENTRY main {
   constant_neg_inf = f16[] constant(-inf)
   reduce = f16[127]{0} reduce(param_0, constant_neg_inf), dimensions={1}, to_apply=max_computation
   broadcast = f16[127,125]{1,0} broadcast(reduce), dimensions={0}
-  subtract = f16[127,125]{1,0} subtract(param_0, broadcast)
-  exponential = f16[127,125]{1,0} exponential(subtract)
-  constant_zero = f16[] constant(0)
-  second_reduce = f16[127]{0} reduce(exponential, constant_zero), dimensions={1}, to_apply=add_computation
-  second_broadcast = f16[127,125]{1,0} broadcast(second_reduce), dimensions={0}
-  ROOT divide = f16[127,125]{1,0} divide(exponential, second_broadcast)
+  ROOT subtract = f16[127,125]{1,0} subtract(param_0, broadcast)
 }
 )";
 
   MatchOptimizedHlo(hlo_text, R"(
-; CHECK: fusion(%[[P0:[^,]*]])
-; CHECK-SAME: kind=kCustom
+; CHECK:    ENTRY
+; CHECK:      %[[P0:.*]] = f16[127,125]{1,0} parameter(0)
+; CHECK:      ROOT
+; CHECK-SAME: fusion(%[[P0]])
+; CHECK-SAME:   kind=kCustom
+; CHECK-SAME:   __triton_softmax
 )");
   EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec(2e-3, 1e-5)));
 }
@@ -1584,8 +1742,258 @@ ENTRY main {
 )";
 
   MatchOptimizedHlo(hlo_text, R"(
-; CHECK: fusion(%[[P0:[^,]*]])
-; CHECK-SAME: kind=kCustom
+; CHECK:    ENTRY
+; CHECK:      %[[P0:.*]] = f64[127,125]{1,0} parameter(0)
+; CHECK:      ROOT
+; CHECK-SAME: fusion(%[[P0]])
+; CHECK-SAME:   kind=kCustom
+; CHECK-SAME:   __triton_softmax
+)");
+  EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec(1e-6, 1e-6)));
+}
+
+TEST_F(
+    TritonSoftmaxTest,
+    CanFuseAndEmitSoftmaxWithBatchDimMergingAndSplittingBitcastsOnEveryEdge) {
+  const std::string& hlo_text = R"(
+HloModule softmax
+max_computation {
+  arg_0 = f32[] parameter(0)
+  arg_1 = f32[] parameter(1)
+  ROOT maximum = f32[] maximum(arg_0, arg_1)
+}
+add_computation {
+  arg_0.1 = f32[] parameter(0)
+  arg_1.1 = f32[] parameter(1)
+  ROOT add = f32[] add(arg_0.1, arg_1.1)
+}
+
+ENTRY main {
+  param_0 = f32[2,65,125] parameter(0)
+  bitcasted_param_0 = f32[65,2,125] reshape(param_0)
+  constant_neg_inf = f32[] constant(-inf)
+  reduce = f32[65,2]{1,0} reduce(bitcasted_param_0, constant_neg_inf), dimensions={2}, to_apply=max_computation
+  bitcasted_reduce = f32[130] reshape(reduce)
+  broadcast = f32[130,125]{1,0} broadcast(bitcasted_reduce), dimensions={0}
+  bitcasted_broadcast = f32[65,2,125] reshape(broadcast)
+  subtract = f32[65,2,125]{2,1,0} subtract(bitcasted_param_0, bitcasted_broadcast)
+  bitcasted_subtract = f32[130,125] reshape(subtract)
+  exponential = f32[130,125]{1,0} exponential(bitcasted_subtract)
+  constant_zero = f32[] constant(0)
+  bitcasted_exponential = f32[2,65,125] reshape(exponential)
+  second_reduce = f32[2,65]{1,0} reduce(bitcasted_exponential, constant_zero), dimensions={2}, to_apply=add_computation
+  second_bitcasted_reduce = f32[130] reshape(second_reduce)
+  second_broadcast = f32[130,125]{1,0} broadcast(second_bitcasted_reduce), dimensions={0}
+  second_bitcasted_broadcast = f32[2,65,125] reshape(second_broadcast)
+  ROOT divide = f32[2,65,125]{2,1,0} divide(bitcasted_exponential, second_bitcasted_broadcast)
+})";
+
+  MatchOptimizedHlo(hlo_text, R"(
+; CHECK:    ENTRY
+; CHECK:      %[[P0:.*]] = f32[2,65,125]{2,1,0} parameter(0)
+; CHECK:      ROOT
+; CHECK-SAME: fusion(%[[P0]])
+; CHECK-SAME:   kind=kCustom
+; CHECK-SAME:   __triton_softmax
+)");
+  EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec(1e-6, 1e-6)));
+}
+
+TEST_F(TritonSoftmaxTest,
+       CanFuseAndEmitDiamondWithMultipleBroadcastDimensions) {
+  const std::string& hlo_text = R"(
+HloModule softmax
+max_computation {
+  arg_0 = f32[] parameter(0)
+  arg_1 = f32[] parameter(1)
+  ROOT maximum = f32[] maximum(arg_0, arg_1)
+}
+ENTRY main {
+  param_0 = f32[1,3,125,125]{3,2,1,0} parameter(0)
+  reshape = f32[3,125,125]{2,1,0} reshape(f32[1,3,125,125]{3,2,1,0} param_0)
+  constant_neg_inf = f32[] constant(-inf)
+  reduce = f32[3,125]{1,0} reduce(f32[3,125,125]{2,1,0} reshape, f32[] constant_neg_inf), dimensions={2}, to_apply=max_computation
+  broadcast = f32[1,3,125,125]{3,2,1,0} broadcast(f32[3,125]{1,0} reduce), dimensions={1,2}
+  ROOT subtract = f32[1,3,125,125]{3,2,1,0} subtract(f32[1,3,125,125]{3,2,1,0} param_0, f32[1,3,125,125]{3,2,1,0} broadcast)
+})";
+
+  MatchOptimizedHlo(hlo_text, R"(
+; CHECK:    ENTRY
+; CHECK:      %[[P0:.*]] = f32[1,3,125,125]{3,2,1,0} parameter(0)
+; CHECK:      ROOT
+; CHECK-SAME: fusion(%[[P0]])
+; CHECK-SAME:   kind=kCustom
+; CHECK-SAME:   __triton_softmax
+)");
+  EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec(1e-6, 1e-6)));
+}
+
+TEST_F(TritonSoftmaxTest,
+       CanFuseAndEmitSoftmaxWithIntermediateUnaryElementwise) {
+  const std::string& hlo_text = R"(
+HloModule softmax
+max_computation {
+  arg_0 = f32[] parameter(0)
+  arg_1 = f32[] parameter(1)
+  ROOT maximum = f32[] maximum(arg_0, arg_1)
+}
+add_computation {
+  arg_0.1 = f32[] parameter(0)
+  arg_1.1 = f32[] parameter(1)
+  ROOT add = f32[] add(arg_0.1, arg_1.1)
+}
+ENTRY main {
+  param_0 = f32[127,125]{1,0} parameter(0)
+  constant_neg_inf = f32[] constant(-inf)
+  reduce = f32[127]{0} reduce(param_0, constant_neg_inf), dimensions={1}, to_apply=max_computation
+  broadcast = f32[127,125]{1,0} broadcast(reduce), dimensions={0}
+  subtract = f32[127,125]{1,0} subtract(param_0, broadcast)
+  abs = f32[127,125]{1,0} abs(subtract)
+  exponential = f32[127,125]{1,0} exponential(abs)
+  constant_zero = f32[] constant(0)
+  second_reduce = f32[127]{0} reduce(exponential, constant_zero), dimensions={1}, to_apply=add_computation
+  second_broadcast = f32[127,125]{1,0} broadcast(second_reduce), dimensions={0}
+  ROOT divide = f32[127,125]{1,0} divide(exponential, second_broadcast)
+}
+)";
+
+  MatchOptimizedHlo(hlo_text, R"(
+; CHECK:    ENTRY
+; CHECK:      %[[P0:.*]] = f32[127,125]{1,0} parameter(0)
+; CHECK:      ROOT
+; CHECK-SAME: fusion(%[[P0]])
+; CHECK-SAME:   kind=kCustom
+; CHECK-SAME:   __triton_softmax
+)");
+  EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec(1e-6, 1e-6)));
+}
+
+TEST_F(
+    TritonSoftmaxTest,
+    CanFuseAndEmitTwoDiamondsWithSecondDiamondProducerEqualToFirstDiamondRoot) {  // NOLINT(whitespace/line_length)
+  const std::string& hlo_text = R"(
+HloModule softmax
+max_computation {
+  arg_0 = f32[] parameter(0)
+  arg_1 = f32[] parameter(1)
+  ROOT maximum = f32[] maximum(arg_0, arg_1)
+}
+add_computation {
+  arg_0.1 = f32[] parameter(0)
+  arg_1.1 = f32[] parameter(1)
+  ROOT add = f32[] add(arg_0.1, arg_1.1)
+}
+ENTRY main {
+  param_0 = f32[127,125]{1,0} parameter(0)
+  constant_neg_inf = f32[] constant(-inf)
+  reduce = f32[127]{0} reduce(param_0, constant_neg_inf), dimensions={1}, to_apply=max_computation
+  broadcast = f32[127,125]{1,0} broadcast(reduce), dimensions={0}
+  subtract = f32[127,125]{1,0} subtract(param_0, broadcast)
+  constant_zero = f32[] constant(0)
+  second_reduce = f32[127]{0} reduce(subtract, constant_zero), dimensions={1}, to_apply=add_computation
+  second_broadcast = f32[127,125]{1,0} broadcast(second_reduce), dimensions={0}
+  ROOT divide = f32[127,125]{1,0} divide(subtract, second_broadcast)
+}
+)";
+
+  MatchOptimizedHlo(hlo_text, R"(
+; CHECK:    ENTRY
+; CHECK:      %[[P0:.*]] = f32[127,125]{1,0} parameter(0)
+; CHECK:      ROOT
+; CHECK-SAME: fusion(%[[P0]])
+; CHECK-SAME:   kind=kCustom
+; CHECK-SAME:   __triton_softmax
+)");
+  EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec(1e-6, 1e-6)));
+}
+
+TEST_F(TritonSoftmaxTest,
+       CanFuseAndEmitDiamondWithTrailingUnaryElementwiseAtTheRoot) {
+  const std::string& hlo_text = R"(
+HloModule softmax
+max_computation {
+  arg_0 = f32[] parameter(0)
+  arg_1 = f32[] parameter(1)
+  ROOT maximum = f32[] maximum(arg_0, arg_1)
+}
+ENTRY main {
+  param_0 = f32[127,125]{1,0} parameter(0)
+  constant_neg_inf = f32[] constant(-inf)
+  reduce = f32[127]{0} reduce(param_0, constant_neg_inf), dimensions={1}, to_apply=max_computation
+  broadcast = f32[127,125]{1,0} broadcast(reduce), dimensions={0}
+  subtract = f32[127,125]{1,0} subtract(param_0, broadcast)
+  ROOT abs = f32[127,125]{1,0} abs(subtract)
+}
+)";
+
+  MatchOptimizedHlo(hlo_text, R"(
+; CHECK:    ENTRY
+; CHECK:      %[[P0:.*]] = f32[127,125]{1,0} parameter(0)
+; CHECK:      ROOT
+; CHECK-SAME: fusion(%[[P0]])
+; CHECK-SAME:   kind=kCustom
+; CHECK-SAME:   __triton_softmax
+)");
+  EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec(1e-6, 1e-6)));
+}
+
+TEST_F(TritonSoftmaxTest, CanFuseAndEmitDiamondWithUnaryElementwisePrefix) {
+  const std::string& hlo_text = R"(
+HloModule softmax
+max_computation {
+  arg_0 = f32[] parameter(0)
+  arg_1 = f32[] parameter(1)
+  ROOT maximum = f32[] maximum(arg_0, arg_1)
+}
+ENTRY main {
+  param_0 = f32[127,125]{1,0} parameter(0)
+  abs = f32[127,125]{1,0} abs(param_0)
+  constant_neg_inf = f32[] constant(-inf)
+  reduce = f32[127]{0} reduce(abs, constant_neg_inf), dimensions={1}, to_apply=max_computation
+  broadcast = f32[127,125]{1,0} broadcast(reduce), dimensions={0}
+  ROOT subtract = f32[127,125]{1,0} subtract(param_0, broadcast)
+}
+)";
+
+  MatchOptimizedHlo(hlo_text, R"(
+; CHECK:    ENTRY
+; CHECK:      %[[P0:.*]] = f32[127,125]{1,0} parameter(0)
+; CHECK:      ROOT
+; CHECK-SAME: fusion(%[[P0]])
+; CHECK-SAME:   kind=kCustom
+; CHECK-SAME:   __triton_softmax
+)");
+  EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec(1e-6, 1e-6)));
+}
+
+TEST_F(TritonSoftmaxTest,
+       CanFuseAndEmitSoftmaxDiamondWithLastDimensionBitcastAfterReduce) {
+  const std::string& hlo_text = R"(
+HloModule softmax
+max_computation {
+  arg_0 = f32[] parameter(0)
+  arg_1 = f32[] parameter(1)
+  ROOT maximum = f32[] maximum(arg_0, arg_1)
+}
+
+ENTRY main {
+  param_0 = f32[3,127,125]{2,1,0} parameter(0)
+  constant_neg_inf = f32[] constant(-inf)
+  reduce = f32[3,127]{1,0} reduce(param_0, constant_neg_inf), dimensions={2}, to_apply=max_computation
+  bitcasted_reduce = f32[381]{0} reshape(reduce)
+  broadcast = f32[381,125]{1,0} broadcast(bitcasted_reduce), dimensions={0}
+  bitcasted_broadcast = f32[3,127,125]{2,1,0} reshape(broadcast)
+  ROOT subtract = f32[3,127,125]{2,1,0} subtract(param_0, bitcasted_broadcast)
+}
+)";
+
+  MatchOptimizedHlo(hlo_text, R"(
+; CHECK:    ENTRY
+; CHECK:      %[[P0:.*]] = f32[3,127,125]{2,1,0} parameter(0)
+; CHECK:      ROOT
+; CHECK-SAME: fusion(%[[P0]])
+; CHECK-SAME:   kind=kCustom
+; CHECK-SAME:   __triton_softmax
 )");
   EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec(1e-6, 1e-6)));
 }

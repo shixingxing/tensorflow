@@ -539,6 +539,7 @@ cc_library(
         "//tensorflow/compiler/mlir/tfrt/transforms/mlrt:__pkg__",
         "//tensorflow/core/tfrt/graph_executor:__pkg__",
         "//tensorflow/core/tfrt/saved_model:__pkg__",
+        "//tensorflow/core/tfrt/saved_model/utils:__pkg__",
     ],
     deps = [
         ":backend_compiler",
@@ -551,6 +552,7 @@ cc_library(
         "//tensorflow/compiler/mlir/tensorflow:error_util",
         "//tensorflow/compiler/mlir/tensorflow:import_model",
         "//tensorflow/compiler/mlir/tensorflow:tensorflow_passes",
+        "//tensorflow/compiler/mlir/tensorflow:tf_saved_model_asset_sinking_pass",
         "//tensorflow/core:framework",
         "//tensorflow/core/common_runtime:function_body",
         "//tensorflow/core/common_runtime:function_def_utils",

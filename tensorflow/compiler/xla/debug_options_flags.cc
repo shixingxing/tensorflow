@@ -79,12 +79,13 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
   // flag.
   opts.set_xla_gpu_enable_cublaslt(false);
 
-  // TODO(b/258036887): Enable once CUDA Graphs are fully supported.
+  // TODO(b/258036887): Enable cuda_graph_level=2. Currently blocked by CUDA 12
+  // integration.
   opts.set_xla_gpu_cuda_graph_level(0);
-  opts.set_xla_gpu_cuda_graph_instantiation_threshold(2);
+  opts.set_xla_gpu_cuda_graph_num_runs_to_instantiate(2);
   opts.set_xla_gpu_enable_persistent_temp_buffers(false);
-  opts.set_xla_gpu_cuda_graph_capture_threshold(2);
-  opts.set_xla_gpu_cuda_graph_enable_concurrent_region(true);
+  opts.set_xla_gpu_cuda_graph_min_graph_size(2);
+  opts.set_xla_gpu_cuda_graph_enable_concurrent_region(false);
 
   // Despite the name, fast min/max on GPUs does not seem to be any faster, and
   // adds very counter-intuitive "NaN-swallowing" behavior.
@@ -110,6 +111,7 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
 
   // Set 4GB space limit for redzone scratch allocator.
   opts.set_xla_gpu_redzone_scratch_max_megabytes(1LL << 12);
+  opts.set_xla_gpu_redzone_padding_bytes(8 * 1024 * 1024);
   opts.set_xla_gpu_shape_checks(DebugOptions::RUNTIME);
   opts.set_xla_gpu_normalize_layouts(true);
   opts.set_xla_gpu_simplify_all_fp_conversions(true);
@@ -118,7 +120,8 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
   opts.set_xla_gpu_lhs_enable_gpu_async_tracker(false);
   opts.set_xla_gpu_pgle_profile_file_or_directory_path("");
   opts.set_xla_gpu_enable_highest_priority_async_stream(false);
-  opts.set_xla_gpu_enable_data_parallel_collective_optimizer(false);
+  opts.set_xla_gpu_enable_pipelined_all_reduce(false);
+  opts.set_xla_gpu_enable_pipelined_all_gather(false);
 
   opts.set_xla_cpu_enable_mlir_tiling_and_fusion(true);
   opts.set_xla_cpu_enable_custom_matmul_tiling(false);
@@ -870,16 +873,16 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
       "Set CUDA graph level. 0 = off; 1 = capture fusions and memcpys; 2 = "
       "capture convolutions and gemms; 3 = capture collectives."));
   flag_list->push_back(tsl::Flag(
-      "xla_gpu_cuda_graph_instantiation_threshold",
+      "xla_gpu_cuda_graph_num_runs_to_instantiate",
       int32_setter_for(
-          &DebugOptions::set_xla_gpu_cuda_graph_instantiation_threshold),
-      debug_options->xla_gpu_cuda_graph_instantiation_threshold(),
+          &DebugOptions::set_xla_gpu_cuda_graph_num_runs_to_instantiate),
+      debug_options->xla_gpu_cuda_graph_num_runs_to_instantiate(),
       "Instantiate a cuda graph after the time a captured function is executed "
       "reaches the threshold."));
   flag_list->push_back(tsl::Flag(
       "xla_gpu_cuda_graph_capture_threshold",
-      int32_setter_for(&DebugOptions::set_xla_gpu_cuda_graph_capture_threshold),
-      debug_options->xla_gpu_cuda_graph_capture_threshold(),
+      int32_setter_for(&DebugOptions::set_xla_gpu_cuda_graph_min_graph_size),
+      debug_options->xla_gpu_cuda_graph_min_graph_size(),
       "Capture a region as a function to be launched as cuda graph if the "
       "number of moved instructions reaches this threshold."));
   flag_list->push_back(tsl::Flag(
@@ -940,6 +943,13 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
           &DebugOptions::set_xla_gpu_redzone_scratch_max_megabytes),
       debug_options->xla_gpu_redzone_scratch_max_megabytes(),
       "Max size (in megabytes) for the GPU redzone scratch allocator."));
+  flag_list->push_back(tsl::Flag(
+      "xla_gpu_redzone_padding_bytes",
+      int64_setter_for(&DebugOptions::set_xla_gpu_redzone_padding_bytes),
+      debug_options->xla_gpu_redzone_padding_bytes(),
+      "Amount of padding the redzone allocator will put on one side of each "
+      "buffer it allocates. (So the buffer's total size will be increased by "
+      "2x this value.)"));
   flag_list->push_back(tsl::Flag(
       "xla_gpu_simplify_all_fp_conversions",
       bool_setter_for(&DebugOptions::set_xla_gpu_simplify_all_fp_conversions),
@@ -1027,11 +1037,15 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
       debug_options->xla_gpu_enable_highest_priority_async_stream(),
       "Enable async stream to have the highest priority."));
   flag_list->push_back(tsl::Flag(
-      "xla_gpu_enable_data_parallel_collective_optimizer",
-      bool_setter_for(
-          &DebugOptions::set_xla_gpu_enable_data_parallel_collective_optimizer),
-      debug_options->xla_gpu_enable_data_parallel_collective_optimizer(),
-      "Enable data parallel collective optimizer."));
+      "xla_gpu_enable_pipelined_all_reduce",
+      bool_setter_for(&DebugOptions::set_xla_gpu_enable_pipelined_all_reduce),
+      debug_options->xla_gpu_enable_pipelined_all_reduce(),
+      "Enable pipelinling of all-reduce instructions."));
+  flag_list->push_back(tsl::Flag(
+      "xla_gpu_enable_pipelined_all_gather",
+      bool_setter_for(&DebugOptions::set_xla_gpu_enable_pipelined_all_gather),
+      debug_options->xla_gpu_enable_pipelined_all_gather(),
+      "Enable pipelinling of all-gather instructions."));
   flag_list->push_back(tsl::Flag(
       "xla_partitioning_algorithm", setter_for_xla_partitioning_algorithm,
       DebugOptions::PartitioningAlgorithm_Name(
@@ -1107,6 +1121,15 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
       "The memory budget is set to "
       "xla_gpu_auto_spmd_partitioning_memory_budget_ratio times the estimated "
       "memory usage lower bound."));
+  flag_list->push_back(tsl::Flag(
+      "xla_gpu_triton_gemm_disable_reduced_precision_reduction",
+      bool_setter_for(
+          &DebugOptions::
+              set_xla_gpu_triton_gemm_disable_reduced_precision_reduction),
+      debug_options->xla_gpu_triton_gemm_disable_reduced_precision_reduction(),
+      "Forces any reductions during matrix multiplications to use the "
+      "accumulator type and not the output type. The precision of the dot "
+      "operation may not increase that much if there is output fusion."));
 }  // NOLINT(readability/fn_size)
 
 // Allocates flag_values and flag_objects; this function must not be called more

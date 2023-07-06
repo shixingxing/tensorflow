@@ -30,6 +30,7 @@ limitations under the License.
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
+#include "tensorflow/compiler/xla/autotuning.pb.h"
 #include "tensorflow/compiler/xla/hlo/ir/dfs_hlo_visitor_with_default.h"
 #include "tensorflow/compiler/xla/hlo/ir/hlo_casting_utils.h"
 #include "tensorflow/compiler/xla/hlo/ir/hlo_computation.h"
@@ -40,6 +41,8 @@ limitations under the License.
 #include "tensorflow/compiler/xla/layout.h"
 #include "tensorflow/compiler/xla/literal_util.h"
 #include "tensorflow/compiler/xla/service/gpu/backend_configs.pb.h"
+#include "tensorflow/compiler/xla/service/gpu/cublas_padding_requirements.h"
+#include "tensorflow/compiler/xla/service/gpu/gpu_types.h"
 #include "tensorflow/compiler/xla/service/gpu/ir_emission_utils.h"
 #include "tensorflow/compiler/xla/service/gpu/matmul_utils.h"
 #include "tensorflow/compiler/xla/service/hlo_creation_utils.h"
@@ -51,7 +54,6 @@ limitations under the License.
 #include "tensorflow/tsl/platform/errors.h"
 #include "tensorflow/tsl/platform/status.h"
 #include "tensorflow/tsl/platform/statusor.h"
-#include "tensorflow/tsl/protobuf/autotuning.pb.h"
 
 namespace xla {
 namespace gpu {
@@ -481,7 +483,18 @@ class GemmRewriterTritonVisitor : public DfsHloRewriteVisitor {
   // and replaces the original dot() with a call to the computation.
   Status HandleDot(HloInstruction* dot) override {
     VLOG(5) << dot->ToString();
-    if (!IsTritonHandledGEMM(*dot, gpu_version_)) {
+
+    if (!CanTritonHandleGEMM(*dot, gpu_version_)) {
+      return OkStatus();
+    }
+
+    // If a GEMM requiring padding for cuBLAS is encountered here this
+    // happened because earlier ShouldTritonHandleGEMM() accepted it and padding
+    // was skipped. Do not check ShouldTritonHandleGEMM() again then.
+    if (!CublasRequiresPadding(
+            *xla::Cast<HloDotInstruction>(dot),
+            std::get<se::CudaComputeCapability>(gpu_version_)) &&
+        !ShouldTritonHandleGEMM(*dot, gpu_version_)) {
       return OkStatus();
     }
 
@@ -609,7 +622,7 @@ void CopyIncrementingAboveThreshold(
 
 StatusOr<HloInstruction*> MakeSplitKOperand(
     HloInstruction& dot, const DotFusionAnalysis& analysis,
-    const tensorflow::AutotuneResult::TritonGemmKey& tiling,
+    const AutotuneResult::TritonGemmKey& tiling,
     const int64_t contracting_dim_idx, const int operand_number) {
   const Shape& shape = dot.operand(operand_number)->shape();
   Shape new_shape(shape.element_type(), {}, {}, {});
@@ -676,8 +689,8 @@ StatusOr<HloInstruction*> MakeSplitKOperand(
 // Apply split K configuration from the tiling to the fused dot() computation:
 // bitcast the operands, change the output shape and the dot dimensions.
 Status MakeDotComputationSplitKBatch(
-    HloComputation* computation,
-    const tensorflow::AutotuneResult::TritonGemmKey& tiling) {
+    HloComputation* computation, const AutotuneResult::TritonGemmKey& tiling,
+    bool disable_reduced_precision_reduction) {
   HloInstruction* dot =
       hlo_query::GetFirstInstructionWithOpcode(*computation, HloOpcode::kDot);
   const DotFusionAnalysis analysis(computation);
@@ -720,6 +733,16 @@ Status MakeDotComputationSplitKBatch(
   dot->SetupDerivedInstruction(new_dot);
   TF_RETURN_IF_ERROR(dot->ReplaceAllUsesWithDifferentShape(new_dot));
   TF_RETURN_IF_ERROR(dot->parent()->RemoveInstruction(dot));
+  if (disable_reduced_precision_reduction) {
+    PrimitiveType output_type =
+        computation->root_instruction()->shape().element_type();
+    PrimitiveType accumulator_type = output_type == PrimitiveType::F64
+                                         ? PrimitiveType::F64
+                                         : PrimitiveType::F32;
+
+    computation->root_instruction()->mutable_shape()->set_element_type(
+        accumulator_type);
+  }
   return OkStatus();
 }
 
@@ -786,19 +809,25 @@ bool IsTritonSupportedElementwise(HloOpcode opcode,
                                opcode);
 }
 
-Status MakeDotSplitKBatch(
-    HloInstruction* dot_fusion,
-    const tensorflow::AutotuneResult::TritonGemmKey& tiling) {
+Status MakeDotSplitKBatch(HloInstruction* dot_fusion,
+                          const AutotuneResult::TritonGemmKey& tiling) {
   CHECK_EQ(dot_fusion->opcode(), HloOpcode::kFusion);
 
   if (dot_fusion->shape().IsTuple()) {
     return Unimplemented("Tuple output is not supported with split-K yet.");
   }
 
-  const Layout old_dot_layout = dot_fusion->shape().layout();
+  const bool disable_reduced_precision_reduction =
+      dot_fusion->GetModule()
+          ->config()
+          .debug_options()
+          .xla_gpu_triton_gemm_disable_reduced_precision_reduction();
+  const PrimitiveType output_type = dot_fusion->shape().element_type();
+  const Layout output_layout = dot_fusion->shape().layout();
 
   TF_RETURN_IF_ERROR(MakeDotComputationSplitKBatch(
-      dot_fusion->fused_instructions_computation(), tiling));
+      dot_fusion->fused_instructions_computation(), tiling,
+      disable_reduced_precision_reduction));
   const HloInstruction* root = dot_fusion->fused_expression_root();
 
   *dot_fusion->mutable_shape() = root->shape();
@@ -812,13 +841,25 @@ Status MakeDotSplitKBatch(
 
   // If the original dot had non-standard layout, this reduce should have that
   // too.
-  *reduce->mutable_shape()->mutable_layout() = old_dot_layout;
+  *reduce->mutable_shape()->mutable_layout() = output_layout;
 
   if (dot_fusion->IsRoot()) {
-    dot_fusion->parent()->set_root_instruction(reduce, true);
+    dot_fusion->parent()->set_root_instruction(reduce,
+                                               /*accept_different_shape=*/true);
   } else {
     TF_RETURN_IF_ERROR(dot_fusion->ReplaceAllUsesWithDifferentShape(reduce));
   }
+
+  if (disable_reduced_precision_reduction) {
+    HloInstruction* convert = MakeConvertToHlo(reduce, output_type);
+    if (reduce->IsRoot()) {
+      reduce->parent()->set_root_instruction(convert,
+                                             /*accept_different_shape=*/true);
+    } else {
+      TF_RETURN_IF_ERROR(reduce->ReplaceAllUsesWithDifferentShape(convert));
+    }
+  }
+
   return OkStatus();
 }
 
@@ -889,7 +930,7 @@ const DotFusionAnalysis::DimIterationSpec* DotFusionAnalysis::IterSpec(
   return nullptr;
 }
 
-bool IsTritonHandledGEMM(const HloInstruction& dot,
+bool CanTritonHandleGEMM(const HloInstruction& dot,
                          const GpuVersion gpu_version) {
   if (dot.opcode() != HloOpcode::kDot ||
       absl::c_any_of(dot.precision_config().operand_precision(),
@@ -941,6 +982,11 @@ bool IsTritonHandledGEMM(const HloInstruction& dot,
     return false;
   }
 
+  return true;
+}
+
+bool ShouldTritonHandleGEMM(const HloInstruction& dot,
+                            const GpuVersion gpu_version) {
   if (dot.GetModule()->config().debug_options().xla_gpu_triton_gemm_any()) {
     return true;
   }

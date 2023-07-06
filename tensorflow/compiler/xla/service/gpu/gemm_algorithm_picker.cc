@@ -26,6 +26,7 @@ limitations under the License.
 #include <variant>
 #include <vector>
 
+#include "tensorflow/compiler/xla/autotuning.pb.h"
 #include "tensorflow/compiler/xla/hlo/ir/hlo_computation.h"
 #include "tensorflow/compiler/xla/hlo/ir/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/gpu/autotuner_util.h"
@@ -41,7 +42,6 @@ limitations under the License.
 #include "tensorflow/tsl/platform/errors.h"
 #include "tensorflow/tsl/platform/logger.h"
 #include "tensorflow/tsl/platform/statusor.h"
-#include "tensorflow/tsl/protobuf/autotuning.pb.h"
 #include "tensorflow/tsl/util/proto/proto_utils.h"
 
 #if (defined(GOOGLE_CUDA) && GOOGLE_CUDA)
@@ -53,20 +53,19 @@ limitations under the License.
 namespace xla {
 namespace gpu {
 
-using tensorflow::AutotuneResult;
-
 #if (defined(GOOGLE_CUDA) && GOOGLE_CUDA)
 static se::RedzoneAllocator CreateRedzoneAllocator(
     se::Stream* stream, se::DeviceMemoryAllocator* allocator,
     const DebugOptions& debug_options, const AutotuneConfig& config) {
-  int64_t redzone_size = config.should_check_correctness()
-                             ? se::RedzoneAllocator::kDefaultRedzoneSize
-                             : 0;
-
+  // TODO(jlebar): The memory limit here should by rights be
+  // debug_options.xla_gpu_redzone_scratch_max_megabytes(), but tests OOM when
+  // we do that.  Are the tests wrong, or is the option named incorrectly?
   return se::RedzoneAllocator(
       stream, allocator, PtxOptsFromDebugOptions(debug_options),
       /*memory_limit=*/std::numeric_limits<int64_t>::max(),
-      /*redzone_size=*/redzone_size);
+      /*redzone_size=*/config.should_check_correctness()
+          ? debug_options.xla_gpu_redzone_padding_bytes()
+          : 0);
 }
 #endif
 
@@ -163,7 +162,7 @@ StatusOr<AutotuneResult> GetBestAlgorithm(
   }
 
   if (!autotune_config.should_crash_on_check_failure()) {
-    tensorflow::AutotuningLog log;
+    AutotuningLog log;
     for (const AutotuneResult& result : results) {
       *log.add_results() = result;
     }
