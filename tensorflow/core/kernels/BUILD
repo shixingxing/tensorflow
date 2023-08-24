@@ -31,10 +31,6 @@ load(
     "if_mkl",
     "mkl_deps",
 )
-load(
-    "//third_party/mkl_dnn:build_defs.bzl",
-    "if_onednn_v3",
-)
 load("//tensorflow:tensorflow.default.bzl", "cc_header_only_library", "filegroup", "get_compatible_with_portable", "tf_cc_shared_library", "tf_cuda_cc_test", "tf_cuda_cc_tests", "tf_disable_ptxas_warning_flags", "tf_kernel_library")
 load(
     "//tensorflow/core/platform:build_config_root.bzl",
@@ -208,6 +204,7 @@ tf_cuda_cc_test(
         "guitar",
         "multi_gpu",
         "no_oss",
+        "notap",  # TODO(b/287692888): re-enable once the tests passes.
     ],
     deps = [
         "//tensorflow/core:all_kernels",
@@ -673,7 +670,9 @@ cc_library(
         "//tensorflow/core/kernels/batching_util:bounded_executor",
         "//tensorflow/core/kernels/batching_util:concat_split_util",
         "//tensorflow/core/kernels/batching_util:periodic_function_dynamic",
+        "//tensorflow/core/kernels/batching_util:warmup",
         "//tensorflow/core/platform:numbers",
+        "//tensorflow/tsl/platform:types",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:optional",
     ],
@@ -3583,13 +3582,66 @@ tf_kernel_library(
     deps = MATH_DEPS,
 )
 
+# This wrapper library requires special build flags, so must
+# by compiled separately.
+cc_library(
+    name = "fft_impl",
+    srcs = ["fft_impl.cc"],
+    hdrs = ["fft_impl.h"],
+    # DUCC requires exceptions and RTTI.
+    copts = [
+        "-fexceptions",
+        "-frtti",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        "//tensorflow/core:framework",
+        "//third_party/eigen3",
+        "@com_google_absl//absl/status",
+        "@ducc//:fft",
+    ],
+)
+
+# This wrapper library requires special build flags, so must
+# by compiled separately.  This version is specific to "portable"
+# ops, where we have different linking requirements.
+cc_library(
+    name = "portable_fft_impl",
+    srcs = if_mobile([
+        "fft_impl.cc",
+        "@ducc//:mobile_srcs_no_runtime",
+    ]),
+    hdrs = ["fft_impl.h"],
+    copts = [
+        # DUCC requires exceptions and RTTI.
+        "-fexceptions",
+        "-frtti",
+        # DUCC custom threading.
+        "-DDUCC0_CUSTOM_LOWLEVEL_THREADING=1",
+        # Required for relative includes in the DUCC library.
+        "-Ithird_party/ducc/src",
+        "-Ithird_party/ducc/google",
+        # Required for relative includes in OSS builds.
+        "-Iexternal",
+        "-Iexternal/ducc/src",
+        "-Iexternal/ducc/google",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        "//tensorflow/core:portable_tensorflow_lib_lite",
+        "//third_party/eigen3",
+        "@com_google_absl//absl/status",
+    ],
+)
+
 tf_kernel_library(
     name = "fft_ops",
     prefix = "fft_ops",
-    deps = MATH_DEPS + [
-    ] + if_cuda([
+    deps = MATH_DEPS + if_cuda([
+        "@com_google_absl//absl/container:flat_hash_map",
+        "//tensorflow/core/platform:stream_executor",
         "//tensorflow/compiler/xla/stream_executor/cuda:cufft_plugin",
-    ]),
+    ]) + [":fft_impl"],
 )
 
 tf_kernel_library(
@@ -6905,6 +6957,8 @@ filegroup(
             "decode_proto_op.cc",
             "encode_proto_op.cc",
             "sobol_op.cc",
+            # Excluded because require special build rules:
+            "fft_impl.cc",  # Must instead link in ":portable_fft_impl".
             # Excluded due to experimental status:
             "debug_ops.*",
             "mutex_ops.*",
@@ -6969,6 +7023,7 @@ cc_library(
     textual_hdrs = ANDROID_TEXTUAL_HDRS,
     visibility = ["//visibility:public"],
     deps = [
+        ":portable_fft_impl",
         "//tensorflow/core:portable_gif_internal",
         "//tensorflow/core:portable_jpeg_internal",
         "//tensorflow/core:portable_tensorflow_lib_lite",
@@ -6998,6 +7053,9 @@ cc_library(
         "//third_party/fft2d:fft2d_headers",
         "//third_party/icu/data:conversion_data",
         "@com_google_absl//absl/base",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/strings",
         "@com_google_protobuf//:protobuf",
         "@fft2d",
         "@gemmlowp",
@@ -7863,8 +7921,8 @@ tf_cc_shared_library(
         "@local_config_tensorrt//:__subpackages__",
         "@local_execution_config_platform//:__subpackages__",
         "@mkl_dnn_acl_compatible//:__subpackages__",
-        "@mkl_dnn_v1//:__subpackages__",
         "@nsync//:__subpackages__",
+        "@onednn//:__subpackages__",
         "@org_sqlite//:__subpackages__",
         "@platforms//:__subpackages__",
         "@png//:__subpackages__",
@@ -7874,7 +7932,7 @@ tf_cc_shared_library(
         "@upb//:__subpackages__",
         "@zlib//:__subpackages__",
         # copybara:comment_end
-    ] + if_onednn_v3(["@onednn_v3//:__subpackages__"]),
+    ],
     visibility = ["//visibility:public"],
     deps = [
         ":kernel_platform_strings",

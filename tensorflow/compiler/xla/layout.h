@@ -16,16 +16,18 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_XLA_LAYOUT_H_
 #define TENSORFLOW_COMPILER_XLA_LAYOUT_H_
 
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <ostream>
 #include <string>
-#include <vector>
 
 #include "absl/container/inlined_vector.h"
+#include "absl/types/span.h"
 #include "tensorflow/compiler/xla/printer.h"
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
+#include "tensorflow/tsl/platform/logging.h"  // IWYU pragma: keep
 
 namespace xla {
 
@@ -85,6 +87,8 @@ class Tile {
   // The bounds of the tile.
   absl::InlinedVector<int64_t, 2> dimensions_;
 };
+
+using TileVector = absl::InlinedVector<Tile, 3>;
 
 // TODO: Rename the `dim_level_types` field to `lvl_types`, so that it
 // matches `mlir::sparse_tensor::SparseTensorEncodingAttr`.
@@ -293,7 +297,7 @@ class Layout {
     return *this;
   }
   absl::Span<const Tile> tiles() const { return tiles_; }
-  absl::InlinedVector<Tile, 2>* mutable_tiles() { return &tiles_; }
+  TileVector* mutable_tiles() { return &tiles_; }
 
   int64_t element_size_in_bits() const { return element_size_in_bits_; }
   Layout& set_element_size_in_bits(int64_t value) {
@@ -376,7 +380,7 @@ class Layout {
   DimensionVector minor_to_major_;
 
   // The tiles used in tiling-based layout.
-  absl::InlinedVector<Tile, 2> tiles_;
+  TileVector tiles_;
 
   // The primitive type to use for sparse array indices and pointers.  Each of
   // these must either be INVALID, or an unsigned integer type.

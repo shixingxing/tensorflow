@@ -5695,20 +5695,20 @@ TEST_F(AlgebraicSimplifierTest, TransposeOfDot) {
             PrecisionConfig::HIGHEST);
 }
 
-TEST_F(AlgebraicSimplifierTest, DotAttentionReorder) {
+TEST_F(AlgebraicSimplifierTest, DotAssociativeReorder) {
   const char* hlo_string = R"(
     HloModule module
 
     ENTRY test {
-        a = f32[1024,2] parameter(0)
-        b = f32[2,1024] parameter(1)
-        c = f32[1024,2] parameter(2)
-        inner_dot = f32[1024,1024] dot(a,b),
-                    lhs_contracting_dims={1},
-                    rhs_contracting_dims={0}
-        ROOT outer_dot = f32[1024,2] dot(inner_dot, c),
-                         lhs_contracting_dims={1},
-                         rhs_contracting_dims={0}
+        a = f32[2,3,4,5] parameter(0)
+        b = f32[6,7,5] parameter(1)
+        c = f32[4,7] parameter(2)
+        inner_dot = f32[2,3,4,6,7] dot(a,b),
+                    lhs_contracting_dims={3},
+                    rhs_contracting_dims={2}
+        ROOT outer_dot = f32[2,3,6] dot(inner_dot,c),
+                         lhs_contracting_dims={2,4},
+                         rhs_contracting_dims={0,1}
       }
     )";
   TF_ASSERT_OK_AND_ASSIGN(auto module,
@@ -5722,6 +5722,224 @@ TEST_F(AlgebraicSimplifierTest, DotAttentionReorder) {
   ASSERT_THAT(module->entry_computation()->root_instruction(),
               GmockMatch(m::Dot(m::Parameter(0),
                                 m::Dot(m::Parameter(1), m::Parameter(2)))));
+}
+
+TEST_F(AlgebraicSimplifierTest, DotReverseLeftReorder) {
+  const char* hlo_string = R"(
+    HloModule module
+
+    ENTRY test {
+        a = f32[512,8] parameter(0)
+        b = f32[8,2] parameter(1)
+        reverse = f32[512,8] reverse(a), dimensions={1}
+        ROOT dot = f32[512,2] dot(reverse,b),
+                         lhs_contracting_dims={1},
+                         rhs_contracting_dims={0}
+      }
+    )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+
+  AlgebraicSimplifierOptions options;
+  options.set_use_associative_reordering(true);
+  options.set_associative_reordering_threshold(1.1);
+  AlgebraicSimplifier simplifier(options);
+  EXPECT_TRUE(simplifier.Run(module.get()).value());
+  ASSERT_THAT(module->entry_computation()->root_instruction(),
+              GmockMatch(m::Dot(m::Parameter(0), m::Reverse(m::Parameter(1)))));
+}
+
+TEST_F(AlgebraicSimplifierTest, DotReverseRightReorder) {
+  const char* hlo_string = R"(
+    HloModule module
+
+    ENTRY test {
+        a = f32[3,2048] parameter(0)
+        b = f32[2048,2048] parameter(1)
+        reverse = f32[2048,2048] reverse(b), dimensions={0,1}
+        ROOT dot = f32[3,2048] dot(a, reverse),
+                   lhs_contracting_dims={1},
+                   rhs_contracting_dims={0}
+      }
+    )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+
+  AlgebraicSimplifierOptions options;
+  options.set_use_associative_reordering(true);
+  options.set_associative_reordering_threshold(1.1);
+  AlgebraicSimplifier simplifier(options);
+  EXPECT_TRUE(simplifier.Run(module.get()).value());
+  ASSERT_THAT(module->entry_computation()->root_instruction(),
+              GmockMatch(m::Dot(m::Reverse(m::Parameter(0)),
+                                m::Reverse(m::Parameter(1)))));
+}
+
+TEST_F(AlgebraicSimplifierTest, DotPadLeftReorder) {
+  const char* hlo_string = R"(
+    HloModule module
+
+    ENTRY test {
+        zero = f32[] constant(0.0)
+        a = f32[8,5] parameter(0)
+        b = f32[10,6] parameter(1)
+        pad = f32[8,10] pad(a,zero), padding=0_0x0_5
+        ROOT dot = f32[8,6] dot(pad,b),
+                         lhs_contracting_dims={1},
+                         rhs_contracting_dims={0}
+      }
+    )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+
+  AlgebraicSimplifierOptions options;
+  options.set_use_associative_reordering(true);
+  options.set_associative_reordering_threshold(1.1);
+  AlgebraicSimplifier simplifier(options);
+  EXPECT_TRUE(simplifier.Run(module.get()).value());
+  ASSERT_THAT(module->entry_computation()->root_instruction(),
+              GmockMatch(m::Dot(m::Parameter(0), m::Slice(m::Parameter(1)))));
+}
+
+TEST_F(AlgebraicSimplifierTest, DotPadRightReorder) {
+  const char* hlo_string = R"(
+    HloModule module
+
+    ENTRY test {
+        zero = f32[] constant(0.0)
+        a = f32[16,384] parameter(0)
+        b = f32[128,128] parameter(1)
+        pad = f32[384,384] pad(b,zero), padding=128_128x128_128
+        ROOT dot = f32[16,384] dot(a,pad),
+                         lhs_contracting_dims={1},
+                         rhs_contracting_dims={0}
+      }
+    )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+
+  AlgebraicSimplifierOptions options;
+  options.set_use_associative_reordering(true);
+  options.set_associative_reordering_threshold(1.1);
+  AlgebraicSimplifier simplifier(options);
+  EXPECT_TRUE(simplifier.Run(module.get()).value());
+  ASSERT_THAT(module->entry_computation()->root_instruction(),
+              GmockMatch(m::Dot(m::Slice(m::Parameter(0)),
+                                m::Pad(m::Parameter(1), m::Constant()))));
+}
+
+// This pattern appears in translate_inference_bnmt_v15_vf_lite_execution_test
+TEST_F(AlgebraicSimplifierTest, DotBroadcastLeftReorder) {
+  const char* hlo_string = R"(
+    HloModule module
+
+    ENTRY test {
+        a = f32[] parameter(0)
+        b = f32[1024,1024] parameter(1)
+        broadcast = f32[4,8,1024] broadcast(a), dimensions={}
+        ROOT dot = f32[4,8,1024] dot(broadcast,b),
+                         lhs_contracting_dims={2},
+                         rhs_contracting_dims={0}
+      }
+    )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+
+  AlgebraicSimplifierOptions options;
+  options.set_use_associative_reordering(true);
+  options.set_associative_reordering_threshold(1.1);
+  AlgebraicSimplifier simplifier(options);
+  EXPECT_TRUE(simplifier.Run(module.get()).value());
+  ASSERT_THAT(module->entry_computation()->root_instruction(),
+              GmockMatch(m::Dot(m::Broadcast(m::Parameter(0)),
+                                m::Reduce(m::Parameter(1), m::Constant()))));
+}
+
+// This pattern appears in waymo_bp_omnipath_vf_lite_execution_test
+TEST_F(AlgebraicSimplifierTest, DotBroadcastRightReorder) {
+  const char* hlo_string = R"(
+    HloModule module
+
+    ENTRY test {
+        a = f32[128,200,4] parameter(0)
+        b = f32[128,128] parameter(1)
+        broadcast = f32[128,200,128] broadcast(b), dimensions={0,2}
+        ROOT dot = f32[4,128] dot(a,broadcast),
+                         lhs_contracting_dims={0,1},
+                         rhs_contracting_dims={0,1}
+      }
+    )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+
+  AlgebraicSimplifierOptions options;
+  options.set_use_associative_reordering(true);
+  options.set_associative_reordering_threshold(1.1);
+  AlgebraicSimplifier simplifier(options);
+  EXPECT_TRUE(simplifier.Run(module.get()).value());
+  ASSERT_THAT(module->entry_computation()->root_instruction(),
+              GmockMatch(m::Dot(m::Reduce(m::Parameter(0), m::Constant()),
+                                m::Parameter(1))));
+}
+
+TEST_F(AlgebraicSimplifierTest, ReduceDotReorder) {
+  const char* hlo_string = R"(
+    HloModule module
+
+    add {
+      p0 = f32[] parameter(0)
+      p1 = f32[] parameter(1)
+      ROOT r = f32[] add(p0, p1)
+    }
+
+    ENTRY test {
+        a = f32[2,3,128,5] parameter(0)
+        b = f32[3,5,256] parameter(1)
+        inner_dot = f32[2,128,256] dot(a,b),
+                    lhs_contracting_dims={1,3},
+                    rhs_contracting_dims={0,1}
+        c = f32[] constant(0)
+        ROOT reduce = f32[2,256] reduce(inner_dot, c),
+                      dimensions={1}, to_apply=add
+      }
+    )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+
+  AlgebraicSimplifierOptions options;
+  options.set_use_associative_reordering(true);
+  options.set_associative_reordering_threshold(0);
+  AlgebraicSimplifier simplifier(options);
+  EXPECT_TRUE(simplifier.Run(module.get()).value());
+  ASSERT_THAT(
+      module->entry_computation()->root_instruction(),
+      GmockMatch(m::Dot(m::Reduce(m::Parameter(0), m::ConstantScalar(0)),
+                        m::Reduce(m::Parameter(1), m::ConstantScalar(0)))));
+}
+
+TEST_F(AlgebraicSimplifierTest, SliceDotReorder) {
+  const char* hlo_string = R"(
+    HloModule module
+
+    ENTRY test {
+        a = f32[2048,2] parameter(0)
+        b = f32[2,2048] parameter(1)
+        dot = f32[2048,2048] dot(a,b),
+              lhs_contracting_dims={1},
+              rhs_contracting_dims={0}
+        ROOT slice = f32[128,2048] slice(dot), slice={[0:128],[0:2048]}
+      }
+    )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+
+  AlgebraicSimplifierOptions options;
+  options.set_use_associative_reordering(true);
+  options.set_associative_reordering_threshold(0);
+  AlgebraicSimplifier simplifier(options);
+  EXPECT_TRUE(simplifier.Run(module.get()).value());
+  ASSERT_THAT(module->entry_computation()->root_instruction(),
+              GmockMatch(m::Dot(m::Slice(m::Parameter(0)), m::Parameter(1))));
 }
 
 TEST_F(AlgebraicSimplifierTest, TransposeOfBatchDot) {
@@ -8153,6 +8371,23 @@ TEST_F(AlgebraicSimplifierTest, MultiplySelfRsqrt_NegativeTestCase) {
             HloOpcode::kMultiply);
 }
 
+TEST_F(AlgebraicSimplifierTest, MultiplyNegateNegate) {
+  const char* kModuleStr = R"(
+    HloModule m
+    test {
+      p0 = f32[] parameter(0)
+      p1 = f32[] parameter(1)
+      neg0 = f32[] negate(p0)
+      neg1 = f32[] negate(p1)
+      ROOT mul = f32[] multiply(neg0, neg1)
+    }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto m, ParseAndReturnVerifiedModule(kModuleStr));
+  ASSERT_TRUE(AlgebraicSimplifier(default_options_).Run(m.get()).value());
+  EXPECT_THAT(m->entry_computation()->root_instruction(),
+              GmockMatch(m::Multiply(m::Parameter(0), m::Parameter(1))));
+}
+
 TEST_F(AlgebraicSimplifierTest, AbsEliminationBatchnormTraining) {
   const char* kModuleStr = R"(
     HloModule m
@@ -9432,6 +9667,42 @@ TEST_F(AlgebraicSimplifierTest, TransposeOfBroadcast) {
               .WithPredicate([](const HloInstruction* instr) {
                 return instr->dimensions() == std::vector<int64_t>({0, 3});
               })));
+}
+
+TEST_F(AlgebraicSimplifierTest, TransposeBitcastOfBroadcast) {
+  const char* kModuleStr = R"(
+   HloModule m
+   test {
+     bcast = f32[10,2,3,4]{3,2,1,0} broadcast(f32[2,4]{1,0} parameter(0)), dimensions={1,3}
+     ROOT trans = f32[2,3,10,4]{3,1,0,2} bitcast(bcast)
+   }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto m, ParseAndReturnVerifiedModule(kModuleStr));
+  AlgebraicSimplifierOptions options;
+  options.set_is_layout_sensitive(true);
+  EXPECT_TRUE(RunHloPass(AlgebraicSimplifier(options), m.get()).value());
+  SCOPED_TRACE(m->ToString());
+  EXPECT_THAT(
+      m->entry_computation()->root_instruction(),
+      GmockMatch(
+          m::Broadcast(m::Parameter(0))
+              .WithPredicate([](const HloInstruction* instr) {
+                return instr->dimensions() == std::vector<int64_t>({0, 3});
+              })));
+}
+
+TEST_F(AlgebraicSimplifierTest, TransposeOfBroadcastWithLayoutCheckSkipped) {
+  const char* kModuleStr = R"(
+   HloModule m
+   test {
+     bcast = f32[10,2,3,4]{3,2,1,0} broadcast(f32[2,4]{1,0} parameter(0)), dimensions={1,3}
+     ROOT trans = f32[2,3,10,4]{0,1,2,3} transpose(bcast), dimensions={1,2,0,3}
+   }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto m, ParseAndReturnVerifiedModule(kModuleStr));
+  AlgebraicSimplifierOptions options;
+  options.set_is_layout_sensitive(true);
+  EXPECT_FALSE(RunHloPass(AlgebraicSimplifier(options), m.get()).value());
 }
 
 TEST_F(AlgebraicSimplifierTest, TransposeOfBroadcastSkipped) {

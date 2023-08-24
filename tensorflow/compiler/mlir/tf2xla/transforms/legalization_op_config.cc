@@ -119,7 +119,6 @@ const llvm::DenseSet<mlir::TypeID>& MlirAlwaysOps() {
       // See b/216355804 how to reproduce the bug regarding tf.RandomUniform Op
       // See b/216353817 how to reproduce the bug regarding tf.StridedSlice Op
       // See b/245615401 how to reproduce the bug regarding tf.SliceOp
-      TypeID::get<TF::RandomUniformOp>(),
       TypeID::get<TF::StridedSliceOp>(),
       TypeID::get<TF::SliceOp>(),
 
@@ -176,8 +175,10 @@ bool IsOpTypeAllowedTf2XlaFallback(const TypeID& type_id) {
             TypeID::get<TF::CastOp>(),
             TypeID::get<TF::ClipByValueOp>(),
             TypeID::get<TF::CholeskyOp>(),
+            TypeID::get<TF::CollectiveReduceV2Op>(),
             TypeID::get<TF::ComplexAbsOp>(),
             TypeID::get<TF::ConjugateTransposeOp>(),
+            TypeID::get<TF::ConvOp>(),
             TypeID::get<TF::CoshOp>(),
             TypeID::get<TF::CrossOp>(),
             TypeID::get<TF::CumulativeLogsumexpOp>(),
@@ -270,6 +271,7 @@ bool IsOpTypeAllowedTf2XlaFallback(const TypeID& type_id) {
             TypeID::get<TF::RFFT3DOp>(),
             TypeID::get<TF::RGBToHSVOp>(),
             TypeID::get<TF::RandomUniformIntOp>(),
+            TypeID::get<TF::RandomUniformOp>(),
             TypeID::get<TF::RealDivOp>(),
             TypeID::get<TF::ReciprocalGradOp>(),
             TypeID::get<TF::Relu6GradOp>(),
@@ -430,6 +432,7 @@ bool IsOpTypeAllowedTf2XlaPreferred(const TypeID& type_id) {
     TypeID::get<TF::ProdOp>(),
     TypeID::get<TF::QrOp>(),
     TypeID::get<TF::RandomStandardNormalOp>(),
+    TypeID::get<TF::RandomUniformOp>(),
     TypeID::get<TF::RangeOp>(),
     TypeID::get<TF::ReshapeOp>(),
     TypeID::get<TF::ReverseV2Op>(),

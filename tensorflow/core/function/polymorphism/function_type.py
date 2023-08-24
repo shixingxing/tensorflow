@@ -29,7 +29,14 @@ from tensorflow.python.types import trace
 
 # Represents a defined parameter default value that is saved alongside the
 # function's captures.
-CAPTURED_DEFAULT_VALUE = object()
+class CapturedDefaultValue:
+  def __repr__(self):
+    return "<captured_default_value>"
+
+  def __str__(self):
+    return "<captured_default_value>"
+
+CAPTURED_DEFAULT_VALUE = CapturedDefaultValue()
 
 PROTO_TO_PY_ENUM = {
     function_type_pb2.Parameter.Kind.POSITIONAL_ONLY:
@@ -355,9 +362,10 @@ class FunctionType(inspect.Signature):
   def flat_inputs(self) -> List[trace.TraceType]:
     """Flat tensor inputs accepted by this FunctionType."""
     if not hasattr(self, "_cached_flat_inputs"):
-      self._cached_flat_inputs = []
+      cached_flat_inputs = []
       for p in self.parameters.values():
-        self._cached_flat_inputs.extend(p.type_constraint._flatten())  # pylint: disable=protected-access
+        cached_flat_inputs.extend(p.type_constraint._flatten())  # pylint: disable=protected-access
+      self._cached_flat_inputs = cached_flat_inputs
 
     return self._cached_flat_inputs
 
@@ -399,9 +407,10 @@ class FunctionType(inspect.Signature):
   def flat_captures(self) -> List[trace.TraceType]:
     """Flat tensor captures needed by this FunctionType."""
     if not hasattr(self, "_cached_flat_captures"):
-      self._cached_flat_captures = []
+      cached_flat_captures = []
       for t in self.captures.values():
-        self._cached_flat_captures.extend(t._flatten())  # pylint: disable=protected-access
+        cached_flat_captures.extend(t._flatten())  # pylint: disable=protected-access
+      self._cached_flat_captures = cached_flat_captures
 
     return self._cached_flat_captures
 

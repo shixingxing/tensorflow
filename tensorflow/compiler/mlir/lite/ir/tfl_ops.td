@@ -2125,16 +2125,17 @@ def TFL_LogisticOp: TFL_Op<"logistic", [
 
 def TFL_LogOp: TFL_Op<"log", [
     Pure,
-    TF_SameOperandsAndResultTypeResolveRef]> {
+    QuantizableResult,
+    TFL_SameFirstOperandAndFirstResultElementType]> {
   let summary = "Natural logarithm operator";
 
   let description = [{
     Performs element-wise natural logarithm operation on input.
   }];
 
-  let arguments = (ins TFL_FpTensor:$x);
+  let arguments = (ins TFL_TensorOf<[F32, QI8]>:$x);
 
-  let results = (outs TFL_FpTensor:$y);
+  let results = (outs TFL_TensorOf<[F32, QI8]>:$y);
 
   let hasFolder = 1;
 
@@ -2181,25 +2182,11 @@ def TFL_LogSoftmaxOp : TFL_Op<"log_softmax", [
   }];
 }
 
-// TODO(ashwinm): Revisit the granularity of the PredOpTraits. We could
-// break this into smaller PredOpTraits, each with more descriptive messages
-// that would make it easier to trace failures OR, need a way to specify desc
-// per Predicate inside the trait and get tablegen to use that to emit error
-// message.
-def MaxPoolOperandAndResultConstraints : PredOpTrait<"MaxPool2D operand and "
-    "result types match specified constraints",
-  And<[
-    // The input and output tensors should have the same elemental type
-    // and they should be one of the specified types below.
-    TCopVTEtIs<0, AnyTypeOf<[F32, QI8, QUI8]>>,
-    TFL_TCresVTEtIsSameAsOp<0, 0>]>>;
-
 def TFL_MaxPool2DOp : TFL_Op<"max_pool_2d", [
     TFL_OperandHasRank<0, 4>,
     PredOpTrait<"input and output must have same element type",
       TFL_TCresVTEtIsSameAsOp<0, 0>>,
     Pure,
-    MaxPoolOperandAndResultConstraints,
     SameOperandsAndResultsScale,
     QuantizableResult,
     DeclareOpInterfaceMethods<TFL_ArithmeticCount>]> {
@@ -2272,7 +2259,7 @@ def TFL_MeanOp : TFL_Op<"mean", [
 
   let arguments = (ins
     TFL_TensorOf<[F32, I32, I64, QI8, QUI8, UI8, QI16]>:$input,
-    TFL_TensorOf<[I32, I64]>:$axis,
+    TFL_TensorOf<[I32]>:$axis,
     BoolAttr:$keep_dims
   );
 
@@ -5156,7 +5143,8 @@ def TFL_YieldOp : Op<TFL_Dialect, "yield",
 }
 
 def TFL_IfOp : Op<TFL_Dialect, "if", [
-    DeclareOpInterfaceMethods<RegionBranchOpInterface>,
+    DeclareOpInterfaceMethods<RegionBranchOpInterface,
+                              ["getEntrySuccessorRegions"]>,
     SingleBlockImplicitTerminator<"YieldOp">,
     RecursiveMemoryEffects,
     NoRegionArguments,

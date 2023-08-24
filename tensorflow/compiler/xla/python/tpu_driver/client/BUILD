@@ -1,3 +1,4 @@
+load("//tensorflow:strict.default.bzl", "py_strict_library")
 load("//tensorflow/tsl/platform:rules_cc.bzl", "cc_library")
 load("//tensorflow/tsl:tsl.default.bzl", "filegroup", "tsl_pybind_extension")
 
@@ -34,10 +35,8 @@ cc_library(
         "//tensorflow/compiler/xla/python/tpu_driver:tpu_driver_proto_cc",
         "//tensorflow/compiler/xla/service:computation_placer",
         "//tensorflow/tsl/framework:allocator",
-        "//tensorflow/tsl/platform:casts",
         "//tensorflow/tsl/platform:env",
         "//tensorflow/tsl/profiler/lib:traceme",
-        "@com_google_absl//absl/memory",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/time",
@@ -74,7 +73,7 @@ tsl_pybind_extension(
     ],
 )
 
-py_library(
+py_strict_library(
     name = "py_tpu_client",
     srcs = [
         "tpu_client.py",
@@ -85,7 +84,6 @@ py_library(
         ":tpu_client_extension",
         "//tensorflow/compiler/xla/python:xla_client",
         "//tensorflow/compiler/xla/python:xla_extension",
-        "//third_party/py/numpy",
     ],
 )
 

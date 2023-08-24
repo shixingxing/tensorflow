@@ -23,6 +23,7 @@ load("//third_party/FP16:workspace.bzl", FP16 = "repo")
 load("//third_party/absl:workspace.bzl", absl = "repo")
 load("//third_party/benchmark:workspace.bzl", benchmark = "repo")
 load("//third_party/dlpack:workspace.bzl", dlpack = "repo")
+load("//third_party/ducc:workspace.bzl", ducc = "repo")
 load("//third_party/eigen3:workspace.bzl", eigen3 = "repo")
 load("//third_party/farmhash:workspace.bzl", farmhash = "repo")
 load("//third_party/flatbuffers:workspace.bzl", flatbuffers = "repo")
@@ -40,7 +41,6 @@ load("//third_party/pybind11_bazel:workspace.bzl", pybind11_bazel = "repo")
 load("//third_party/opencl_headers:workspace.bzl", opencl_headers = "repo")
 load("//third_party/kissfft:workspace.bzl", kissfft = "repo")
 load("//third_party/pasta:workspace.bzl", pasta = "repo")
-load("//third_party/psimd:workspace.bzl", psimd = "repo")
 load("//third_party/ruy:workspace.bzl", ruy = "repo")
 load("//third_party/sobol_data:workspace.bzl", sobol_data = "repo")
 load("//third_party/stablehlo:workspace.bzl", stablehlo = "repo")
@@ -63,6 +63,7 @@ def _initialize_third_party():
     absl()
     bazel_skylib_workspace()
     benchmark()
+    ducc()
     dlpack()
     eigen3()
     farmhash()
@@ -79,7 +80,6 @@ def _initialize_third_party():
     nasm()
     opencl_headers()
     pasta()
-    psimd()
     pybind11_abseil()
     pybind11_bazel()
     ruy()
@@ -147,9 +147,9 @@ def _tf_repositories():
     # LINT.IfChange
     tf_http_archive(
         name = "XNNPACK",
-        sha256 = "c979b62e8b77af60dfd7567f22ade20d5a9d4d0888f8a2d60d155fc0d31b22ab",
-        strip_prefix = "XNNPACK-b9d4073a6913891ce9cbd8965c8d506075d2a45a",
-        urls = tf_mirror_urls("https://github.com/google/XNNPACK/archive/b9d4073a6913891ce9cbd8965c8d506075d2a45a.zip"),
+        sha256 = "f63e2ed14c18f0b6e5fc51672568ce05b73ec93cc90ee46c2a3d1d547aab20cf",
+        strip_prefix = "XNNPACK-4a390902f647b604e2c6962c96b941fc81c60213",
+        urls = tf_mirror_urls("https://github.com/google/XNNPACK/archive/4a390902f647b604e2c6962c96b941fc81c60213.zip"),
     )
     # LINT.ThenChange(//tensorflow/lite/tools/cmake/modules/xnnpack.cmake)
 
@@ -162,16 +162,16 @@ def _tf_repositories():
 
     tf_http_archive(
         name = "pthreadpool",
-        sha256 = "b96413b10dd8edaa4f6c0a60c6cf5ef55eebeef78164d5d69294c8173457f0ec",
-        strip_prefix = "pthreadpool-b8374f80e42010941bda6c85b0e3f1a1bd77a1e0",
-        urls = tf_mirror_urls("https://github.com/Maratyszcza/pthreadpool/archive/b8374f80e42010941bda6c85b0e3f1a1bd77a1e0.zip"),
+        sha256 = "2b4bd93beb478e1919ca81262e9f4998ceaa798bac1c3185ee64be907be1babd",
+        strip_prefix = "pthreadpool-0a4b81c950fa4fb08037ceeaa54d008efdf4e739",
+        urls = tf_mirror_urls("https://github.com/Maratyszcza/pthreadpool/archive/0a4b81c950fa4fb08037ceeaa54d008efdf4e739.zip"),
     )
 
     tf_http_archive(
         name = "cpuinfo",
-        strip_prefix = "cpuinfo-3dc310302210c1891ffcfb12ae67b11a3ad3a150",
-        sha256 = "ba668f9f8ea5b4890309b7db1ed2e152aaaf98af6f9a8a63dbe1b75c04e52cb9",
-        urls = tf_mirror_urls("https://github.com/pytorch/cpuinfo/archive/3dc310302210c1891ffcfb12ae67b11a3ad3a150.zip"),
+        strip_prefix = "cpuinfo-87d8234510367db49a65535021af5e1838a65ac2",
+        sha256 = "609fc42c47482c1fc125dccac65e843f640e792540162581c4b7eb6ff81c826a",
+        urls = tf_mirror_urls("https://github.com/pytorch/cpuinfo/archive/87d8234510367db49a65535021af5e1838a65ac2.zip"),
     )
 
     tf_http_archive(
@@ -192,11 +192,11 @@ def _tf_repositories():
     )
 
     tf_http_archive(
-        name = "onednn_v3",
+        name = "onednn",
         build_file = "//third_party/mkl_dnn:mkldnn_v1.BUILD",
-        sha256 = "28e31f2d576e1a7e3a796f5c33c1d733c256078cff1c48b9e2a692d5975e1401",
-        strip_prefix = "oneDNN-3.1",
-        urls = tf_mirror_urls("https://github.com/oneapi-src/oneDNN/archive/refs/tags/v3.1.tar.gz"),
+        sha256 = "2f76b407ef8893cca71340f88cd800019a1f14f8ac1bbdbb89a84be1370b52e3",
+        strip_prefix = "oneDNN-3.2.1",
+        urls = tf_mirror_urls("https://github.com/oneapi-src/oneDNN/archive/refs/tags/v3.2.1.tar.gz"),
     )
 
     tf_http_archive(
@@ -204,9 +204,14 @@ def _tf_repositories():
         build_file = "//third_party/mkl_dnn:mkldnn_acl.BUILD",
         patch_file = [
             "//third_party/mkl_dnn:onednn_acl_threadcap.patch",
+            "//third_party/mkl_dnn:onednn_acl_remove_winograd.patch",
             "//third_party/mkl_dnn:onednn_acl_fixed_format_kernels.patch",
             "//third_party/mkl_dnn:onednn_acl_depthwise_convolution.patch",
             "//third_party/mkl_dnn:onednn_acl_threadpool_scheduler.patch",
+            "//third_party/mkl_dnn:onednn_acl_reorder_padded.patch",
+            "//third_party/mkl_dnn:onednn_acl_reorder_update.patch",
+            "//third_party/mkl_dnn:onednn_acl_reorder.patch",
+            "//third_party/mkl_dnn:onednn_acl_thread_local_scheduler.patch",
         ],
         sha256 = "a50993aa6265b799b040fe745e0010502f9f7103cc53a9525d59646aef006633",
         strip_prefix = "oneDNN-2.7.3",
@@ -215,15 +220,13 @@ def _tf_repositories():
 
     tf_http_archive(
         name = "compute_library",
-        sha256 = "e20a060d3c4f803889d96c2f0b865004ba3ef4e228299a44339ea1c1ba827c85",
-        strip_prefix = "ComputeLibrary-22.11",
-        build_file = "//third_party/compute_library:BUILD",
         patch_file = [
             "//third_party/compute_library:compute_library.patch",
-            "//third_party/compute_library:acl_fixed_format_kernels_striding.patch",
-            "//third_party/compute_library:acl_openmp_fix.patch",
+            "//third_party/compute_library:acl_thread_local_scheduler.patch",
         ],
-        urls = tf_mirror_urls("https://github.com/ARM-software/ComputeLibrary/archive/v22.11.tar.gz"),
+        sha256 = "c4ca329a78da380163b2d86e91ba728349b6f0ee97d66e260a694ef37f0b0d93",
+        strip_prefix = "ComputeLibrary-23.05.1",
+        urls = tf_mirror_urls("https://github.com/ARM-software/ComputeLibrary/archive/v23.05.1.tar.gz"),
     )
 
     tf_http_archive(
@@ -510,10 +513,10 @@ def _tf_repositories():
     tf_http_archive(
         name = "curl",
         build_file = "//third_party:curl.BUILD",
-        sha256 = "5fd29000a4089934f121eff456101f0a5d09e2a3e89da1d714adf06c4be887cb",
-        strip_prefix = "curl-8.0.1",
+        sha256 = "2e5a9b8fcdc095bdd2f079561f369de71c5eb3b80f00a702fbe9a8b8d9897891",
+        strip_prefix = "curl-8.1.2",
         system_build_file = "//third_party/systemlibs:curl.BUILD",
-        urls = tf_mirror_urls("https://curl.haxx.se/download/curl-8.0.1.tar.gz"),
+        urls = tf_mirror_urls("https://curl.haxx.se/download/curl-8.1.2.tar.gz"),
     )
 
     # WARNING: make sure ncteisen@ and vpai@ are cc-ed on any CL to change the below rule
@@ -807,12 +810,6 @@ def _tf_repositories():
     )
 
     tf_http_archive(
-        name = "rules_python",
-        sha256 = "aa96a691d3a8177f3215b14b0edc9641787abaaa30363a080165d06ab65e1161",
-        urls = tf_mirror_urls("https://github.com/bazelbuild/rules_python/releases/download/0.0.1/rules_python-0.0.1.tar.gz"),
-    )
-
-    tf_http_archive(
         name = "build_bazel_rules_android",
         sha256 = "cd06d15dd8bb59926e4d65f9003bfc20f9da4b2519985c27e190cddc8b7a7806",
         strip_prefix = "rules_android-0.1.1",
@@ -959,6 +956,40 @@ def _tf_repositories():
         sha256 = "f57bf32804140cad58b1240b804e0dbd68f7e6bf67eba8e0c0fa3a62fd7f0f84",
         urls = tf_mirror_urls("https://github.com/google/or-tools/releases/download/v9.0/bliss-0.73.zip"),
         #url = "http://www.tcs.hut.fi/Software/bliss/bliss-0.73.zip",
+    )
+
+    # Riegeli is imported twice since there are two targets (third_party/riegeli and
+    # third_party/py/riegeli) that are used in TF.
+    tf_http_archive(
+        name = "riegeli",
+        sha256 = "870ca080cdfc5eba696a72ccc3a54cbf0f2271befc0d459eafa8f065edfaadb2",
+        strip_prefix = "riegeli-264ef7b4a1314d97265b37544b27cd3923ea72d2",
+        urls = tf_mirror_urls("https://github.com/google/riegeli/archive/264ef7b4a1314d97265b37544b27cd3923ea72d2.zip"),
+    )
+
+    tf_http_archive(
+        name = "riegeli_py",
+        sha256 = "870ca080cdfc5eba696a72ccc3a54cbf0f2271befc0d459eafa8f065edfaadb2",
+        patch_file = ["//third_party:riegeli_fix.patch"],
+        strip_prefix = "riegeli-264ef7b4a1314d97265b37544b27cd3923ea72d2",
+        urls = tf_mirror_urls("https://github.com/google/riegeli/archive/264ef7b4a1314d97265b37544b27cd3923ea72d2.zip"),
+    )
+
+    # Required by riegeli.
+    tf_http_archive(
+        name = "org_brotli",
+        sha256 = "84a9a68ada813a59db94d83ea10c54155f1d34399baf377842ff3ab9b3b3256e",
+        strip_prefix = "brotli-3914999fcc1fda92e750ef9190aa6db9bf7bdb07",
+        urls = tf_mirror_urls("https://github.com/google/brotli/archive/3914999fcc1fda92e750ef9190aa6db9bf7bdb07.zip"),  # 2022-11-17
+    )
+
+    # Required by riegeli.
+    tf_http_archive(
+        name = "net_zstd",
+        build_file = "//third_party:net_zstd.BUILD",
+        sha256 = "b6c537b53356a3af3ca3e621457751fa9a6ba96daf3aebb3526ae0f610863532",
+        strip_prefix = "zstd-1.4.5/lib",
+        urls = tf_mirror_urls("https://github.com/facebook/zstd/archive/v1.4.5.zip"),  # 2020-05-22
     )
 
     # used for adding androidx.annotation dependencies in tflite android jni.

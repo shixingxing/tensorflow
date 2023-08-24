@@ -157,6 +157,12 @@ func.func @testLogStaticShapeInputAndDynamicShapeOutput(tensor<8 x f32>) -> tens
   func.return %0 : tensor<? x f32>
 }
 
+// CHECK-LABEL: testLogQuantInt8
+func.func @testLogQuantInt8(%arg0: tensor<1x80x128x!quant.uniform<i8:f32, 0.0517647:-128>>) -> tensor<1x80x128x!quant.uniform<i8:f32, 0.0191482:-8>> {
+  %0 = "tfl.log"(%arg0): (tensor<1x80x128x!quant.uniform<i8:f32, 0.0517647:-128>>) -> tensor<1x80x128x!quant.uniform<i8:f32, 0.0191482:-8>>
+  func.return %0 : tensor<1x80x128x!quant.uniform<i8:f32, 0.0191482:-8>>
+}
+
 // CHECK-LABEL: testNeg
 func.func @testNeg(tensor<? x f32>) -> tensor<? x f32> {
 ^bb0(%arg0: tensor<? x f32>):
@@ -733,7 +739,7 @@ func.func @testMaxPool2DQuantized(tensor<256x32x32x3x!quant.uniform<i8:f32, 0.1:
 // test invalid MaxPool2D
 func.func @testMaxPool2DWrongOperandResultType(tensor<1x7x7x16xi32>) -> tensor<1x7x7x16xi32> {
 ^bb0(%arg0: tensor<1x7x7x16xi32>):
-  // expected-error @+1 {{failed to verify that MaxPool2D operand and result types match specified constraints}}
+  // expected-error @+1 {{'tfl.max_pool_2d' op operand #0 must be tensor of 32-bit float or QUI8 type or QI8 type or QI16 type or TFLite quint8 type values, but got 'tensor<1x7x7x16xi32>'}}
   %0 = "tfl.max_pool_2d"(%arg0) {filter_height = 1 : i32, filter_width = 1 : i32, fused_activation_function = "RELU6", padding = "SAME", stride_h = 1 : i32, stride_w = 1 : i32} : (tensor<1x7x7x16xi32>) -> tensor<1x7x7x16xi32>
   func.return %0 : tensor<1x7x7x16xi32>
 }
@@ -743,7 +749,7 @@ func.func @testMaxPool2DWrongOperandResultType(tensor<1x7x7x16xi32>) -> tensor<1
 // test invalid MaxPool2D
 func.func @testMaxPool2DWrongOperandStorageType(tensor<1x7x7x16x!quant.uniform<i9:f32, 0.1:128>>) -> tensor<1x7x7x16x!quant.uniform<i9:f32, 0.1:128>> {
 ^bb0(%arg0: tensor<1x7x7x16x!quant.uniform<i9:f32, 0.1:128>>):
-  // expected-error @+1 {{failed to verify that MaxPool2D operand and result types match specified constraints}}
+  // expected-error @+1 {{'tfl.max_pool_2d' op operand #0 must be tensor of 32-bit float or QUI8 type or QI8 type or QI16 type or TFLite quint8 type values, but got 'tensor<1x7x7x16x!quant.uniform<i9:f32, 1.000000e-01:128>>'}}
   %0 = "tfl.max_pool_2d"(%arg0) {filter_height = 1 : i32, filter_width = 1 : i32, fused_activation_function = "RELU6", padding = "SAME", stride_h = 1 : i32, stride_w = 1 : i32} : (tensor<1x7x7x16x!quant.uniform<i9:f32, 0.1:128>>) -> tensor<1x7x7x16x!quant.uniform<i9:f32, 0.1:128>>
   func.return %0 : tensor<1x7x7x16x!quant.uniform<i9:f32, 0.1:128>>
 }

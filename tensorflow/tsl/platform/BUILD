@@ -14,6 +14,7 @@ load(
 load(
     "//tensorflow/tsl/platform:build_config.bzl",
     "tf_cuda_libdevice_path_deps",
+    "tf_error_logging_deps",
     "tf_fingerprint_deps",
     "tf_google_mobile_srcs_no_runtime",
     "tf_logging_deps",
@@ -327,13 +328,14 @@ cc_library(
         ":errors",
         ":logging",
         ":macros",
+        ":platform",
         ":status",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/types:span",
-    ],
+    ] + tf_platform_deps("statusor"),
 )
 
 cc_library(
@@ -413,6 +415,7 @@ cc_library(
     compatible_with = get_compatible_with_portable(),
     deps = [
         ":cord",
+        ":platform",
         ":stringpiece",
     ],
 )
@@ -594,6 +597,7 @@ filegroup(
 filegroup(
     name = "mobile_srcs_only_runtime",
     srcs = [
+        "error_logging.h",
         "fingerprint.h",
         "notification.h",
         "png.h",
@@ -665,6 +669,7 @@ exports_files(
         "env.cc",
         "env.h",
         "env_time.h",
+        "error_logging.h",
         "file_system.cc",
         "file_system.h",
         "file_system_helper.cc",
@@ -730,6 +735,7 @@ filegroup(
         "setround.h",
         "snappy.h",
         "status.h",
+        "statusor.h",
         "tracing.h",
         "unbounded_work_queue.h",
     ],
@@ -988,9 +994,8 @@ cc_library(
     hdrs = ["cord.h"],
     compatible_with = get_compatible_with_portable(),
     deps = [
-        ":platform",
         "@com_google_absl//absl/strings:cord",
-    ] + tf_platform_deps("cord"),
+    ],
 )
 
 cc_library(
@@ -1094,6 +1099,19 @@ cc_library(
         "//visibility:public",
     ],
     deps = tf_logging_deps(),
+)
+
+cc_library(
+    name = "error_logging",
+    compatible_with = get_compatible_with_portable(),
+    textual_hdrs = ["error_logging.h"],
+    visibility = [
+        "//visibility:public",
+    ],
+    deps = [
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+    ] + tf_error_logging_deps(),
 )
 
 cc_library(
@@ -1308,6 +1326,7 @@ tsl_cc_test(
     srcs = ["tstring_test.cc"],
     deps = [
         ":cord",
+        ":platform",
         ":stringpiece",
         ":test",
         ":test_main",

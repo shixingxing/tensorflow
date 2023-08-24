@@ -243,7 +243,6 @@ def cc_proto_library(
 
     if use_grpc_plugin:
         cc_libs += select({
-            clean_dep("//tensorflow/tsl:linux_s390x"): ["//external:grpc_lib_unsecure"],
             "//conditions:default": ["//external:grpc_lib"],
         })
 
@@ -326,7 +325,6 @@ def cc_grpc_library(
     proto_targets += srcs
 
     extra_deps += select({
-        clean_dep("//tensorflow/tsl:linux_s390x"): ["//external:grpc_lib_unsecure"],
         "//conditions:default": ["//external:grpc_lib"],
     })
 
@@ -448,6 +446,7 @@ def tf_proto_library_cc(
         js_codegen = "jspb",
         create_service = False,
         create_java_proto = False,
+        create_kotlin_proto = False,
         make_default_target_header_only = False):
     js_codegen = js_codegen  # unused argument
     native.filegroup(
@@ -456,7 +455,7 @@ def tf_proto_library_cc(
         testonly = testonly,
         visibility = visibility,
     )
-    _ignore = (create_service, create_java_proto)
+    _ignore = (create_service, create_java_proto, create_kotlin_proto)
 
     use_grpc_plugin = None
     if cc_grpc_version:
@@ -584,6 +583,7 @@ def tf_proto_library(
         js_codegen = "jspb",
         create_service = False,
         create_java_proto = False,
+        create_kotlin_proto = False,
         create_go_proto = False,
         create_grpc_library = False,
         make_default_target_header_only = False,
@@ -598,6 +598,7 @@ def tf_proto_library(
         js_codegen,
         create_service,
         create_java_proto,
+        create_kotlin_proto,
         cc_stubby_versions,
         create_go_proto,
     )
@@ -653,7 +654,6 @@ def tf_additional_lib_hdrs():
     return [
         clean_dep("//tensorflow/tsl/platform/default:casts.h"),
         clean_dep("//tensorflow/tsl/platform/default:context.h"),
-        clean_dep("//tensorflow/tsl/platform/default:cord.h"),
         clean_dep("//tensorflow/tsl/platform/default:criticality.h"),
         clean_dep("//tensorflow/tsl/platform/default:dynamic_annotations.h"),
         clean_dep("//tensorflow/tsl/platform/default:integral_types.h"),
@@ -663,6 +663,7 @@ def tf_additional_lib_hdrs():
         clean_dep("//tensorflow/tsl/platform/default:notification.h"),
         clean_dep("//tensorflow/tsl/platform/default:stacktrace.h"),
         clean_dep("//tensorflow/tsl/platform/default:status.h"),
+        clean_dep("//tensorflow/tsl/platform/default:statusor.h"),
         clean_dep("//tensorflow/tsl/platform/default:tracing_impl.h"),
         clean_dep("//tensorflow/tsl/platform/default:unbounded_work_queue.h"),
     ] + select({
@@ -841,6 +842,9 @@ def tf_platform_alias(name, platform_dir = "//tensorflow/tsl/platform/"):
 
 def tf_logging_deps():
     return [clean_dep("//tensorflow/tsl/platform/default:logging")]
+
+def tf_error_logging_deps():
+    return [clean_dep("//tensorflow/tsl/platform/default:error_logging")]
 
 def tf_resource_deps():
     return [clean_dep("//tensorflow/tsl/platform/default:resource")]

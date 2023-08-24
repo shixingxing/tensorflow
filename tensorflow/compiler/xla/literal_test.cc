@@ -15,25 +15,41 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/literal.h"
 
+#include <algorithm>
+#include <cmath>
+#include <complex>
 #include <cstdint>
+#include <functional>
 #include <limits>
-#include <memory>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #include "absl/base/casts.h"
 #include "absl/strings/match.h"
-#include "absl/strings/str_cat.h"
+#include "absl/types/span.h"
+#include "tensorflow/compiler/xla/array.h"
 #include "tensorflow/compiler/xla/array2d.h"
 #include "tensorflow/compiler/xla/array3d.h"
 #include "tensorflow/compiler/xla/array4d.h"
+#include "tensorflow/compiler/xla/index_util.h"
+#include "tensorflow/compiler/xla/layout.h"
 #include "tensorflow/compiler/xla/layout_util.h"
 #include "tensorflow/compiler/xla/literal_util.h"
+#include "tensorflow/compiler/xla/primitive_util.h"
+#include "tensorflow/compiler/xla/shape.h"
 #include "tensorflow/compiler/xla/shape_util.h"
+#include "tensorflow/compiler/xla/status.h"
 #include "tensorflow/compiler/xla/test.h"
 #include "tensorflow/compiler/xla/types.h"
+#include "tensorflow/compiler/xla/xla_data.pb.h"
 #include "tensorflow/tsl/lib/core/status_test_util.h"
+#include "tensorflow/tsl/platform/errors.h"
 #include "tensorflow/tsl/platform/float8.h"
+#include "tensorflow/tsl/platform/logging.h"  // IWYU pragma: keep
+#include "tensorflow/tsl/platform/macros.h"
+#include "tensorflow/tsl/platform/statusor.h"
 #include "tensorflow/tsl/platform/test_benchmark.h"
 
 namespace xla {
@@ -682,6 +698,60 @@ TEST_F(LiteralUtilTest, IsAllFirst) {
   complex64 c7_9 = {7, 9};
   EXPECT_TRUE(LiteralUtil::CreateR2<complex64>({{c8_9}, {c8_9}}).IsAllFirst());
   EXPECT_FALSE(LiteralUtil::CreateR2<complex64>({{c7_9}, {c8_9}}).IsAllFirst());
+}
+
+TEST_F(LiteralUtilTest, CountEqualInt) {
+  EXPECT_EQ(LiteralUtil::CreateR1<int8_t>({}).CountEqual<int8_t>(1), 0);
+  EXPECT_EQ(
+      LiteralUtil::CreateR1<int8_t>({1, 2, 3, 4, 5, 100}).CountEqual<int8_t>(2),
+      1);
+  EXPECT_EQ(LiteralUtil::CreateR1<int8_t>({0, 3, 6, 0, 9, 18, 0})
+                .CountEqual<int8_t>(0),
+            3);
+  EXPECT_EQ(LiteralUtil::CreateR1<int32_t>({234, 345, 4, 45, 5467, 5467, 5467})
+                .CountEqual<int32_t>(5467),
+            3);
+}
+
+TEST_F(LiteralUtilTest, CountEqualFloat) {
+  EXPECT_EQ(LiteralUtil::CreateR1<float>({}).CountEqual<float>(0), 0);
+  EXPECT_EQ(LiteralUtil::CreateR1<float>({1.1, 2.2, 3.3, 4.4, 5.5, 100.6})
+                .CountEqual<float>(3.3),
+            1);
+  EXPECT_EQ(LiteralUtil::CreateR1<float>({7.62, 3, 7.75, 7.62, 7.3, 2, 7.62})
+                .CountEqual<float>(7.62),
+            3);
+  EXPECT_EQ(LiteralUtil::CreateR1<float>(
+                {NAN, 0, 6.8, NAN, NAN, NAN, 63.12, 24.6, NAN})
+                .CountEqual<float>(NAN),
+            5);
+}
+
+TEST_F(LiteralUtilTest, CountEqualBool) {
+  EXPECT_EQ(LiteralUtil::CreateR1<bool>({false, true}).CountEqual<bool>(false),
+            1);
+}
+
+TEST_F(LiteralUtilTest, CountEqualComplex) {
+  EXPECT_EQ(LiteralUtil::CreateR1<std::complex<double>>(
+                {std::complex<float>(1, 2), std::complex<float>(3, 4),
+                 std::complex<float>(5, 6), std::complex<float>(6, 7)})
+                .CountEqual<float>(std::complex<float>(5, 6)),
+            1);
+}
+
+TEST_F(LiteralUtilTest, CountEqualMismatched) {
+  EXPECT_EQ(LiteralUtil::CreateR1<float>({13, 10.5, 15.6, 22.7})
+                .CountEqual<int8_t>(13),
+            1);
+  EXPECT_EQ(
+      LiteralUtil::CreateR1<float>({10.5, 15.6, 22.7}).CountEqual<int8_t>(1),
+      0);
+  EXPECT_EQ(LiteralUtil::CreateR1<std::complex<float>>(
+                {std::complex<float>(1, 2), std::complex<float>(3, 4),
+                 std::complex<float>(5, 6), std::complex<float>(6, 7)})
+                .CountEqual<float>(1),
+            0);
 }
 
 TEST_F(LiteralUtilTest, IsZero) {

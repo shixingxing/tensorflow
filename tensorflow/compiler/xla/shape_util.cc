@@ -17,27 +17,48 @@ limitations under the License.
 
 #include <algorithm>
 #include <climits>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <numeric>
 #include <optional>
 #include <ostream>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "absl/algorithm/container.h"
+#include "absl/base/optimization.h"
 #include "absl/container/inlined_vector.h"
+#include "absl/functional/function_ref.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
+#include "absl/strings/str_join.h"
 #include "absl/synchronization/blocking_counter.h"
+#include "absl/synchronization/mutex.h"
+#include "absl/types/span.h"
 #include "tensorflow/compiler/xla/index_util.h"
+#include "tensorflow/compiler/xla/layout.h"
 #include "tensorflow/compiler/xla/layout_util.h"
 #include "tensorflow/compiler/xla/overflow_util.h"
 #include "tensorflow/compiler/xla/permutation_util.h"
 #include "tensorflow/compiler/xla/primitive_util.h"
 #include "tensorflow/compiler/xla/printer.h"
+#include "tensorflow/compiler/xla/shape.h"
+#include "tensorflow/compiler/xla/status.h"
 #include "tensorflow/compiler/xla/status_macros.h"
+#include "tensorflow/compiler/xla/statusor.h"
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/util.h"
+#include "tensorflow/compiler/xla/xla_data.pb.h"
+#include "tensorflow/tsl/platform/cpu_info.h"
+#include "tensorflow/tsl/platform/env.h"
+#include "tensorflow/tsl/platform/errors.h"
+#include "tensorflow/tsl/platform/logging.h"  // IWYU pragma: keep
+#include "tensorflow/tsl/platform/macros.h"
+#include "tensorflow/tsl/platform/status.h"
+#include "tensorflow/tsl/platform/statusor.h"
 #include "tensorflow/tsl/platform/threadpool.h"
 
 namespace xla {
@@ -428,6 +449,7 @@ ShapeUtil::MakeShapeWithDescendingLayoutAndSamePhysicalLayout(
   for (int i = 0; i < shape.dimensions_size(); ++i) {
     new_shape.set_dynamic_dimension(i, shape.is_dynamic_dimension(i));
   }
+  new_shape.mutable_layout()->set_memory_space(shape.layout().memory_space());
   return new_shape;
 }
 
@@ -446,6 +468,9 @@ ShapeUtil::MakeShapeWithDescendingLayoutAndSamePhysicalLayout(
 /* static */ Shape ShapeUtil::MakeStaticShape(const Shape& original) {
   Shape result = original;
   result.clear_dynamic_dimensions();
+  if (result.has_layout()) {
+    result.mutable_layout()->set_dynamic_shape_metadata_prefix_bytes(0);
+  }
   return result;
 }
 
@@ -513,6 +538,22 @@ ShapeUtil::MakeShapeWithDescendingLayoutAndSamePhysicalLayout(
   }
   shape->add_dimensions(bound);
   TF_DCHECK_OK(ValidateShape(*shape));
+}
+
+// Prepend new major-most dimension sized `bound` to the shape.
+Shape ShapeUtil::PrependMajorDimension(int64_t bound, Shape shape) {
+  Shape new_shape(shape.element_type(), {}, {}, {});
+  new_shape.add_dimensions(bound);
+  for (const int64_t dim : shape.dimensions()) {
+    new_shape.add_dimensions(dim);
+  }
+  if (shape.has_layout()) {
+    for (const int64_t dim : shape.layout().minor_to_major()) {
+      new_shape.mutable_layout()->add_minor_to_major(dim + 1);
+    }
+    new_shape.mutable_layout()->add_minor_to_major(0);
+  }
+  return new_shape;
 }
 
 /* static */ void ShapeUtil::AppendMinorDimension(int bound, Shape* shape) {
@@ -1135,7 +1176,7 @@ ShapeUtil::InsertedOrDeleted1SizedDimensions(const Shape& shape_pre,
   std::vector<int64_t> inserted_indices;
   // Returns false if any input/output index between prior_unmodified_dim_pair
   // and unmodified_dim_pair have size >1. Otherwise, returns true and appends
-  // the degerenate input/output dimensions in the gap to
+  // the degenerate input/output dimensions in the gap to
   // deleted_indices/inserted_indices respectively.
   auto check_modified_dims =
       [&shape_pre, &shape_post, &deleted_indices, &inserted_indices](
@@ -1715,9 +1756,8 @@ ShapeUtil::DecomposeBitcastToTrt(const Shape& input_shape,
     absl::Span<const int64_t> count, absl::Span<const int64_t> incr,
     const ForEachParallelVisitorFunction& visitor_function) {
   // The parallel version of ForEachIndexInternal can never fail.
-  CHECK(
-      ForEachIndexParallelWithStatus(shape, base, count, incr, visitor_function)
-          .ok());
+  TF_CHECK_OK(ForEachIndexParallelWithStatus(shape, base, count, incr,
+                                             visitor_function));
 }
 
 /* static */ Status ShapeUtil::ForEachIndexParallelWithStatus(
@@ -1732,7 +1772,7 @@ ShapeUtil::DecomposeBitcastToTrt(const Shape& input_shape,
 /* static */ void ShapeUtil::ForEachIndexParallel(
     const Shape& shape,
     const ForEachParallelVisitorFunction& visitor_function) {
-  CHECK(ForEachIndexParallelWithStatus(shape, visitor_function).ok());
+  TF_CHECK_OK(ForEachIndexParallelWithStatus(shape, visitor_function));
 }
 
 /* static */ Status ShapeUtil::ForEachIndexParallelWithStatus(
@@ -2015,6 +2055,7 @@ Shape ShapeUtil::DeviceShapeToHostShape(Shape s) {
       subshape->mutable_layout()->set_memory_space(Layout::kDefaultMemorySpace);
       subshape->mutable_layout()->clear_physical_shape();
       subshape->mutable_layout()->set_element_size_in_bits(0);
+      subshape->mutable_layout()->set_dynamic_shape_metadata_prefix_bytes(0);
     }
   });
   return s;
@@ -2107,5 +2148,4 @@ int64_t ShapeUtil::ForEachState::CalculateNumSteps() const {
   }
   return size;
 }
-
 }  // namespace xla

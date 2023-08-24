@@ -2,10 +2,7 @@ load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
-    default_visibility = [
-        "//tensorflow/compiler/tf2xla:internal",
-        "//tensorflow/core/tpu:__subpackages__",
-    ],
+    default_visibility = ["//tensorflow/compiler/tf2xla:internal"],
     licenses = ["notice"],
 )
 
@@ -56,6 +53,7 @@ cc_library(
     deps = XLA_OPS_DEPS + [
         "//tensorflow/compiler/jit:device_compilation_cache",
         "//tensorflow/compiler/jit:device_compilation_profiler",
+        "//tensorflow/compiler/jit:pjrt_compile_util",
         "//tensorflow/compiler/jit:tf_graph_to_hlo_compiler",
         "//tensorflow/compiler/jit:tf_to_hlo_compiler",
         "//tensorflow/compiler/jit:xla_compile_util",

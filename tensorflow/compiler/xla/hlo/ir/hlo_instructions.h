@@ -18,7 +18,7 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_XLA_HLO_IR_HLO_INSTRUCTIONS_H_
 #define TENSORFLOW_COMPILER_XLA_HLO_IR_HLO_INSTRUCTIONS_H_
 
-#include <functional>
+#include <cstdint>
 #include <list>
 #include <memory>
 #include <optional>
@@ -30,12 +30,24 @@ limitations under the License.
 #include "absl/functional/function_ref.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
+#include "tensorflow/compiler/xla/comparison_util.h"
+#include "tensorflow/compiler/xla/hlo/ir/hlo_clone_context.h"
 #include "tensorflow/compiler/xla/hlo/ir/hlo_computation.h"
+#include "tensorflow/compiler/xla/hlo/ir/hlo_domain_metadata.h"
 #include "tensorflow/compiler/xla/hlo/ir/hlo_instruction.h"
 #include "tensorflow/compiler/xla/hlo/ir/hlo_opcode.h"
+#include "tensorflow/compiler/xla/iterator_util.h"
+#include "tensorflow/compiler/xla/layout.h"
+#include "tensorflow/compiler/xla/literal.h"
 #include "tensorflow/compiler/xla/printer.h"
+#include "tensorflow/compiler/xla/service/hlo.pb.h"
 #include "tensorflow/compiler/xla/shape.h"
+#include "tensorflow/compiler/xla/shape_util.h"
+#include "tensorflow/compiler/xla/status.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
+#include "tensorflow/tsl/lib/gtl/iterator_range.h"
+#include "tensorflow/tsl/platform/logging.h"  // IWYU pragma: keep
+#include "tensorflow/tsl/platform/status.h"
 
 namespace xla {
 
@@ -1347,11 +1359,11 @@ class HloFusionInstruction : public HloCallableInstruction {
 
   // Returns the list of fused instructions inside this fusion instruction.  The
   // returned type is a range of HloInstruction*s.
-  const tsl::gtl::iterator_range<UnwrappingIterator<
+  tsl::gtl::iterator_range<UnwrappingIterator<
       std::list<std::unique_ptr<HloInstruction>>::const_iterator>>
   fused_instructions() const;
 
-  const tsl::gtl::iterator_range<
+  tsl::gtl::iterator_range<
       UnwrappingIterator<std::list<std::unique_ptr<HloInstruction>>::iterator>>
   fused_instructions();
 
@@ -2303,6 +2315,11 @@ class HloDotInstruction : public HloInstruction {
   // Returns data on the dimension numbers used for a dot operation.
   const DotDimensionNumbers& dot_dimension_numbers() const {
     return dot_dimension_numbers_;
+  }
+
+  // Sets dimension numbers used for a dot operation.
+  DotDimensionNumbers* mutable_dot_dimension_numbers() {
+    return &dot_dimension_numbers_;
   }
 
   // Returns the information used to tell the implementation information about

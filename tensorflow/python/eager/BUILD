@@ -82,6 +82,10 @@ tf_python_pybind_extension(
     name = "pywrap_tensor_test_util",
     testonly = True,
     srcs = ["pywrap_tensor_test_util.cc"],
+    enable_stub_generation = True,
+    pytype_srcs = [
+        "pywrap_tensor_test_util.pyi",
+    ],
     deps = [
         ":pywrap_tfe_lib",
         "//tensorflow/c:tf_status_helper",
@@ -227,6 +231,10 @@ tf_python_pybind_extension(
     name = "custom_device_testutil",
     testonly = True,
     srcs = ["custom_device_testutil.cc"],
+    enable_stub_generation = True,
+    pytype_srcs = [
+        "custom_device_testutil.pyi",
+    ],
     deps = [
         "//tensorflow/c:c_api",
         "//tensorflow/c:safe_ptr",
@@ -574,6 +582,7 @@ cuda_py_strict_test(
         "//tensorflow/python/framework:dtypes",
         "//tensorflow/python/framework:errors",
         "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:tensor",
         "//tensorflow/python/framework:test_lib",
         "//tensorflow/python/ops:array_ops",
         "//tensorflow/python/ops:nn_ops",
@@ -687,6 +696,7 @@ py_strict_library(
         "//tensorflow/python/framework:dtypes",
         "//tensorflow/python/framework:indexed_slices",
         "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:tensor",
         "//tensorflow/python/framework:tensor_shape",
         "//tensorflow/python/framework:tensor_util",
         "//tensorflow/python/framework:type_spec",
@@ -719,6 +729,7 @@ py_strict_library(
         "//tensorflow/python/framework:dtypes",
         "//tensorflow/python/framework:indexed_slices",
         "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:tensor",
         "//tensorflow/python/framework:tensor_util",
         "//tensorflow/python/ops:array_ops",
         "//tensorflow/python/ops:handle_data_util",
@@ -916,6 +927,7 @@ cuda_py_strict_test(
         "//tensorflow/python/framework:dtypes",
         "//tensorflow/python/framework:errors",
         "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:tensor",
         "//tensorflow/python/framework:tensor_shape",
         "//tensorflow/python/framework:test_lib",
         "//tensorflow/python/layers",
@@ -996,6 +1008,7 @@ py_strict_library(
     deps = [
         "//tensorflow/python/framework:func_graph",
         "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:tensor",
         "//tensorflow/python/ops:array_ops",
         "//tensorflow/python/ops:op_selector",
         "//tensorflow/python/ops:resource_variable_ops",
@@ -1040,8 +1053,8 @@ py_strict_library(
         "//tensorflow/python/framework:func_graph",
         "//tensorflow/python/framework:ops",
         "//tensorflow/python/framework:sparse_tensor",
+        "//tensorflow/python/framework:tensor",
         "//tensorflow/python/framework:tensor_shape",
-        "//tensorflow/python/framework:tensor_spec",
         "//tensorflow/python/framework:tensor_util",
         "//tensorflow/python/ops:resource_variable_ops",
         "//tensorflow/python/ops:variable_scope",
@@ -1162,6 +1175,7 @@ cuda_py_strict_test(
         "//tensorflow/python/training:server_lib",
         "//tensorflow/python/util:compat",
         "@absl_py//absl/testing:parameterized",
+        "@pypi_portpicker//:pkg",
     ],
 )
 

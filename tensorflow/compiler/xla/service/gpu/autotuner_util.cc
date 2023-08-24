@@ -22,7 +22,16 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "absl/synchronization/mutex.h"
+#include "tensorflow/compiler/xla/autotune_results.pb.h"
+#include "tensorflow/compiler/xla/autotuning.pb.h"
+#include "tensorflow/compiler/xla/hlo/ir/hlo_instruction.h"
+#include "tensorflow/compiler/xla/service/gpu/gpu_asm_opts_util.h"
 #include "tensorflow/compiler/xla/service/gpu/stream_executor_util.h"
+#include "tensorflow/compiler/xla/status.h"
+#include "tensorflow/tsl/platform/errors.h"
 
 namespace xla {
 namespace gpu {
@@ -116,10 +125,30 @@ static AutotuneResult* TryFindInCache(const AutotuneCacheKey& key) {
   return nullptr;
 }
 
+/*static*/ AutotuneCacheKey AutotunerUtil::GetKey(
+    const HloInstruction* instr, const AutotuneConfig& config) {
+  return AutotuneCacheKey(config.GetModelStr(), *instr);
+}
+
+/*static*/ bool AutotunerUtil::IsInCache(const AutotuneCacheKey& key) {
+  return TryFindInCache(key) != nullptr;
+}
+
+/*static*/ Status AutotunerUtil::AddResult(const AutotuneCacheKey& key,
+                                           AutotuneResult result) {
+  absl::MutexLock lock(&autotune_cache_mu);
+  auto [_, inserted] = autotune_cache.emplace(key, std::move(result));
+  if (!inserted) {
+    return absl::AlreadyExistsError(absl::StrCat(
+        "The key is already in the autotune cache: ", key.ToString()));
+  }
+  return OkStatus();
+}
+
 /*static*/ StatusOr<AutotuneResult> AutotunerUtil::Autotune(
     const HloInstruction* instr, const AutotuneConfig& config,
     const AutotuneNoCacheFn& autotune_fn) {
-  AutotuneCacheKey key(config.GetModelStr(), *instr);
+  AutotuneCacheKey key = GetKey(instr, config);
   if (AutotuneResult* res = TryFindInCache(key)) {
     return *res;
   }
@@ -257,6 +286,21 @@ AutotunerUtil::ExtractComputationIntoNewModule(
   new_hlo_module->AddEntryComputationWithLayouts(
       computation.CloneInContext(clone_context));
   return new_hlo_module;
+}
+
+/*static*/ StatusOr<se::RedzoneAllocator> AutotunerUtil::CreateRedzoneAllocator(
+    const AutotuneConfig& config, const DebugOptions& opts,
+    se::Stream* force_stream) {
+  se::Stream* stream = force_stream;
+  if (stream == nullptr) {
+    TF_ASSIGN_OR_RETURN(stream, config.GetStream());
+  }
+  return se::RedzoneAllocator(
+      stream, config.GetAllocator(), PtxOptsFromDebugOptions(opts),
+      /*memory_limit=*/std::numeric_limits<int64_t>::max(),
+      /*redzone_size=*/config.should_check_correctness()
+          ? opts.xla_gpu_redzone_padding_bytes()
+          : 0);
 }
 
 }  // namespace gpu

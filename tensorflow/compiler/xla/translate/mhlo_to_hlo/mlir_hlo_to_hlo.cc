@@ -73,12 +73,14 @@ limitations under the License.
 #include "tensorflow/compiler/xla/mlir_hlo/mhlo/transforms/passes.h"
 #include "tensorflow/compiler/xla/primitive_util.h"
 #include "tensorflow/compiler/xla/service/gpu/backend_configs.pb.h"
+#include "tensorflow/compiler/xla/service/hlo.pb.h"
 #include "tensorflow/compiler/xla/service/hlo_parser.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/compiler/xla/status.h"
 #include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/compiler/xla/translate/mhlo_to_hlo/attribute_exporter.h"
 #include "tensorflow/compiler/xla/translate/mhlo_to_hlo/location_exporter.h"
+#include "tensorflow/compiler/xla/translate/mhlo_to_hlo/stack_frame_index_builder.h"
 #include "tensorflow/compiler/xla/translate/mhlo_to_hlo/type_to_shape.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
 #include "tensorflow/tsl/platform/float8.h"
@@ -233,20 +235,6 @@ static std::vector<xla::CrossProgramPrefetch> Convert_cross_program_prefetches(
     cross_program_prefetches.push_back(xla_cpp);
   }
   return cross_program_prefetches;
-}
-
-static xla::DynamicParameterBinding Convert_dynamic_parameter_bindings(
-    mlir::ArrayAttr dpbs) {
-  xla::DynamicParameterBinding xla_dpb;
-  for (auto dpb : dpbs) {
-    auto binding = dpb.cast<mlir::mhlo::DynamicParameterBindingAttr>();
-    auto _ = xla_dpb.Bind({binding.getDynamicParamNum(),
-                           xla::ShapeIndex(binding.getDynamicParamIndices())},
-                          {binding.getTargetParamNum(),
-                           xla::ShapeIndex(binding.getTargetParamIndices()),
-                           binding.getTargetParamDimNum()});
-  }
-  return xla_dpb;
 }
 
 // Converts StringRef to xla FftType enum
@@ -714,6 +702,10 @@ class ConvertToHloModule {
 
   const MlirToHloConversionOptions& GetOptions() const { return options_; }
 
+  xla::StackFrameIndexProto BuildStackFramesIndexProto() {
+    return stack_frame_indexes_builder_.Build();
+  }
+
  private:
   LogicalResult SetEntryTupleShapesAndLeafReplication(
       Block* block, const std::vector<bool>& entry_args_same_across_replicas,
@@ -730,6 +722,9 @@ class ConvertToHloModule {
 
   // The top-level XlaBuilder.
   xla::XlaBuilder& module_builder_;
+
+  // Common stack frame index builder.
+  mlir::StackFrameIndexBuilder stack_frame_indexes_builder_;
 
   // Map between function and lowered computation.
   FunctionLoweringMap lowered_computation_;
@@ -755,6 +750,7 @@ struct OpLoweringContext {
   llvm::DenseMap<mlir::Value, xla::XlaOp>* values;
   mlir::ConvertToHloModule* converter;
   xla::XlaBuilder* builder;
+  mlir::StackFrameIndexBuilder* frame_index_builder;
 };
 
 mlir::LogicalResult GetTuple(mlir::Operation* op,
@@ -2882,8 +2878,9 @@ LogicalResult ConvertToHloModule::Lower(
     return success();
   };
 
-  if (succeeded(
-          ExportXlaOperatorWrapped(inst, {value_lowering, this, builder}))) {
+  if (succeeded(ExportXlaOperatorWrapped(
+          inst,
+          {value_lowering, this, builder, &stack_frame_indexes_builder_}))) {
     if (inst->getNumResults() == 1) {
       auto iter = value_lowering->find(inst->getResult(0));
       if (iter == value_lowering->end()) {
@@ -3149,8 +3146,9 @@ LogicalResult ConvertToHloModule::RunOnFunction(mlir::func::FuncOp f) {
     bool any_arg_replicated = false;
     entry_args_same_across_replicas.reserve(f.getNumArguments());
     for (int64_t i = 0; i < f.getNumArguments(); ++i) {
-      auto attr = f.getArgAttrOfType<mlir::UnitAttr>(i, kReplicationAttr);
-      entry_args_same_across_replicas.push_back(attr != nullptr);
+      auto attr = f.getArgAttrOfType<mlir::BoolAttr>(i, kReplicationAttr);
+      entry_args_same_across_replicas.push_back(attr != nullptr &&
+                                                attr.getValue());
       any_arg_replicated |= entry_args_same_across_replicas.back();
       // Pass the alias info to the builder so that it will build the alias info
       // into the resulting HloModule.
@@ -3419,23 +3417,6 @@ LogicalResult ConvertToHloModule::LowerRegionAsComputation(
                                    /*fe_attrs=*/{}, func, implicit_operands);
 }
 
-void AddDynamicParameterBindingEntry(xla::DynamicParameterBindingProto* binding,
-                                     int arg_index, int32_t shape_index,
-                                     int32_t padding_arg_index,
-                                     bool use_tuple_args) {
-  auto* entry = binding->add_entries();
-  entry->set_target_param_dim_num(shape_index);
-  if (use_tuple_args) {
-    entry->set_target_param_num(0);
-    entry->add_target_param_index(arg_index);
-    entry->set_dynamic_param_num(0);
-    entry->add_dynamic_param_index(padding_arg_index);
-  } else {
-    entry->set_target_param_num(arg_index);
-    entry->set_dynamic_param_num(padding_arg_index);
-  }
-}
-
 // Runs the PrepareForExport pass on the ModuleOp.
 xla::Status PrepareForExport(mlir::ModuleOp module) {
   bool hasShapeOps = false;
@@ -3460,17 +3441,6 @@ xla::Status PrepareForExport(mlir::ModuleOp module) {
 }
 
 }  // namespace
-
-xla::Status ConvertRegionToComputation(mlir::Region* region,
-                                       xla::XlaComputation* func,
-                                       MlirToHloConversionOptions options) {
-  mlir::ModuleOp module;
-  xla::XlaBuilder module_builder("main");
-  ConvertToHloModule converter(module, module_builder, true, true, options);
-  if (failed(converter.LowerRegionAsComputation(region, func)))
-    return tsl::errors::Internal("failed to convert region to computation");
-  return ::tsl::OkStatus();
-}
 
 xla::Status ConvertMlirHloToHlo(mlir::ModuleOp module, xla::HloProto* hlo_proto,
                                 bool use_tuple_args, bool return_tuple,
@@ -3513,13 +3483,6 @@ xla::Status ConvertMlirHloToHlo(mlir::ModuleOp module, xla::HloProto* hlo_proto,
       *hlo_module.add_cross_program_prefetches() = std::move(prefetch);
     }
   }
-  if (auto dynamic_parameter_bindings = module->getAttrOfType<mlir::ArrayAttr>(
-          "mhlo.dynamic_parameter_bindings")) {
-    auto bindings =
-        Convert_dynamic_parameter_bindings(dynamic_parameter_bindings)
-            .ToProto();
-    *hlo_module.mutable_dynamic_parameter_binding() = bindings;
-  }
   if (auto is_dynamic =
           module->getAttrOfType<mlir::BoolAttr>("mhlo.is_dynamic")) {
     hlo_module.set_is_dynamic(is_dynamic.getValue());
@@ -3541,6 +3504,10 @@ xla::Status ConvertMlirHloToHlo(mlir::ModuleOp module, xla::HloProto* hlo_proto,
           *xla::ConvertSharding(sharding.cast<mlir::StringAttr>().getValue());
     }
   }
+
+  xla::StackFrameIndexProto stack_frame_index =
+      converter.BuildStackFramesIndexProto();
+  hlo_module.mutable_stack_frame_index()->Swap(&stack_frame_index);
   hlo_proto->mutable_hlo_module()->Swap(&hlo_module);
   return ::tsl::OkStatus();
 }

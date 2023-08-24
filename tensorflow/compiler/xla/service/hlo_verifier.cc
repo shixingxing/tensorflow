@@ -91,17 +91,6 @@ Status CheckOperandCount(const HloInstruction* hlo, int expected) {
   return OkStatus();
 }
 
-Status CheckParameterCount(const HloInstruction* calling_instruction,
-                           const HloComputation* computation, int expected) {
-  if (computation->num_parameters() != expected) {
-    return InternalError(
-        "Expected computation %s called from %s to have %d parameters, has %d",
-        computation->name(), calling_instruction->name(), expected,
-        computation->num_parameters());
-  }
-  return OkStatus();
-}
-
 int64_t GetSubgroupSize(HloCollectiveInstruction* hlo,
                         CollectiveOpGroupMode group_mode) {
   const HloModuleConfig& config = hlo->GetModule()->config();
@@ -148,6 +137,18 @@ Status CheckNestedComputationThreadNameEqual(const HloComputation* comp,
   return OkStatus();
 }
 }  // namespace
+
+/*static*/ Status ShapeVerifier::CheckParameterCount(
+    const HloInstruction* calling_instruction,
+    const HloComputation* computation, int expected) {
+  if (computation->num_parameters() != expected) {
+    return InternalError(
+        "Expected computation %s called from %s to have %d parameters, has %d",
+        computation->name(), calling_instruction->name(), expected,
+        computation->num_parameters());
+  }
+  return OkStatus();
+}
 
 Status ShapeVerifier::Preprocess(HloInstruction* hlo) {
   if (!hlo->called_computations().empty() && !IsCallerInstruction(hlo)) {
@@ -1750,6 +1751,9 @@ Status CheckMixedPrecisionOperands(const HloInstruction* instruction) {
     case HloOpcode::kAllReduce:
     case HloOpcode::kAllReduceStart:
     case HloOpcode::kAllReduceDone:
+    case HloOpcode::kAllGather:
+    case HloOpcode::kAllGatherStart:
+    case HloOpcode::kAllGatherDone:
     case HloOpcode::kAsyncDone:
     case HloOpcode::kAsyncUpdate:
     case HloOpcode::kAsyncStart:
@@ -2682,6 +2686,19 @@ class InstructionVerifier : public DfsHloVisitorWithDefault {
     return OkStatus();
   }
 
+  Status HandleScatter(HloInstruction* scatter) override {
+    int64_t rank = scatter->operand(0)->shape().rank();
+    for (int64_t operand_dim :
+         scatter->scatter_dimension_numbers().scatter_dims_to_operand_dims()) {
+      if (operand_dim > rank) {
+        return absl::OutOfRangeError(absl::StrCat(
+            "The provided scatter_dims_to_operand_dim was out of range.",
+            " (operand_dim: ", operand_dim, ", rank: ", rank, ")"));
+      }
+    }
+    return OkStatus();
+  }
+
   Status Preprocess(HloInstruction* instruction) override {
     auto [it, inserted] =
         instructions_by_name_.emplace(instruction->name(), instruction);
@@ -2767,6 +2784,9 @@ class InstructionVerifier : public DfsHloVisitorWithDefault {
         instruction->opcode() != HloOpcode::kGetTupleElement &&
         instruction->opcode() != HloOpcode::kTuple &&
         instruction->opcode() != HloOpcode::kWhile &&
+        instruction->opcode() != HloOpcode::kCustomCall &&
+        instruction->opcode() != HloOpcode::kReshape &&
+        instruction->opcode() != HloOpcode::kDynamicSlice &&
         absl::c_any_of(instruction->operands(), [](HloInstruction* operand) {
           return ShapeUtil::HasPrimitiveType(operand->shape(), S4) ||
                  ShapeUtil::HasPrimitiveType(operand->shape(), U4);
@@ -2831,7 +2851,6 @@ StatusOr<bool> HloVerifier::Run(
           }
         }));
 
-    TF_RETURN_IF_ERROR(module->dynamic_parameter_binding().Verify(*module));
     TF_RETURN_IF_ERROR(VerifyLayoutConstrainedAllReduce(*module));
     return false;
   }();

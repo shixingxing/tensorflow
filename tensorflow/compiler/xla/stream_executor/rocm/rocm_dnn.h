@@ -78,7 +78,7 @@ class MIOpenSupport : public dnn::DnnSupport {
   explicit MIOpenSupport(GpuExecutor* parent);
 
   tsl::Status Init() override;
-  tsl::StatusOr<perftools::gputools::dnn::VersionInfo> GetVersion() override;
+  tsl::StatusOr<stream_executor::dnn::VersionInfo> GetVersion() override;
 
   tsl::StatusOr<std::unique_ptr<dnn::RnnDescriptor>> createRnnDescriptor(
       int num_layers, int hidden_size, int input_size, int cell_size,
@@ -416,6 +416,16 @@ class MIOpenSupport : public dnn::DnnSupport {
     LOG(ERROR) << "DNN MatMulQuantized not supported by MIOpen";
     return false;
   }
+
+  tsl::Status GetFusedMatmulRunners(
+      bool use_cudnn_frontend, dnn::DataType input_type,
+      dnn::DataType bias_type, dnn::DataType output_type, Stream* stream,
+      bool trans_a, bool trans_b, uint64_t m, uint64_t n, uint64_t k,
+      int64_t lda, int64_t ldb, int64_t ldc,
+      dnn::ActivationMode activation_mode, bool use_fallback,
+      const NumericOptions& numeric_options,
+      std::vector<std::unique_ptr<const dnn::FusedMatmulRunner>>*
+          out_exec_plans) override;
 
   bool DoBiasAdd(Stream* stream, const DeviceMemory<float>& input_data,
                  const DeviceMemory<float>& biases,

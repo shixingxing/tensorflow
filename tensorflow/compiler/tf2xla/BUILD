@@ -53,6 +53,7 @@ package_group(
         "//third_party/mlperf/submissions/training/v0_7/models/...",
         "//third_party/py/keras/...",
         "//third_party/py/keras_cv/...",
+        "//third_party/py/tf_keras/...",
         "//waymo/ml/deploy/benchmark/...",
     ],
 )
@@ -179,8 +180,8 @@ cc_library(
         "//tensorflow/compiler/mlir/tensorflow:import_model",
         "//tensorflow/compiler/mlir/tensorflow:import_utils",
         "//tensorflow/compiler/mlir/tensorflow:mlir_roundtrip_flags",
-        "//tensorflow/compiler/mlir/tensorflow:tensorflow_passes",
-        "//tensorflow/compiler/mlir/tensorflow:tf_dialect_passes",
+        "//tensorflow/compiler/mlir/tensorflow/transforms:tensorflow_passes",
+        "//tensorflow/compiler/mlir/tensorflow/transforms:tf_dialect_passes",
         "//tensorflow/compiler/mlir/tf2xla:compile_mlir_util",
         "//tensorflow/compiler/xla/client",
         "//tensorflow/compiler/xla/client:xla_computation",
@@ -254,7 +255,11 @@ cc_library(
         ":xla_compiled_cpu_runtime_hdrs",
     ],
     copts = runtime_copts() + tf_openmp_copts(),
-    defines = ["EIGEN_NEON_GEBP_NR=4"],
+    defines = [
+        "EIGEN_NEON_GEBP_NR=4",
+        # TODO(b/238649163): remove this once no longer necessary.
+        "EIGEN_USE_AVX512_GEMM_KERNELS=0",
+    ],
     features = [
         "fully_static_link",
         "-parse_headers",
@@ -607,7 +612,9 @@ cc_library(
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core:session_options",
         "//tensorflow/core/common_runtime:core_cpu_internal",
+        "//tensorflow/core/common_runtime/next_pluggable_device:next_pluggable_device_factory_hdrs",
         "//tensorflow/core/platform:stream_executor_no_cuda",
+        "//tensorflow/core/tfrt/common:pjrt_util",
     ],
     alwayslink = 1,
 )
@@ -752,13 +759,14 @@ cc_library(
     deps = [
         "//tensorflow/compiler/xla:literal",
         "//tensorflow/compiler/xla:shape_util",
-        "//tensorflow/compiler/xla:statusor",
         "//tensorflow/compiler/xla:xla_data_proto_cc",
         "//tensorflow/core:core_cpu_internal",
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",
     ],
 )
@@ -785,6 +793,7 @@ cc_library(
     hdrs = ["sharding_util.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "//tensorflow/compiler/mlir/tensorflow:xla_sharding_util",
         "//tensorflow/compiler/xla:status_macros",
         "//tensorflow/compiler/xla/client:sharding_builder",
         "//tensorflow/core:core_cpu",
@@ -869,6 +878,7 @@ tf_cc_test(
 tf_cc_test(
     name = "tf2xla_test",
     srcs = ["tf2xla_test.cc"],
+    tags = ["no_cuda_on_cpu_tap"],
     deps = [
         ":tf2xla",
         ":tf2xla_proto_cc",
@@ -919,6 +929,7 @@ tf_cc_test(
         "xla_compiler_test.cc",
         "xla_expression_test.cc",
     ],
+    tags = ["no_cuda_on_cpu_tap"],
     deps = [
         ":common",
         ":layout_util",
@@ -1131,7 +1142,7 @@ cc_library(
         "//tensorflow/compiler/mlir:mlir_graph_optimization_pass",
         "//tensorflow/compiler/mlir/tensorflow",
         "//tensorflow/compiler/mlir/tensorflow:device_util",
-        "//tensorflow/compiler/mlir/tensorflow:tensorflow_passes",
+        "//tensorflow/compiler/mlir/tensorflow/transforms:tensorflow_passes",
         "//tensorflow/compiler/mlir/tf2xla:mlir_bridge_rollout_policy",
         "//tensorflow/core:core_cpu",
         "//tensorflow/core:framework",
