@@ -37,6 +37,8 @@ using tensorflow::TensorBuffer;
 using tensorflow::errors::FailedPrecondition;
 using tensorflow::errors::InvalidArgument;
 
+#ifndef LIBTPU_EXCLUDE_C_API_IMPL
+
 namespace tensorflow {
 void* allocate_tensor(const char* operation, size_t len, Allocator* allocator) {
   void* data = allocator->AllocateRaw(EIGEN_MAX_ALIGN_BYTES, len);
@@ -184,6 +186,8 @@ void TF_TensorBitcastFrom(const TF_Tensor* from, TF_DataType type,
               static_cast<tensorflow::DataType>(type), new_dims, num_new_dims));
   tsl::Set_TF_Status_from_Status(status, cc_status);
 }
+
+#endif  // LIBTPU_EXCLUDE_C_API_IMPL
 
 namespace tensorflow {
 
