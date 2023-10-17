@@ -63,26 +63,22 @@ limitations under the License.
 #include "tfrt/host_context/host_allocator.h"  // from @tf_runtime
 #include "tfrt/host_context/host_context.h"  // from @tf_runtime
 
-#ifdef GOOGLE_CUDA
-#include "third_party/gpus/cuda/include/cuda.h"
-#include "third_party/gpus/cuda/include/cuda_runtime_api.h"
+#if defined(GOOGLE_CUDA) || defined(TENSORFLOW_USE_ROCM)
 #include "xla/pjrt/compile_options.pb.h"
 #include "xla/pjrt/gpu/nccl_id_store.h"
 #include "xla/pjrt/metrics.h"
 #include "xla/pjrt/stream_executor_executable.pb.h"
 #include "xla/service/gpu/gpu_compiler.h"
-#include "xla/stream_executor/gpu/gpu_cudamallocasync_allocator.h"
 #include "xla/xla.pb.h"
-#endif  // GOOGLE_CUDA
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
-#ifdef TENSORFLOW_USE_ROCM
+#if GOOGLE_CUDA
+#include "third_party/gpus/cuda/include/cuda.h"
+#include "third_party/gpus/cuda/include/cuda_runtime_api.h"
+#include "xla/stream_executor/gpu/gpu_cudamallocasync_allocator.h"
+#elif TENSORFLOW_USE_ROCM
 #include "rocm/rocm_config.h"
-#include "xla/pjrt/compile_options.pb.h"  // NOLINT(build/include)
-#include "xla/pjrt/gpu/nccl_id_store.h"  // NOLINT(build/include)
-#include "xla/pjrt/stream_executor_executable.pb.h"  // NOLINT(build/include)
-#include "xla/service/gpu/gpu_compiler.h"  // NOLINT(build/include)
-#include "xla/xla.pb.h"  // NOLINT(build/include)
-#endif  // TENSORFLOW_USE_ROCM
+#endif
 
 #include "xla/client/client_library.h"
 #include "xla/service/gpu/gpu_executable_run_options.h"
@@ -90,7 +86,7 @@ limitations under the License.
 #include "xla/statusor.h"
 #include "xla/stream_executor/device_host_allocator.h"
 #include "xla/stream_executor/device_mem_allocator.h"
-#include "xla/stream_executor/tf_allocator_adapter.h"
+#include "xla/stream_executor/integrations/tf_allocator_adapter.h"
 #include "xla/util.h"
 #include "tsl/framework/device_id.h"
 #include "tsl/util/env_var.h"
@@ -542,12 +538,9 @@ StreamExecutorGpuClient::Compile(const XlaComputation& computation,
                                  CompileOptions options) {
   auto executable = PjRtStreamExecutorClient::Compile(computation, options);
 
-#ifdef GOOGLE_CUDA
-  for (const auto& device : addressable_devices()) {
-    metrics::RecordFreeGpuSystemMemory(device->local_hardware_id());
-  }
-#endif  // GOOGLE_CUDA
-
+#if defined(GOOGLE_CUDA) || defined(TENSORFLOW_USE_ROCM)
+  metrics::RecordFreeGpuSystemMemory();
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
   return executable;
 }
 
@@ -684,8 +677,8 @@ StatusOr<std::unique_ptr<se::MultiDeviceAdapter>> CreateCudaAsyncAllocator(
         tsl::PlatformDeviceId(device_ordinal), allocator_memory, preallocate);
     allocator->SetStreamAndPreallocateMemory(
         ordinal_and_device.second->compute_stream()
-            ->implementation()
-            ->GpuStreamMemberHack());
+            ->platform_specific_handle()
+            .stream);
     allocators.emplace_back(std::move(allocator),
                             ordinal_and_device.second->compute_stream());
   }

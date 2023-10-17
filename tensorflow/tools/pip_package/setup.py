@@ -47,7 +47,7 @@ from setuptools.dist import Distribution
 # result for pip.
 # Also update tensorflow/tensorflow.bzl and
 # tensorflow/core/public/version.h
-_VERSION = '2.15.0'
+_VERSION = '2.16.0'
 
 
 # We use the same setup.py for all tensorflow_* packages and for the nightly
@@ -90,7 +90,7 @@ REQUIRED_PACKAGES = [
     'h5py >= 2.9.0',
     'libclang >= 13.0.0',
     'ml_dtypes ~= 0.2.0',
-    'numpy >= 1.23.5',
+    'numpy >= 1.23.5, < 2.0.0',
     'opt_einsum >= 2.3.2',
     'packaging',
     # pylint:disable=line-too-long
@@ -405,7 +405,7 @@ setup(
     classifiers=sorted([
         'Development Status :: 5 - Production/Stable',
         # TODO(angerson) Add IFTTT when possible
-        'Environment :: GPU :: NVIDIA CUDA :: 11.8',
+        'Environment :: GPU :: NVIDIA CUDA :: 12.2',
         'Intended Audience :: Developers',
         'Intended Audience :: Education',
         'Intended Audience :: Science/Research',

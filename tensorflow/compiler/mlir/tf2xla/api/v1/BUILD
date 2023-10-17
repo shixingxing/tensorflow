@@ -120,6 +120,7 @@ cc_library(
         "@local_tsl//tsl/platform:status",
         "@local_tsl//tsl/platform:statusor",
         "@local_xla//xla/client:compile_only_client",
+        "@local_xla//xla/mlir_hlo:hlo_dialect_registration",
         "@local_xla//xla/pjrt:compile_options_proto_cc",
     ],
 )
@@ -156,6 +157,7 @@ cc_library(
         "//tensorflow/compiler/mlir/tensorflow:tensorflow_types",
         "//tensorflow/compiler/mlir/tensorflow/transforms:verify_no_outside_compilation_markers_pass",
         "//tensorflow/compiler/mlir/tf2xla/internal:clustering_bridge_passes",
+        "//tensorflow/compiler/mlir/tf2xla/internal:logging_hooks",
         "//tensorflow/compiler/mlir/tf2xla/internal/inference:inference_metrics_pass",
         "//tensorflow/core:framework",
         "//tensorflow/core:lib_proto_parsing",
@@ -207,6 +209,7 @@ cc_library(
         "//tensorflow/compiler/mlir/tf2xla/internal:logging_hooks",
         "//tensorflow/core:framework",
         "//tensorflow/core/platform:status",
+        "@com_google_absl//absl/base:core_headers",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
