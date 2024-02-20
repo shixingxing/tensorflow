@@ -138,7 +138,7 @@ Status CopyVariable(int output_idx, OpKernelContext* ctx, const Tensor* t) {
         return errors::Internal("Unsupported dtype", t->dtype());
     }
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 }  // namespace
@@ -319,14 +319,14 @@ TF_CALL_int4(REGISTER_DEFAULT_KERNELS);
 TF_CALL_uint4(REGISTER_DEFAULT_KERNELS);
 #undef REGISTER_DEFAULT_KERNELS
 
-REGISTER_KERNEL_BUILDER(Name("_VarHandlesOp")
-                            .Device(DEVICE_DEFAULT)
-                            .HostMemory("resources")
-                            .TypeConstraint("dtypes",
-                                            {DT_INT64, DT_COMPLEX64,
-                                             DT_COMPLEX128, DT_HALF, DT_FLOAT,
-                                             DT_DOUBLE, DT_BOOL, DT_VARIANT}),
-                        ResourceHandlesOp<Var>);
+REGISTER_KERNEL_BUILDER(
+    Name("_VarHandlesOp")
+        .Device(DEVICE_DEFAULT)
+        .HostMemory("resources")
+        .TypeConstraint("dtypes", {DT_INT64, DT_COMPLEX64, DT_COMPLEX128,
+                                   DT_HALF, DT_FLOAT, DT_DOUBLE, DT_BOOL,
+                                   DT_VARIANT, DT_BFLOAT16}),
+    ResourceHandlesOp<Var>);
 
 REGISTER_KERNEL_BUILDER(
     Name("VariableShape").Device(DEVICE_CPU).TypeConstraint<int32>("out_type"),
@@ -432,7 +432,7 @@ class AssignVariableOp : public OpKernel {
                                   *ptr = new Var(dtype_);
                                   *(*ptr)->tensor() = value;
                                   (*ptr)->is_initialized = true;
-                                  return OkStatus();
+                                  return absl::OkStatus();
                                 }));
     mutex_lock ml(*variable->mu());
     // (variable->tensor()->dtype() == DT_INVALID && !variable->is_initialized)
@@ -1096,7 +1096,7 @@ Status DoScatter(OpKernelContext* c, Tensor* params, const Tensor& indices,
       }
     }
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 }  // namespace

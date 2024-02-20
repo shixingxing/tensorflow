@@ -1,4 +1,4 @@
-/* Copyright 2023 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2023 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -40,9 +40,9 @@ namespace xla {
 
 // Supported input formats for the input HLO module.
 enum class InputFormat {
-  kText,                 // Text format.
-  kProtoText,            // Protobuf text format.
-  kProtoBinary,          // Protobuf binary format.
+  kText,                 // Text format returned by HloModule::ToString().
+  kProtoText,            // Protobuf text format of an xla::HloProto message.
+  kProtoBinary,          // Protobuf binary format of an xla::HloProto message.
   kSnapshotProtoBinary,  // HloSnapshot protobuf binary format. Can be dumped by
                          // TensorFlow by setting the environment variable
                          // xla_dump_hlo_snapshots.
@@ -66,6 +66,7 @@ std::string AbslUnparseFlag(InputFormat input_format);
 // FunctionalHloRunner takes an HLO module as input and runs the HLO module
 // on a single or multiple hosts with various options (e.g. SPMD). The HLO
 // module can be pre- or post-optimizations.
+// TODO(b/306118803): replace this fully stateless class by a namespace.
 class FunctionalHloRunner {
  public:
   // This class has only static methods.
@@ -215,6 +216,8 @@ class FunctionalHloRunner {
 
   // Create a PjRtClient which can run HLOs on GPUs distributed across several
   // nodes.
+  // The distributed client pointer passed as a parameter is expected to be
+  // non-null, and 0 <= node_id < num_nodes must hold.
   static StatusOr<std::unique_ptr<PjRtClient>> CreateGpuClient(
       std::shared_ptr<xla::DistributedRuntimeClient> distributed_client,
       int node_id, int num_nodes);

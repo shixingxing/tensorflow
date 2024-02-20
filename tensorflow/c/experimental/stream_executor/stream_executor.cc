@@ -230,10 +230,6 @@ class CStreamExecutor : public internal::StreamExecutorInterface {
   DeviceMemoryBase Allocate(uint64 size) {
     return Allocate(size, /*memory_space=*/0);
   }
-  void* GetSubBuffer(DeviceMemoryBase* parent, uint64 offset,
-                     uint64 size) override {
-    LOG(FATAL) << "GetSubBuffer is not supported by pluggable device.";
-  }
 
   void Deallocate(DeviceMemoryBase* mem) override {
     SP_DeviceMemoryBase device_memory_base = DeviceMemoryBaseToC(mem);
@@ -576,11 +572,6 @@ class CStreamExecutor : public internal::StreamExecutorInterface {
       override {
     return std::unique_ptr<internal::EventInterface>(
         new CEvent(&device_, stream_executor_));
-  }
-  std::unique_ptr<internal::KernelInterface> CreateKernelImplementation()
-      override {
-    LOG(FATAL)
-        << "CreateKernelImplementation is not supported by pluggable device.";
   }
   std::unique_ptr<internal::StreamInterface> GetStreamImplementation()
       override {

@@ -1,4 +1,4 @@
-/* Copyright 2017 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2017 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -67,7 +67,7 @@ XlaInterpreterPlatform::GetUncachedExecutor(
       this, std::make_unique<XlaInterpreterExecutor>(), config.ordinal);
   auto init_status = executor->Init(config.device_options);
   if (!init_status.ok()) {
-    return tsl::Status{
+    return absl::Status{
         absl::StatusCode::kInternal,
         absl::StrFormat(
             "failed initializing StreamExecutor for device ordinal %d: %s",
@@ -85,13 +85,6 @@ static void InitializeXlaInterpreterPlatform() {
 }  // namespace interpreter
 }  // namespace stream_executor
 
-REGISTER_MODULE_INITIALIZER(
+STREAM_EXECUTOR_REGISTER_MODULE_INITIALIZER(
     interpreter_platform,
     stream_executor::interpreter::InitializeXlaInterpreterPlatform());
-
-// Note that module initialization sequencing is not supported in the
-// open-source project, so this will be a no-op there.
-REGISTER_MODULE_INITIALIZER_SEQUENCE(interpreter_platform,
-                                     multi_platform_manager);
-REGISTER_MODULE_INITIALIZER_SEQUENCE(multi_platform_manager_listener,
-                                     interpreter_platform);

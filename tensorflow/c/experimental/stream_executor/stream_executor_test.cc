@@ -22,10 +22,11 @@ limitations under the License.
 #include "xla/stream_executor/event.h"
 #include "xla/stream_executor/multi_platform_manager.h"
 #include "xla/stream_executor/stream.h"
-#include "xla/stream_executor/stream_executor_pimpl.h"
+#include "xla/stream_executor/stream_executor.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/protobuf/error_codes.pb.h"
+#include "tsl/platform/statusor.h"
 
 namespace stream_executor {
 namespace {
@@ -200,11 +201,11 @@ TEST_F(StreamExecutorTest, HostMemoryAllocate) {
   };
   StreamExecutor* executor = GetExecutor(0);
   ASSERT_FALSE(allocate_called);
-  void* mem = executor->HostMemoryAllocate(8);
-  ASSERT_NE(mem, nullptr);
+  TF_ASSERT_OK_AND_ASSIGN(auto mem, executor->HostMemoryAllocate(8));
+  ASSERT_NE(mem->opaque(), nullptr);
   ASSERT_TRUE(allocate_called);
   ASSERT_FALSE(deallocate_called);
-  executor->HostMemoryDeallocate(mem);
+  mem.reset();
   ASSERT_TRUE(deallocate_called);
 }
 

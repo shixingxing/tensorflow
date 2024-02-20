@@ -1,4 +1,4 @@
-/* Copyright 2022 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2022 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -46,7 +46,7 @@ limitations under the License.
 #include "xla/statusor.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
-#include "tfrt/concurrency/ref_count.h"  // from @tf_runtime
+#include "tsl/concurrency/ref_count.h"
 
 namespace xla {
 namespace ifrt {
@@ -116,6 +116,11 @@ class PjRtExecutable final
   StatusOr<std::vector<Layout>> GetParameterLayouts() const override {
     DCHECK(this);
     return pjrt_executable_->GetParameterLayouts();
+  }
+
+  StatusOr<std::vector<Layout>> GetOutputLayouts() const override {
+    DCHECK(this);
+    return pjrt_executable_->GetOutputLayouts();
   }
 
   StatusOr<std::optional<std::string>> Fingerprint() const override;
@@ -221,6 +226,11 @@ class PjRtLoadedExecutable final
   StatusOr<std::vector<Layout>> GetParameterLayouts() const override {
     DCHECK(this);
     return pjrt_loaded_executable_->GetParameterLayouts();
+  }
+
+  StatusOr<std::vector<Layout>> GetOutputLayouts() const override {
+    DCHECK(this);
+    return pjrt_loaded_executable_->GetOutputLayouts();
   }
 
   StatusOr<std::optional<std::string>> Fingerprint() const override;

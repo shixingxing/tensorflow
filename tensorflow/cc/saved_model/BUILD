@@ -109,7 +109,7 @@ cc_library(
         "//tensorflow/core:direct_session",
         "//tensorflow/core:all_kernels",
     ] + if_google(
-        ["@local_tsl//tsl/platform/default/build_config:tensorflow_platform_specific"],
+        ["//tensorflow/core/platform/default/build_config:tensorflow_platform_specific"],
         [],
     )) + if_not_mobile([
         "//tensorflow/core:core_cpu",
@@ -522,6 +522,7 @@ cc_library(
     visibility = [
         "//learning/brain/contrib/hub/server/distro:__subpackages__",
         "//learning/brain/contrib/tpu_modeling:__subpackages__",
+        "//learning/metadata/artifactoid/cc:__subpackages__",
         "//learning/tfx/pipeline/util:__subpackages__",
         "//tensorflow/python/saved_model:__subpackages__",
     ],

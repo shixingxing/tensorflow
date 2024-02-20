@@ -200,7 +200,7 @@ class BatchResource : public serving::BatchResourceBase {
             low_priority_max_enqueued_batches,
             low_priority_allowed_batch_sizes),
         allowed_batch_sizes));
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   static Status Create(
@@ -218,10 +218,10 @@ class BatchResource : public serving::BatchResourceBase {
         has_process_batch_function, std::move(batcher),
         GetAdaptiveBatcherQueueOptions(
             max_batch_size, batch_timeout_micros, max_enqueued_batches,
-            true /* enable large batch split */, allowed_batch_sizes,
+            /*enable_large_batch_splitting=*/true, allowed_batch_sizes,
             /*disable_padding=*/false),
         allowed_batch_sizes));
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   string DebugString() const final { return "BatchResource"; }
@@ -302,9 +302,6 @@ BatchFunctionKernel::BatchFunctionKernel(OpKernelConstruction* c)
     OP_REQUIRES_OK(c, c->GetAttr("enable_large_batch_splitting",
                                  &enable_large_batch_splitting_));
     has_attribute_enable_large_batch_splitting_ = true;
-  } else {
-    enable_large_batch_splitting_ = false;
-    has_attribute_enable_large_batch_splitting_ = false;
   }
 
   // Helper function `SetAdaptiveBatchSchedulerOptions` calls
@@ -414,7 +411,7 @@ void BatchFunctionKernel::ComputeAsync(OpKernelContext* c, DoneCallback done) {
         new_resource->set_session_metadata(*session_metadata);
       }
       *r = new_resource.release();
-      return OkStatus();
+      return absl::OkStatus();
     };
   } else {
     creator = [this,
@@ -431,7 +428,7 @@ void BatchFunctionKernel::ComputeAsync(OpKernelContext* c, DoneCallback done) {
         new_resource->set_session_metadata(*session_metadata);
       }
       *r = new_resource.release();
-      return OkStatus();
+      return absl::OkStatus();
     };
   }
 
@@ -528,7 +525,7 @@ Status BatchFunctionKernel::GetOrCreateFunctionHandle(
   } else {
     *handle = fhandle_.value();
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 // Validates 'allowed_batch_sizes_'. The entries must increase monotonically.
@@ -537,7 +534,7 @@ Status BatchFunctionKernel::GetOrCreateFunctionHandle(
 // to `max_batch_size_`.
 Status BatchFunctionKernel::ValidateAllowedBatchSizes() const {
   if (allowed_batch_sizes_.empty()) {
-    return OkStatus();
+    return absl::OkStatus();
   }
   int32_t last_size = 0;
   for (size_t i = 0; i < allowed_batch_sizes_.size(); ++i) {
@@ -556,7 +553,7 @@ Status BatchFunctionKernel::ValidateAllowedBatchSizes() const {
 
     last_size = size;
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 // Initialize vars by reading from op-kernel-construction.
@@ -670,7 +667,7 @@ class BatchKernel : public AsyncOpKernel {
           max_batch_size_, batch_timeout_micros_, max_enqueued_batches_,
           allowed_batch_sizes_, false, &new_resource));
       *r = new_resource.release();
-      return OkStatus();
+      return absl::OkStatus();
     };
     OP_REQUIRES_OK_ASYNC(c,
                          c->resource_manager()->LookupOrCreate(
@@ -692,7 +689,7 @@ class BatchKernel : public AsyncOpKernel {
   // monotonically, and the last one must equal 'max_batch_size_'.
   Status ValidateAllowedBatchSizes() const {
     if (allowed_batch_sizes_.empty()) {
-      return OkStatus();
+      return absl::OkStatus();
     }
     int32_t last_size = 0;
     for (size_t i = 0; i < allowed_batch_sizes_.size(); ++i) {
@@ -707,7 +704,7 @@ class BatchKernel : public AsyncOpKernel {
       }
       last_size = size;
     }
-    return OkStatus();
+    return absl::OkStatus();
   }
 
  private:
@@ -801,7 +798,7 @@ class UnbatchResource : public ResourceBase {
         context->set_output(0, tensor_it->second.tensor);
         waiting_tensors_.erase(tensor_it);
         done_callbacks_to_call.push_back(done);
-        return OkStatus();
+        return absl::OkStatus();
       }
 
       const uint64 deadline_micros =
@@ -840,7 +837,7 @@ class UnbatchResource : public ResourceBase {
         }
       }
 
-      return OkStatus();
+      return absl::OkStatus();
     }();
 
     for (const AsyncOpKernel::DoneCallback& done_callback :
@@ -933,7 +930,7 @@ class UnbatchKernel : public AsyncOpKernel {
     std::function<Status(UnbatchResource**)> creator =
         [this](UnbatchResource** r) {
           *r = new UnbatchResource(timeout_micros_);
-          return OkStatus();
+          return absl::OkStatus();
         };
     OP_REQUIRES_OK_ASYNC(c,
                          c->resource_manager()->LookupOrCreate(
@@ -992,7 +989,7 @@ class UnbatchGradResource : public ResourceBase {
         return errors::InvalidArgument("Unsupported data type: ", type);
     }
     done();
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   // Ingests data from one invocation of the op.
@@ -1079,7 +1076,7 @@ class UnbatchGradResource : public ResourceBase {
         available_batches_.erase(batch_it);
       }
     }
-    return OkStatus();
+    return absl::OkStatus();
   }
 
  private:
@@ -1129,7 +1126,7 @@ class UnbatchGradKernel : public AsyncOpKernel {
     std::function<Status(UnbatchGradResource**)> creator =
         [](UnbatchGradResource** r) {
           *r = new UnbatchGradResource();
-          return OkStatus();
+          return absl::OkStatus();
         };
     OP_REQUIRES_OK_ASYNC(c,
                          c->resource_manager()->LookupOrCreate(

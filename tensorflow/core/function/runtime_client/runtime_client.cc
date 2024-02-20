@@ -31,7 +31,11 @@ limitations under the License.
 #include "tensorflow/c/eager/immediate_execution_context.h"
 #include "tensorflow/c/eager/immediate_execution_operation.h"
 #include "tensorflow/c/eager/immediate_execution_tensor_handle.h"
+
+#if !defined(DISABLE_MLIR)
 #include "tensorflow/compiler/mlir/python/mlir.h"
+#endif
+
 #include "tensorflow/compiler/mlir/tensorflow/translate/export_graphdef.h"
 #include "tensorflow/compiler/mlir/tensorflow/translate/import_model.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/error_util.h"
@@ -166,7 +170,7 @@ Status Runtime::TransformFunction(StringPiece name, StringPiece pipeline_name,
           CreateFunction(reinterpret_cast<OpaqueTfgGraphFuncOp*>(&fn)),
           absl::StrCat("updating function ", fn.getName().str()));
     }
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   if (dialect == Dialect::TF) {
@@ -192,7 +196,7 @@ Status Runtime::TransformFunction(StringPiece name, StringPiece pipeline_name,
           CreateFunction(reinterpret_cast<OpaqueTfFuncOp*>(&fn)),
           absl::StrCat("updating function ", fn.getName().str()));
     }
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   return Status(

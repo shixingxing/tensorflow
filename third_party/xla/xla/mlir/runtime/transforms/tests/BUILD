@@ -1,29 +1,29 @@
-load("@local_tsl//tsl:tsl.default.bzl", "filegroup")
-load("//xla:glob_lit_test.bzl", "glob_lit_tests")
+load("//xla:lit.bzl", "enforce_glob", "lit_test_suite")
 
 package(
-    default_visibility = ["//visibility:public"],
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
     licenses = ["notice"],
 )
 
-glob_lit_tests(
+lit_test_suite(
     name = "all_tests",
-    data = [":test_utilities"],
-    driver = "//xla:run_lit.sh",
-    test_file_exts = ["mlir"],
-)
-
-# Bundle together all of the test utilities that are used by tests.
-filegroup(
-    name = "test_utilities",
-    testonly = True,
-    data = [
+    srcs = enforce_glob(
+        [
+            "compilation_pipeline.mlir",
+            "convert_asserts.mlir",
+            "convert_custom_calls.mlir",
+            "export_functions.mlir",
+            "move_allocas_to_entry_block.mlir",
+            "ordinal_assignment.mlir",
+            "rt_to_llvm.mlir",
+        ],
+        include = ["*.mlir"],
+    ),
+    cfg = "//xla:lit.cfg.py",
+    tools = [
         "//xla/mlir/runtime:xla-runtime-opt",
         "@llvm-project//llvm:FileCheck",
-        "@llvm-project//mlir:run_lit.sh",
     ],
-    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -31,11 +31,12 @@ cc_library(
     testonly = 1,
     srcs = ["testlib_pipeline.cc"],
     hdrs = ["testlib_pipeline.h"],
-    visibility = ["//visibility:public"],
+    visibility = ["//xla:runtime"],
     deps = [
         "//xla/mlir/runtime/transforms:compiler",
         "//xla/mlir/runtime/transforms:passes",
         "//xla/runtime:compiler",
+        "@com_google_absl//absl/status",
         "@llvm-project//mlir:ArithDialect",
         "@llvm-project//mlir:AsyncDialect",
         "@llvm-project//mlir:AsyncToLLVM",
@@ -43,7 +44,6 @@ cc_library(
         "@llvm-project//mlir:BuiltinToLLVMIRTranslation",
         "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:FuncToLLVM",
-        "@llvm-project//mlir:IR",
         "@llvm-project//mlir:LLVMToLLVMIRTranslation",
         "@llvm-project//mlir:MemRefDialect",
         "@llvm-project//mlir:MemRefToLLVM",

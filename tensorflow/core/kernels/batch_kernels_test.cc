@@ -23,31 +23,44 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include "absl/strings/match.h"
 #include "tensorflow/core/common_runtime/rendezvous_mgr.h"
+#include "tensorflow/core/framework/device_factory.h"
 #include "tensorflow/core/framework/function.h"
+#include "tensorflow/core/framework/node_def_builder.h"
 #include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/tensor_testutil.h"
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/kernels/batch_kernel_test_util.h"
 #include "tensorflow/core/kernels/batching_util/warmup.h"
-#include "tensorflow/core/lib/core/status_test_util.h"
+#include "tensorflow/core/kernels/ops_testutil.h"
+#include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/status.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/protobuf/config.pb.h"
+#include "tensorflow/core/public/version.h"
+#include "tsl/lib/core/status_test_util.h"
 #include "tsl/platform/blocking_counter.h"
+#include "tsl/platform/errors.h"
+#include "tsl/platform/refcount.h"
 #include "tsl/platform/status.h"
 
 namespace tensorflow {
+namespace {
 
 using PerModelData = serving::WarmupStateRegistry::PerModelData;
 
-class BatchFunctionKernelTest : public BatchFunctionKernelTestBase {};
+class BatchFunctionKernelTest : public test_util::BatchFunctionKernelTestBase {
+};
 
 TEST_P(BatchFunctionKernelTest, EnableAdaptiveScheduler) {
-  TF_EXPECT_OK(Init());
+  const bool adaptive_scheduler_enabled = GetParam();
+
+  TF_EXPECT_OK(Init(adaptive_scheduler_enabled));
+
   BatchFunctionKernel *batch_kernel =
       dynamic_cast<BatchFunctionKernel *>(op_kernel());
-  EXPECT_EQ(internal::BatchFunctionKernelTestAccess(batch_kernel)
-                .enable_adaptive_batch_threads(),
-            enable_adaptive_scheduler());
+  EXPECT_EQ(adaptive_scheduler_enabled,
+            test_util::BatchFunctionKernelTestAccess(batch_kernel)
+                .enable_adaptive_batch_threads());
 }
 
 INSTANTIATE_TEST_SUITE_P(Params, BatchFunctionKernelTest, ::testing::Bool());
@@ -55,51 +68,68 @@ INSTANTIATE_TEST_SUITE_P(Params, BatchFunctionKernelTest, ::testing::Bool());
 class BatchFunctionKernelParallelWarmupTestState : public OpsTestBase {
  public:
   // Init test fixture with a batch kernel instance.
-  Status Init(bool enable_splitting, bool check_output_shape = true) {
+  Status Init(bool enable_splitting, bool check_output_shape) {
     static auto *const cpu_device = []() {
       auto device =
           DeviceFactory::NewDevice("CPU", {}, "/job:a/replica:0/task:0");
       return device.release();
     }();
 
-    // Overriding the per-test/per-op device with a global device so that it can
+    // Override the per-test/per-op device with a global device so that it can
     // be shared between ops.
     device_ = cpu_device;
 
-    std::vector<DataType> input_dtypes({DataType::DT_INT64});
-    std::vector<NodeDefBuilder::NodeOut> inputs(
-        {NodeDefBuilder::NodeOut({"n1", 0, DataType::DT_INT64})});
-
     NameAttrList f;
-    f.set_name("func_to_batch");
-    tensorflow::FunctionDefHelper::Node node_info = {
-        {"output1"}, "Identity", {"input1"}, {{"T", DT_INT64}}};
+    f.set_name("BatchFunctionKernelParallelWarmupTestStateFunc");
+    FunctionDef func;
     if (check_output_shape) {
-      node_info = {{"output1"},
-                   "EnsureShape",
-                   {"input1"},
-                   {{"T", DT_INT64}, {"shape", TensorShape({2})}}};
+      func = FunctionDefHelper::Create(
+          // function_name
+          f.name(),
+          // in_def
+          {"x:int64"},
+          // out_def
+          {"o:int64"},
+          // attr_def
+          {},
+          // node_def
+          {{{"o"},
+            "EnsureShape",
+            {"x"},
+            {{"T", DataType::DT_INT64}, {"shape", TensorShape({2})}}}},
+          // ret_def
+          {{"o", "o:output"}});
+    } else {
+      func = FunctionDefHelper::Create(
+          // function_name
+          f.name(),
+          // in_def
+          {"x:int64"},
+          // out_def
+          {"o:int64"},
+          // attr_def
+          {},
+          // node_def
+          {{{"o"}, "Identity", {"x"}, {{"T", DataType::DT_INT64}}}},
+          // ret_def
+          {{"o", "o:output"}});
     }
-    TF_RETURN_IF_ERROR(flib_def_->AddFunctionDef(FunctionDefHelper::Define(
-        /*Function*/ "func_to_batch",
-        /*Inputs*/ {"input1:int64"},
-        /*Outputs*/ {"output1:int64"},
-        /*Attribute*/ {},
-        // Node info
-        {node_info})));
+    TF_RETURN_IF_ERROR(flib_def_->AddFunctionDef(func));
 
     pflr_ = std::make_unique<ProcessFunctionLibraryRuntime>(
         device_mgr_.get(), Env::Default(), /*config=*/nullptr,
         TF_GRAPH_DEF_VERSION, flib_def_.get(), OptimizerOptions(),
         /*thread_pool=*/nullptr, /*parent=*/nullptr,
         /*session_metadata=*/nullptr,
-        Rendezvous::Factory{[](const int64, const DeviceMgr *device_mgr,
+        Rendezvous::Factory{[](const int64_t, const DeviceMgr *device_mgr,
                                tsl::core::RefCountPtr<Rendezvous> *r) {
           *r = tsl::core::RefCountPtr<Rendezvous>(
               new IntraProcessRendezvous(device_mgr));
-          return OkStatus();
+          return absl::OkStatus();
         }});
 
+    std::vector<NodeDefBuilder::NodeOut> inputs(
+        {NodeDefBuilder::NodeOut({"n1", 0, DataType::DT_INT64})});
     TF_CHECK_OK(NodeDefBuilder("BatchTPUInput", "BatchFunction")
                     .Attr("max_batch_size", enable_splitting ? 16 : 8)
                     .Attr("num_batch_threads", 8)
@@ -111,7 +141,7 @@ class BatchFunctionKernelParallelWarmupTestState : public OpsTestBase {
                     .Attr("low_priority_batch_timeout_micros", 8000)
                     .Attr("low_priority_allowed_batch_sizes", {32, 64})
                     .Attr("low_priority_max_enqueued_batches", 1000)
-                    .Attr("Tin", input_dtypes)
+                    .Attr("Tin", {DataType::DT_INT64})
                     .Input(inputs)
                     .Attr("Tcaptured", std::vector<DataType>{})
                     .Input(std::vector<NodeDefBuilder::NodeOut>{})
@@ -126,6 +156,77 @@ class BatchFunctionKernelParallelWarmupTestState : public OpsTestBase {
 
 class BatchFunctionKernelParallelWarmupTest
     : public ::testing::TestWithParam<bool> {};
+
+TEST_P(BatchFunctionKernelParallelWarmupTest, HandlesLargeBatchSplitting) {
+  // This test fails if it does not come before the others in the suite,
+  // because `SharedBatchScheduler::QueueOptions::input_batch_size_limit`
+  // does not get reset.
+  SessionMetadata session_metadata;
+  session_metadata.set_name("test_model");
+  session_metadata.set_version(123);
+  serving::WarmupStateRegistry::Key key(session_metadata.name(),
+                                        session_metadata.version());
+
+  int num_requests = 16;
+
+  {
+    auto per_model_data = std::make_unique<PerModelData>();
+    per_model_data->warmup_all_batch_sizes = true;
+    auto handle = serving::GetGlobalWarmupStateRegistry().Register(
+        key, std::move(per_model_data));
+
+    tsl::BlockingCounter blocking_counter(num_requests);
+    for (int i = 0; i < num_requests; ++i) {
+      Env::Default()->SchedClosure([&]() {
+        BatchFunctionKernelParallelWarmupTestState test;
+        test.set_session_metadata(session_metadata);
+        TF_CHECK_OK(test.Init(/*enable_splitting=*/true,
+                              /*check_output_shape=*/true));
+        test.AddInputFromList<int64_t>(
+            TensorShape({16}),
+            {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15});
+        auto status = test.RunOpKernel();
+        ASSERT_FALSE(status.ok());
+        // This proves the kernel is executed with batch sizes other than 2.
+        EXPECT_TRUE(absl::StrContains(status.message(),
+                                      "is not compatible with expected shape"));
+        blocking_counter.DecrementCount();
+      });
+    }
+    blocking_counter.Wait();
+  }
+
+  {
+    EXPECT_FALSE(serving::GetGlobalWarmupStateRegistry().Lookup(key));
+    auto per_model_data = std::make_unique<PerModelData>();
+    per_model_data->warmup_all_batch_sizes = true;
+    auto handle = serving::GetGlobalWarmupStateRegistry().Register(
+        key, std::move(per_model_data));
+
+    tsl::BlockingCounter blocking_counter(num_requests);
+    for (int i = 0; i < num_requests; ++i) {
+      Env::Default()->SchedClosure([&]() {
+        BatchFunctionKernelParallelWarmupTestState test;
+        test.set_session_metadata(session_metadata);
+        // Error free when the EnsureShapeOp is replaced with an Identity op.
+        TF_CHECK_OK(
+            test.Init(/*enable_splitting=*/true, /*check_output_shape=*/false));
+        test.AddInputFromList<int64_t>(
+            TensorShape({16}),
+            {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15});
+        TF_CHECK_OK(test.RunOpKernel());
+
+        test::ExpectTensorEqual<int64_t>(
+            *test.GetOutput(0),
+            test::AsTensor<int64_t>(
+                {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}));
+
+        blocking_counter.DecrementCount();
+      });
+    }
+    blocking_counter.Wait();
+  }
+}
 
 TEST_P(BatchFunctionKernelParallelWarmupTest, ParallelWarmup) {
   SessionMetadata session_metadata;
@@ -150,7 +251,8 @@ TEST_P(BatchFunctionKernelParallelWarmupTest, ParallelWarmup) {
       Env::Default()->SchedClosure([&]() {
         BatchFunctionKernelParallelWarmupTestState test;
         test.set_session_metadata(session_metadata);
-        TF_CHECK_OK(test.Init(enable_splitting));
+        TF_CHECK_OK(test.Init(enable_splitting,
+                              /*check_output_shape=*/true));
         test.AddInputFromList<int64_t>(TensorShape({2}), {123, 456});
         TF_CHECK_OK(test.RunOpKernel());
 
@@ -171,7 +273,8 @@ TEST_P(BatchFunctionKernelParallelWarmupTest, ParallelWarmup) {
       Env::Default()->SchedClosure([&]() {
         BatchFunctionKernelParallelWarmupTestState test;
         test.set_session_metadata(session_metadata);
-        TF_CHECK_OK(test.Init(enable_splitting));
+        TF_CHECK_OK(test.Init(enable_splitting,
+                              /*check_output_shape=*/true));
         test.AddInputFromList<int64_t>(TensorShape({2}), {123, 456});
         // We expect requests to be batched together when the warm-up mode is
         // turned off, which will make the execution fail at `EnsureShape`.
@@ -205,7 +308,7 @@ TEST_P(BatchFunctionKernelParallelWarmupTest, ParallelWarmupAutoBatch) {
       Env::Default()->SchedClosure([&]() {
         BatchFunctionKernelParallelWarmupTestState test;
         test.set_session_metadata(session_metadata);
-        TF_CHECK_OK(test.Init(enable_splitting));
+        TF_CHECK_OK(test.Init(enable_splitting, /*check_output_shape=*/true));
         test.AddInputFromList<int64_t>(TensorShape({2}), {123, 456});
         auto status = test.RunOpKernel();
         ASSERT_FALSE(status.ok());
@@ -250,5 +353,5 @@ TEST_P(BatchFunctionKernelParallelWarmupTest, ParallelWarmupAutoBatch) {
 INSTANTIATE_TEST_SUITE_P(BatchFunctionKernelParallelWarmupTestSuite,
                          BatchFunctionKernelParallelWarmupTest,
                          ::testing::Bool());
-
+}  // namespace
 }  // namespace tensorflow

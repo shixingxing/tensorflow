@@ -1,4 +1,4 @@
-/* Copyright 2023 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2023 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ limitations under the License.
 
 #include "absl/container/btree_map.h"
 #include "absl/log/check.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/time.h"
@@ -41,6 +42,7 @@ limitations under the License.
 #include "xla/service/hlo_parser.h"
 #include "xla/service/hlo_pass_pipeline.h"
 #include "xla/status.h"
+#include "xla/status_macros.h"
 #include "xla/tests/test_utils.h"
 #include "xla/tools/hlo_control_flow_flattening.h"
 #include "xla/xla.pb.h"
@@ -242,51 +244,33 @@ void AddShardingAnnotationsToSpmdPartitionedModule(HloModule* hlo_module) {
 }
 
 StatusOr<std::unique_ptr<PjRtClient>> FunctionalHloRunner::CreateGpuClient() {
-  return GetStreamExecutorGpuClient(
-      /*asynchronous=*/true, GpuAllocatorConfig(), /*node_id=*/0);
+  return GetStreamExecutorGpuClient(GpuClientOptions());
 }
 
 StatusOr<std::unique_ptr<PjRtClient>> FunctionalHloRunner::CreateMockGpuClient(
     int num_nodes) {
-  return GetStreamExecutorGpuClient(
-      /*asynchronous=*/true, GpuAllocatorConfig(), /*node_id=*/0,
-      /*num_nodes=*/num_nodes, /*allowed_devices=*/std::nullopt,
-      /*platform_name=*/std::nullopt,
-      /*should_stage_host_to_device_transfers=*/true,
-      /*kv_get=*/nullptr, /*kv_put=*/nullptr, /*enable_mock_nccl=*/true);
+  GpuClientOptions options;
+  options.num_nodes = num_nodes;
+  options.enable_mock_nccl = true;
+  return GetStreamExecutorGpuClient(options);
 }
 
 StatusOr<std::unique_ptr<PjRtClient>> FunctionalHloRunner::CreateGpuClient(
     std::shared_ptr<xla::DistributedRuntimeClient> distributed_client,
     int node_id, int num_nodes) {
-  CHECK_LE(0, node_id) << "Node id is expected to be in range [0, num_nodes)";
-  CHECK_LT(node_id, num_nodes)
-      << "Node id is expected to be in range [0, num_nodes)";
-  CHECK_NE(distributed_client, nullptr);
+  if (node_id < 0 || node_id >= num_nodes) {
+    return absl::InvalidArgumentError(
+        "Node id is expected to be in range [0, num_nodes)");
+  }
 
-  // Use the plugin name as key prefix.
-  std::string key_prefix = "gpu:";
+  TF_RET_CHECK(distributed_client != nullptr);
 
-  xla::PjRtClient::KeyValueGetCallback kv_get =
-      [distributed_client, key_prefix](
-          const std::string& k,
-          absl::Duration timeout) -> xla::StatusOr<std::string> {
-    return distributed_client->BlockingKeyValueGet(absl::StrCat(key_prefix, k),
-                                                   timeout);
-  };
-
-  xla::PjRtClient::KeyValuePutCallback kv_put =
-      [distributed_client, key_prefix](const std::string& k,
-                                       const std::string& v) -> xla::Status {
-    return distributed_client->KeyValueSet(absl::StrCat(key_prefix, k), v);
-  };
-
-  return GetStreamExecutorGpuClient(
-      /*asynchronous=*/true, GpuAllocatorConfig(), /*node_id=*/node_id,
-      /*num_nodes=*/num_nodes, /*allowed_devices=*/std::nullopt,
-      /*platform_name=*/std::nullopt,
-      /*should_stage_host_to_device_transfers=*/true,
-      /*kv_get=*/kv_get, /*kv_put=*/kv_put);
+  GpuClientOptions options;
+  options.node_id = node_id;
+  options.num_nodes = num_nodes;
+  options.kv_store =
+      GetDistributedKeyValueStore(distributed_client, /*key_prefix=*/"gpu:");
+  return GetStreamExecutorGpuClient(options);
 }
 
 StatusOr<ExecutionOptions> FunctionalHloRunner::LoadExecutionOptions(
@@ -1463,7 +1447,7 @@ FunctionalHloRunner::FetchAndLogOutput(
                "same device";
         output_slice.emplace_back(
             ShapeUtil::DeviceShapeToHostShape(buffer->on_device_shape()));
-        buffer->ToLiteral(&output_slice.back(), [&](Status s) {
+        buffer->ToLiteral(&output_slice.back()).OnReady([&](Status s) {
           absl::MutexLock lock(&mu);
           --num_pending_transfers;
           status.Update(s);

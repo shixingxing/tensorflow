@@ -15,11 +15,9 @@ limitations under the License.
 // Copied and modified from
 // //third_party/tensorflow/compiler/mlir/lite/transforms/prepare_quantize.cc
 // This transformation pass applies quantization propagation on TF dialect.
-#include <initializer_list>
 #include <memory>
 #include <utility>
 
-#include "llvm/Support/Casting.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"  // from @llvm-project
 #include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/Dialect/Quant/QuantOps.h"  // from @llvm-project
@@ -31,10 +29,11 @@ limitations under the License.
 #include "mlir/Pass/Pass.h"  // from @llvm-project
 #include "mlir/Support/LLVM.h"  // from @llvm-project
 #include "mlir/Support/LogicalResult.h"  // from @llvm-project
+#include "mlir/Support/TypeID.h"  // from @llvm-project
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"  // from @llvm-project
 #include "stablehlo/dialect/StablehloOps.h"  // from @stablehlo
-#include "tensorflow/compiler/mlir/lite/quantization/ir/QuantOps.h"
 #include "tensorflow/compiler/mlir/lite/quantization/quantization_utils.h"
+#include "tensorflow/compiler/mlir/quantization/stablehlo/ops/stablehlo_op_quant_spec.h"
 #include "tensorflow/compiler/mlir/quantization/stablehlo/passes/passes.h"
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops.h"
 
@@ -42,10 +41,10 @@ namespace mlir {
 namespace quant {
 namespace stablehlo {
 
-namespace {
-
 #define GEN_PASS_DEF_PREPAREQUANTIZEPASS
 #include "tensorflow/compiler/mlir/quantization/stablehlo/passes/passes.h.inc"
+
+namespace {
 
 // Applies prepare quantization on the model in TF dialect. This pass runs
 // before the quantization pass and propagate the quantization parameters
@@ -55,12 +54,14 @@ namespace {
 class PrepareQuantizePass
     : public impl::PrepareQuantizePassBase<PrepareQuantizePass> {
  public:
-  PrepareQuantizePass() = default;
-  PrepareQuantizePass(const PrepareQuantizePass&) = default;
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(PrepareQuantizePass)
 
-  explicit PrepareQuantizePass(bool enable_per_channel_quantization,
+  using impl::PrepareQuantizePassBase<
+      PrepareQuantizePass>::PrepareQuantizePassBase;
+
+  explicit PrepareQuantizePass(bool enable_per_channel_quantized_weight,
                                int bit_width) {
-    enable_per_channel_quantization_ = enable_per_channel_quantization;
+    enable_per_channel_quantized_weight_ = enable_per_channel_quantized_weight;
     bit_width_ = bit_width;
   }
 
@@ -134,50 +135,6 @@ class ConvertArithConstToStablehloConstOp
   }
 };
 
-std::unique_ptr<OpQuantSpec> GetStableHLOOpQuantSpec(Operation* op) {
-  auto spec = std::make_unique<OpQuantSpec>();
-  if (auto call_op = dyn_cast_or_null<TF::XlaCallModuleOp>(op)) {
-    auto entry_function =
-        call_op->getAttrOfType<FlatSymbolRefAttr>("_entry_function");
-    StringRef function_name = entry_function.getValue();
-    if (!function_name.startswith("composite_")) {
-      return spec;
-    }
-    if (function_name.contains("conv")) {
-      spec->coeff_op_quant_dim[1] = 3;
-      if (function_name.contains("with_bias")) {
-        spec->biases_params[2] = {{0, 1},
-                                  quant::GetUniformQuantizedTypeForBias};
-      }
-    } else if (function_name.contains("dot_general")) {
-      spec->coeff_op_quant_dim[1] = -1;
-      if (function_name.contains("with_bias")) {
-        spec->biases_params[2] = {{0, 1},
-                                  quant::GetUniformQuantizedTypeForBias};
-      }
-    } else if (function_name.contains("dot")) {
-      spec->coeff_op_quant_dim[1] = -1;
-      if (function_name.contains("with_bias")) {
-        spec->biases_params[2] = {{0, 1},
-                                  quant::GetUniformQuantizedTypeForBias};
-      }
-    }
-    for (auto quantizable_operand : spec->coeff_op_quant_dim) {
-      spec->quantizable_operands.insert(quantizable_operand.first);
-    }
-  }
-  return spec;
-}
-
-std::unique_ptr<OpQuantScaleSpec> GetStableHLOQuantScaleSpec(Operation* op) {
-  auto scale_spec = std::make_unique<OpQuantScaleSpec>();
-  if (llvm::isa<mlir::stablehlo::ConvertOp, mlir::stablehlo::ConcatenateOp>(
-          op)) {
-    scale_spec->has_same_scale_requirement = true;
-  }
-  return scale_spec;
-}
-
 void PrepareQuantizePass::runOnOperation() {
   func::FuncOp func = getOperation();
   MLIRContext* ctx = func.getContext();
@@ -185,8 +142,8 @@ void PrepareQuantizePass::runOnOperation() {
   // The function might contain more stats ops than required, and it will
   // introduce requantize if the calibration stats have conflicts. This tries to
   // remove all the redundant stats ops.
-  RemoveRedundantStatsOps(func, GetStableHLOOpQuantSpec,
-                          GetStableHLOQuantScaleSpec);
+  RemoveRedundantStatsOps(func, GetStableHloOpQuantSpec,
+                          GetStableHloQuantScaleSpec);
 
   RewritePatternSet patterns(ctx);
   // Convert quant stats to int8 quantization parameters.
@@ -208,9 +165,11 @@ void PrepareQuantizePass::runOnOperation() {
   // Finally, the quantization parameters can be propagated to the rest of the
   // values (tensors).
   ApplyQuantizationParamsPropagation(
-      func, /*is_signed=*/true, bit_width_, !enable_per_channel_quantization_,
-      GetStableHLOOpQuantSpec, GetStableHLOQuantScaleSpec,
-      /*infer_tensor_ranges=*/true, /*legacy_float_scale=*/false);
+      func, /*is_signed=*/true, bit_width_,
+      !enable_per_channel_quantized_weight_, GetStableHloOpQuantSpec,
+      GetStableHloQuantScaleSpec,
+      /*infer_tensor_ranges=*/true, /*legacy_float_scale=*/false,
+      /*is_qdq_conversion=*/false);
 
   // Restore constants as stablehlo::ConstantOp.
   RewritePatternSet patterns_2(ctx);
@@ -226,9 +185,9 @@ void PrepareQuantizePass::runOnOperation() {
 
 // Creates an instance of the TensorFlow dialect PrepareQuantize pass.
 std::unique_ptr<OperationPass<func::FuncOp>> CreatePrepareQuantizePass(
-    bool enable_per_channel_quantization, int bit_width) {
-  return std::make_unique<PrepareQuantizePass>(enable_per_channel_quantization,
-                                               bit_width);
+    bool enable_per_channel_quantized_weight, int bit_width) {
+  return std::make_unique<PrepareQuantizePass>(
+      enable_per_channel_quantized_weight, bit_width);
 }
 
 }  // namespace stablehlo

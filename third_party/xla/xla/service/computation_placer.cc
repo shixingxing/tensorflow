@@ -1,4 +1,4 @@
-/* Copyright 2017 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2017 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -49,7 +49,7 @@ StatusOr<DeviceAssignment::LogicalID> DeviceAssignment::LogicalIdForDevice(
     for (int c = 0; c < computation_count(); ++c) {
       if ((*this)(r, c) == device_id.value()) {
         if (logical_id.has_value()) {
-          return InternalError(
+          return Internal(
               "Device %d appears twice in DeviceAssignment: %s",
               device_id.value(), ToString());
         }
@@ -60,7 +60,7 @@ StatusOr<DeviceAssignment::LogicalID> DeviceAssignment::LogicalIdForDevice(
   if (logical_id.has_value()) {
     return *logical_id;
   } else {
-    return InternalError("Device %d doesn't appear in DeviceAssignment: %s",
+    return Internal("Device %d doesn't appear in DeviceAssignment: %s",
                          device_id.value(), ToString());
   }
 }
@@ -165,7 +165,7 @@ StatusOr<DeviceAssignment> ComputationPlacer::AssignDevices(
   auto* computation_placers = GetPlatformComputationPlacers();
   if (computation_placers->find(platform_id) != computation_placers->end()) {
     // TODO(b/282059652): Consider logging the platform name using
-    // MultiPlatformManager::PlatformWithId(). No doing that for now to avoid
+    // PlatformManager::PlatformWithId(). No doing that for now to avoid
     // introducing unwanted dependency.
     LOG(WARNING) << "computation placer already registered. Please check "
                     "linkage and avoid linking the same target more than once.";
