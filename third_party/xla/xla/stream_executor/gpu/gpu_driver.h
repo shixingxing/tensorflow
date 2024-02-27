@@ -24,6 +24,7 @@ limitations under the License.
 #include <string>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -32,10 +33,6 @@ limitations under the License.
 #include "xla/stream_executor/device_options.h"
 #include "xla/stream_executor/gpu/gpu_types.h"
 #include "xla/stream_executor/platform.h"
-
-#ifdef GOOGLE_CUDA
-#include "third_party/gpus/cuda/include/cuda.h"
-#endif
 
 namespace stream_executor {
 namespace gpu {
@@ -174,9 +171,6 @@ class GpuDriver {
   static int GetGpuStreamPriority(
       GpuContext* context, stream_executor::StreamPriority stream_priority);
 
-  // Virtual memory support was added to CUDA in 10.2
-#if defined(GOOGLE_CUDA) && CUDA_VERSION >= 10020
-
   // Reserves a range of virtual device memory addresses via
   // cuMemAddressReserve. bytes must be a multiple of the host page size.
   // Returns nullptr base address in VmemSpan if the reservation fails.
@@ -229,8 +223,6 @@ class GpuDriver {
   // unmapping is not supported.
   // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__VA.html#group__CUDA__VA_1gfb50aac00c848fd7087e858f59bf7e2a
   static void UnmapMemory(GpuContext* context, GpuDevicePtr va, uint64_t bytes);
-
-#endif  // defined(GOOGLE_CUDA) && CUDA_VERSION >= 10020
 
   // Given a device ordinal, returns a device handle into the device outparam,
   // which must not be null.
@@ -436,6 +428,12 @@ class GpuDriver {
   // https://docs.amd.com/projects/HIP/en/docs-5.0.0/doxygen/html/group___graph.html#ga87c68ae9408a6438d4a1101560ceea11
   static absl::StatusOr<GraphNodeType> GraphNodeGetType(
       GpuGraphNodeHandle node);
+
+  // Returns a node's dependencies.
+  //
+  // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__GRAPH.html#group__CUDA__GRAPH_1g048f4c0babcbba64a933fc277cd45083
+  static absl::StatusOr<std::vector<GpuGraphNodeHandle>>
+  GraphNodeGetDependencies(GpuGraphNodeHandle node);
 
   // Destroys an executable graph.
   // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__GRAPH.html#group__CUDA__GRAPH_1ga32ad4944cc5d408158207c978bc43a7

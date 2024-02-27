@@ -1784,6 +1784,7 @@ xla_test(
         "//xla:test",
         "//xla/client:local_client",
         "//xla/client:xla_builder",
+        "@com_google_absl//absl/strings:string_view",
     ],
 )
 
@@ -2866,6 +2867,7 @@ xla_test(
         "//xla:shape_util",
         "//xla:test",
         "//xla:test_helpers",
+        "//xla/service/cpu:onednn_util",
         "@local_tsl//tsl/platform:platform_port",
     ],
 )

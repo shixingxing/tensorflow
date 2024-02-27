@@ -2851,7 +2851,7 @@ tf_cuda_cc_test(
         "@com_google_absl//absl/memory",
         "@com_google_absl//absl/strings",
         "@eigen_archive//:eigen3",
-    ] + if_cuda(["@local_tsl//tsl/cuda:cudart"]),
+    ] + if_cuda(["@local_xla//xla/tsl/cuda:cudart"]),
 )
 
 # This is identical to :common_runtime_direct_session_test with the addition of
@@ -3498,31 +3498,6 @@ tf_cc_fuzz_test(
         "//tensorflow/core:core_cpu",
         "//tensorflow/core:tensorflow",
         "//tensorflow/core/ops",
-    ],
-)
-
-cc_library(
-    name = "serving_device_selector",
-    srcs = ["serving_device_selector.cc"],
-    hdrs = ["serving_device_selector.h"],
-    copts = tf_copts(),
-    visibility = ["//visibility:public"],
-    deps = [
-        "//tensorflow/core/platform:logging",
-        "@com_google_absl//absl/container:fixed_array",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/types:span",
-    ],
-)
-
-cc_library(
-    name = "serving_device_selector_policies",
-    srcs = ["serving_device_selector_policies.cc"],
-    hdrs = ["serving_device_selector_policies.h"],
-    copts = tf_copts(),
-    features = ["-layering_check"],
-    deps = [
-        ":serving_device_selector",
     ],
 )
 

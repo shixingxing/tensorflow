@@ -454,7 +454,6 @@ GpuThunkAotCompilationResult::LoadExecutable(
   std::string platform_name = platform->Name();
   se::DeviceDescription gpu_device_info = stream_exec->GetDeviceDescription();
   mlir::DialectRegistry registry;
-  IrEmitterUnnested::GetDependentDialects(registry);
   auto mlir_context = std::make_unique<mlir::MLIRContext>(registry);
   llvm::LLVMContext llvm_context;
   auto llvm_module = std::make_unique<llvm::Module>("", llvm_context);
@@ -467,7 +466,6 @@ GpuThunkAotCompilationResult::LoadExecutable(
   IrEmitterContext ir_emitter_context(hlo_module.get(), buffer_assignment.get(),
                                       platform_name, gpu_device_info,
                                       mlir_context.get(), llvm_module.get(),
-                                      /*emit_ir_from_hlo=*/true,
                                       /*emit_kernels=*/false);
   auto ir_emitter = IrEmitterUnnested::Create(&ir_emitter_context);
   TF_RETURN_IF_ERROR(

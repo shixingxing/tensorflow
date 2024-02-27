@@ -105,12 +105,6 @@ namespace xla {
 
 static StatusOr<const PjRtCApiTopologyDescription> InitClientTopoDesc(
     const PJRT_Api* c_api, PJRT_Client* c_client) {
-  if (c_api->pjrt_api_version.major_version == 0 &&
-      c_api->pjrt_api_version.minor_version < 36) {
-    return Unimplemented(
-        "Getting TopologyDescription for PJRT client requires plugin with PJRT "
-        "C API version >= 0.36");
-  }
   StatusOr<PJRT_TopologyDescription*> c_topo =
       pjrt::GetTopologyDescription(c_client, c_api);
   TF_RETURN_IF_ERROR(c_topo.status());
@@ -1127,14 +1121,6 @@ StatusOr<std::string> PjRtCApiExecutable::SerializeExecutable() const {
 
 StatusOr<std::string> PjRtCApiExecutable::FingerprintExecutable() const {
   const PJRT_Api* c_api_ = pjrt_c_api();
-  if (c_api_->pjrt_api_version.major_version == 0 &&
-      c_api_->pjrt_api_version.minor_version < 35) {
-    // TODO(yeounoh): To be removed after 01/20/2024.
-    return xla::Unimplemented(
-        "Getting fingerprint from unloaded PJRT executable requires plugin "
-        "with PJRT C API version >= 0.35");
-  }
-
   PJRT_Executable_Fingerprint_Args args;
   args.struct_size = PJRT_Executable_Fingerprint_Args_STRUCT_SIZE;
   args.extension_start = nullptr;
@@ -2234,7 +2220,12 @@ StatusOr<std::unique_ptr<PjRtTopologyDescription>> GetCApiTopology(
   if (c_api == nullptr) {
     return Internal("PJRT C API is nullptr for %s", device_type);
   }
+  return GetCApiTopology(c_api, topology_name, create_options);
+}
 
+absl::StatusOr<std::unique_ptr<PjRtTopologyDescription>> GetCApiTopology(
+    const PJRT_Api* c_api, absl::string_view topology_name,
+    const absl::flat_hash_map<std::string, PjRtValueType>& create_options) {
   PJRT_TopologyDescription_Create_Args init_args;
   init_args.struct_size = PJRT_TopologyDescription_Create_Args_STRUCT_SIZE;
   init_args.extension_start = nullptr;

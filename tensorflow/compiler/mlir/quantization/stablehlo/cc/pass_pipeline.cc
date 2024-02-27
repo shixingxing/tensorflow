@@ -50,6 +50,8 @@ void AddPostCalibrationPasses(
   QuantizeCompositeFunctionsPassOptions options;
   options.enable_per_channel_quantized_weight_ =
       static_range_ptq_preset.enable_per_channel_quantized_weight();
+  // For debugging purposes.
+  options.mlir_dump_file_name_ = "quantize_composite_functions";
   pm.addNestedPass<func::FuncOp>(
       CreateConvertCustomAggregationOpToQuantStatsPass());
   pm.addPass(createQuantizeCompositeFunctionsPass(options));
@@ -82,10 +84,13 @@ void AddStablehloQuantToIntPasses(OpPassManager& pm) {
   pm.addPass(createInlinerPass());
   // StableHLO -> MHLO legalization.
   pm.addPass(mhlo::createStablehloLegalizeToHloPass());
-  pm.addNestedPass<func::FuncOp>(createConvertMHLOQuantToIntPass(
-      /*legalize_chlo=*/true));
+  pm.addNestedPass<func::FuncOp>(mhlo::createMhloQuantLegalizeToIntPass());
   pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+  // Integer graph optimization relies on chlo broadcast ops for easier handling
+  // of dynamic shapes. Therefore we lower chlo ops after optimization.
   pm.addNestedPass<func::FuncOp>(CreateOptimizeIntGraphPass());
+  pm.addNestedPass<func::FuncOp>(mhlo::createChloLegalizeToHloPass());
+  pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
   pm.addPass(createSymbolDCEPass());
   // MHLO -> StableHLO legalization.
   pm.addPass(mhlo::createHloLegalizeToStablehloPass());
