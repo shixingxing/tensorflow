@@ -1,12 +1,12 @@
 // RUN: mlir_fusions_opt %s -split-input-file -xla-gpu-lower-tensors | FileCheck %s
 
 module {
-  func.func @add(%arg0: f32, %arg1: f32) -> f32 {
+  func.func private @add(%arg0: f32, %arg1: f32) -> f32 {
     %sum = arith.addf %arg0, %arg1 : f32
     func.return %sum : f32
   }
 
-  func.func @tensorarg(%arg0: tensor<43xf32> {xla.invariant, xla.slice_index = 0}, %arg1: index) -> f32 {
+  func.func private @tensorarg(%arg0: tensor<43xf32> {xla.invariant, xla.slice_index = 0}, %arg1: index) -> f32 {
     %v1 = arith.constant 2.0 : f32
     %v2 = tensor.extract %arg0[%arg1] : tensor<43xf32>
     %sum = func.call @add(%v1, %v2) : (f32, f32) -> f32
@@ -28,11 +28,11 @@ module {
   }
 }
 
-// CHECK:        func.func @add(%{{.*}}: f32, %{{.*}}: f32) -> f32 {
+// CHECK:        func.func private @add(%{{.*}}: f32, %{{.*}}: f32) -> f32 {
 // CHECK-NEXT:     arith.addf
 // CHECK-NEXT:     return
 
-// CHECK:        func.func @tensorarg(%[[ARG0:.*]]: !llvm.ptr
+// CHECK:        func.func private @tensorarg(%[[ARG0:.*]]: !llvm.ptr
 // CHECK-SAME:        {xla.invariant, xla.slice_index = 0 : i64}, %[[ARG1:.*]]: index) -> f32 {
 // CHECK-DAG:       %[[C2:.*]] = arith.constant 2.000000e+00
 // CHECK-DAG:       %[[IDX:.*]] = arith.index_castui %[[ARG1]] : index to i32
@@ -136,6 +136,42 @@ module {
 // -----
 
 module {
+  func.func @complex_tensor_insert(
+      %arg0: tensor<10xcomplex<f32>>) -> tensor<10xcomplex<f32>> {
+    %c1 = arith.constant 1 : index
+    %real = arith.constant 3.0 : f32
+    %imag = arith.constant 2.0 : f32
+    %complex = complex.create %real, %imag : complex<f32>
+    %out = tensor.insert %complex into %arg0[%c1] : tensor<10xcomplex<f32>>
+    func.return %out : tensor<10xcomplex<f32>>
+  }
+}
+
+// CHECK: @complex_tensor_insert(%[[ARG0:.*]]: !llvm.ptr
+// CHECK: %[[C:.*]] = complex.create
+// CHECK: %[[GEP:.*]] = llvm.getelementptr inbounds %[[ARG0]][1] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<(f32, f32)>
+// CHECK: %[[CAST:.*]] = builtin.unrealized_conversion_cast %[[C]] : complex<f32> to !llvm.struct<(f32, f32)>
+// CHECK: llvm.store %[[CAST]], %[[GEP]] : !llvm.struct<(f32, f32)>, !llvm.ptr
+
+// -----
+
+module {
+  func.func @complex_tensor_extract(
+      %arg0: tensor<10xcomplex<f32>>) -> complex<f32> {
+    %c1 = arith.constant 1 : index
+    %v2 = tensor.extract %arg0[%c1] : tensor<10xcomplex<f32>>
+    func.return %v2 : complex<f32>
+  }
+}
+
+// CHECK: @complex_tensor_extract(%[[ARG0:.*]]: !llvm.ptr
+// CHECK: %[[GEP:.*]] = llvm.getelementptr inbounds %[[ARG0]][1] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<(f32, f32)>
+// CHECK: %[[LOAD:.*]] = llvm.load %[[GEP]] : !llvm.ptr -> !llvm.struct<(f32, f32)>
+// CHECK: builtin.unrealized_conversion_cast %[[LOAD]] : !llvm.struct<(f32, f32)> to complex<f32>
+
+// -----
+
+module {
   // This example is a bit silly, in real life there wouldn't be a loop (the
   // loop body would be executed by different threads). We're just doing it this
   // way so control flow with shared memory is tested as well.
@@ -191,3 +227,85 @@ module {
 // CHECK:            %[[ELEM_ADDR:.*]] = llvm.getelementptr inbounds %[[CAST]]
 // CHECK:            llvm.load %[[ELEM_ADDR]]
 
+// -----
+
+module {
+  func.func @atomic_rmw_f32(%in: tensor<2x4xf32>, %i: index, %j: index)
+      -> (tensor<2x4xf32>) {
+    %ret = xla_gpu.atomic_rmw %in[%i, %j] : tensor<2x4xf32> {
+      ^bb0(%current : f32):
+        %c42 = arith.constant 1.0 : f32
+        %add = arith.addf %current, %c42 : f32
+        xla_gpu.yield %add : f32
+    }
+    return %ret : tensor<2x4xf32>
+  }
+}
+
+// CHECK: @atomic_rmw_f32
+// CHECK: %[[ADDR:.*]] = llvm.getelementptr
+// CHECK-NEXT: %[[INIT:.*]] = llvm.load %[[ADDR]]
+// CHECK-NEXT: scf.while (%[[VAR:.*]] = %[[INIT]])
+// CHECK: %[[RES:.*]] = llvm.bitcast %{{.*}} : f32 to i32
+// CHECK-NEXT: llvm.cmpxchg %[[ADDR]], %[[VAR]], %[[RES]]
+
+// -----
+
+module {
+  func.func @atomic_rmw_f16(%in: tensor<2x4xf16>, %i: index, %j: index)
+      -> (tensor<2x4xf16>) {
+    %ret = xla_gpu.atomic_rmw %in[%i, %j] : tensor<2x4xf16> {
+      ^bb0(%current : f16):
+        %c1 = arith.constant 1.0 : f16
+        %add = arith.addf %current, %c1 : f16
+        xla_gpu.yield %add : f16
+    }
+    return %ret : tensor<2x4xf16>
+  }
+}
+
+// CHECK: @atomic_rmw_f16
+// CHECK: %[[ADDR:.*]] = llvm.getelementptr
+// CHECK-NEXT: %[[ADDR_INT:.*]] = llvm.ptrtoint %[[ADDR]]
+// CHECK-NEXT: %[[OFFSET:.*]] = llvm.and %[[ADDR_INT]], %{{.*}}
+// CHECK-NEXT: %[[INDEX:.*]] = llvm.mul %[[OFFSET]], %{{.*}}
+// CHECK-NEXT: %[[BASE:.*]] = llvm.getelementptr inbounds %[[ADDR]][%[[INDEX]]]
+// CHECK: %[[INIT:.*]] = llvm.load %[[BASE]]
+// CHECK-NEXT: scf.while (%[[VAR:.*]] = %[[INIT]])
+// CHECK-NEXT: %[[VAR_SHIFT:.*]] = llvm.lshr %[[VAR]], %{{.*}}
+// CHECK-NEXT: %[[VAR_TRUNC:.*]] = llvm.trunc %[[VAR_SHIFT]]
+// CHECK-NEXT: llvm.bitcast %[[VAR_TRUNC]] : i16 to f16
+// CHECK: %[[RES:.*]] = llvm.bitcast %{{.*}} : f16 to i16
+// CHECK-NEXT: %[[RES_WIDE:.*]] = llvm.zext %[[RES]]
+// CHECK-NEXT: %[[NEW_MASKED:.*]] = llvm.and %[[VAR]], %{{.*}}
+// CHECK-NEXT: %[[RES_SHIFT:.*]] = llvm.shl %[[RES_WIDE]], %{{.*}}
+// CHECK-NEXT: %[[NEW:.*]] = llvm.or %[[NEW_MASKED]], %[[RES_SHIFT]]
+// CHECK-NEXT: llvm.cmpxchg %[[BASE]], %[[VAR]], %[[NEW]]
+
+// -----
+
+module {
+  func.func @atomic_rmw_overwrite(%in: tensor<2x4xf16>, %i: index, %j: index)
+      -> (tensor<2x4xf16>) {
+    %c1 = arith.constant 1.0 : f16
+    %ret = xla_gpu.atomic_rmw %in[%i, %j] : tensor<2x4xf16> {
+      ^bb0(%current : f16):
+        xla_gpu.yield %c1 : f16
+    }
+    return %ret : tensor<2x4xf16>
+  }
+}
+// CHECK: @atomic_rmw_overwrite
+// CHECK: %[[ADDR:.*]] = llvm.getelementptr
+// CHECK-NEXT: %[[ADDR_INT:.*]] = llvm.ptrtoint %[[ADDR]]
+// CHECK-NEXT: %[[OFFSET:.*]] = llvm.and %[[ADDR_INT]], %{{.*}}
+// CHECK-NEXT: %[[INDEX:.*]] = llvm.mul %[[OFFSET]], %{{.*}}
+// CHECK-NEXT: %[[BASE:.*]] = llvm.getelementptr inbounds %[[ADDR]][%[[INDEX]]]
+// CHECK: %[[INIT:.*]] = llvm.load %[[BASE]]
+// CHECK-NEXT: scf.while (%[[VAR:.*]] = %[[INIT]])
+// CHECK: %[[RES:.*]] = llvm.bitcast %{{.*}} : f16 to i16
+// CHECK-NEXT: %[[RES_WIDE:.*]] = llvm.zext %[[RES]]
+// CHECK-NEXT: %[[NEW_MASKED:.*]] = llvm.and %[[VAR]], %{{.*}}
+// CHECK-NEXT: %[[RES_SHIFT:.*]] = llvm.shl %[[RES_WIDE]], %{{.*}}
+// CHECK-NEXT: %[[NEW:.*]] = llvm.or %[[NEW_MASKED]], %[[RES_SHIFT]]
+// CHECK-NEXT: llvm.cmpxchg %[[BASE]], %[[VAR]], %[[NEW]]

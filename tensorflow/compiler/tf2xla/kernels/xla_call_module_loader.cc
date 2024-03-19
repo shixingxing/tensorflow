@@ -61,6 +61,7 @@ limitations under the License.
 #include "tensorflow/compiler/mlir/tensorflow/utils/dump_mlir_util.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/error_util.h"
 #include "xla/client/xla_computation.h"
+#include "xla/mlir/utils/type_util.h"
 #include "xla/mlir_hlo/mhlo/IR/hlo_ops.h"
 #include "xla/mlir_hlo/mhlo/transforms/passes.h"
 #include "xla/python/refine_polymorphic_shapes.h"
@@ -119,11 +120,13 @@ bool IsTokenType(mlir::Type type) {
          type.isa<mlir::mhlo::TokenType>();
 }
 
-tsl::StatusOr<std::unique_ptr<XlaCallModuleLoader>> XlaCallModuleLoader::Create(
-    mlir::MLIRContext *context, int version, std::string module_str,
-    std::vector<std::string> disabled_checks,
-    std::vector<std::string> platforms, int num_invocation_args,
-    bool main_has_token_input_output) {
+absl::StatusOr<std::unique_ptr<XlaCallModuleLoader>>
+XlaCallModuleLoader::Create(mlir::MLIRContext *context, int version,
+                            std::string module_str,
+                            std::vector<std::string> disabled_checks,
+                            std::vector<std::string> platforms,
+                            int num_invocation_args,
+                            bool main_has_token_input_output) {
   std::unique_ptr<XlaCallModuleLoader> loader(new XlaCallModuleLoader);
   TF_RETURN_IF_ERROR(loader->LoadModule(
       context, version, std::move(module_str), std::move(disabled_checks),
@@ -287,7 +290,7 @@ absl::Status XlaCallModuleLoader::RefineDynamicShapes(
                                           xla_shape.dimensions().end());
       TF_ASSIGN_OR_RETURN(
           mlir::Type element_type,
-          ConvertPrimitiveTypeToMLIRType(xla_shape.element_type(), builder));
+          ConvertPrimitiveTypeToMlirType(xla_shape.element_type(), builder));
       mlir::RankedTensorType type =
           mlir::RankedTensorType::get(xla_dimensions, element_type);
       // TODO(burmako): This fails with an obscure compilation error on Windows.
@@ -580,7 +583,7 @@ absl::Status XlaCallModuleLoader::LowerModuleToMhlo() {
   return absl::OkStatus();
 }
 
-tsl::StatusOr<xla::XlaComputation> XlaCallModuleLoader::ToXlaComputation() {
+absl::StatusOr<xla::XlaComputation> XlaCallModuleLoader::ToXlaComputation() {
   xla::HloProto proto;
   mlir::MlirToHloConversionOptions options;
   TF_RETURN_IF_ERROR(

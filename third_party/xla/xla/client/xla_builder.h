@@ -592,6 +592,13 @@ class XlaBuilder {
       const PrecisionConfig* precision_config = nullptr,
       std::optional<PrimitiveType> preferred_element_type = std::nullopt);
 
+  XlaOp SparseDot(
+      XlaOp lhs, XlaOp rhs, absl::Span<const XlaOp> sparse_meta,
+      absl::Span<const SparsityDescriptor> sparsity,
+      const DotDimensionNumbers& dimension_numbers,
+      const PrecisionConfig* precision_config = nullptr,
+      std::optional<PrimitiveType> preferred_element_type = std::nullopt);
+
   XlaOp Conv(
       XlaOp lhs, XlaOp rhs, absl::Span<const int64_t> window_strides,
       Padding padding, int64_t feature_group_count = 1,
@@ -844,6 +851,10 @@ class XlaBuilder {
       const std::optional<Layout>& layout,
       const std::optional<ChannelHandle>& channel_id = std::nullopt);
 
+  XlaOp CollectiveBroadcast(
+      XlaOp operand, absl::Span<const ReplicaGroup> replica_groups,
+      const std::optional<ChannelHandle>& channel_id = std::nullopt);
+
   XlaOp CollectivePermute(
       XlaOp operand,
       const std::vector<std::pair<int64_t, int64_t>>& source_target_pairs,
@@ -1070,6 +1081,10 @@ class XlaBuilder {
   StatusOr<XlaOp> AddBroadcastSequence(const Shape& output_shape,
                                        XlaOp operand);
 
+  // Internal helper method that broadcasts a scalar to the shape of the output.
+  absl::StatusOr<XlaOp> BroadcastScalarToOutputShape(XlaOp scalar,
+                                                     XlaOp output);
+
   // Internal helper method for creating a Reshape op with the already inferred
   // shape.
   virtual StatusOr<XlaOp> ReshapeInternal(const Shape& shape, XlaOp operand,
@@ -1253,6 +1268,12 @@ class XlaBuilder {
       const Shape& shape, XlaOp lhs, XlaOp rhs,
       const DotDimensionNumbers& dimension_number,
       const PrecisionConfig* precision_config);
+  friend XlaOp SparseDot(XlaOp lhs, XlaOp rhs,
+                         absl::Span<const XlaOp> sparse_meta,
+                         absl::Span<const SparsityDescriptor> sparsity,
+                         const DotDimensionNumbers& dimension_number,
+                         const PrecisionConfig* precision_config,
+                         std::optional<PrimitiveType> preferred_element_type);
   friend XlaOp Conv(XlaOp lhs, XlaOp rhs,
                     absl::Span<const int64_t> window_strides, Padding padding,
                     int64_t feature_group_count, int64_t batch_group_count,
@@ -1488,6 +1509,9 @@ class XlaBuilder {
                              absl::Span<const ReplicaGroup> replica_groups,
                              const std::optional<Layout>& layout,
                              const std::optional<ChannelHandle>& channel_id);
+  friend XlaOp CollectiveBroadcast(
+      XlaOp operand, absl::Span<const ReplicaGroup> replica_groups,
+      const std::optional<ChannelHandle>& channel_id);
   friend XlaOp CollectivePermute(
       XlaOp operand,
       const std::vector<std::pair<int64_t, int64_t>>& source_target_pairs,
@@ -1635,6 +1659,10 @@ class XlaBuilder {
                       const std::optional<ChannelHandle>& channel_id,
                       const std::optional<Shape>& layout,
                       std::optional<bool> use_global_device_ids, bool async);
+
+  XlaOp CollectiveBroadcastImpl(XlaOp operand,
+                                absl::Span<const ReplicaGroup> replica_groups,
+                                const std::optional<ChannelHandle>& channel_id);
 
   XlaOp CollectivePermuteImpl(
       XlaOp operand,
@@ -2091,6 +2119,14 @@ XlaOp DotGeneral(
     const PrecisionConfig* precision_config = nullptr,
     std::optional<PrimitiveType> preferred_element_type = std::nullopt);
 
+// Enqueues a sparse dot instruction onto the computation.
+XlaOp SparseDot(
+    XlaOp lhs, XlaOp rhs, absl::Span<const XlaOp> sparse_meta,
+    absl::Span<const SparsityDescriptor> sparsity,
+    const DotDimensionNumbers& dimension_numbers,
+    const PrecisionConfig* precision_config = nullptr,
+    std::optional<PrimitiveType> preferred_element_type = std::nullopt);
+
 // Enqueues a convolution instruction onto the computation, which uses the
 // default convolution dimension numbers.
 XlaOp Conv(XlaOp lhs, XlaOp rhs, absl::Span<const int64_t> window_strides,
@@ -2526,6 +2562,10 @@ XlaOp AllToAllTuple(
     XlaOp operand, int64_t split_dimension, int64_t concat_dimension,
     int64_t split_count, absl::Span<const ReplicaGroup> replica_groups = {},
     const std::optional<Layout>& layout = std::nullopt,
+    const std::optional<ChannelHandle>& channel_id = std::nullopt);
+
+XlaOp CollectiveBroadcast(
+    XlaOp operand, absl::Span<const ReplicaGroup> replica_groups,
     const std::optional<ChannelHandle>& channel_id = std::nullopt);
 
 // Enqueues an collective operation that sends and receives data cross replicas.

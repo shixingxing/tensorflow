@@ -605,10 +605,14 @@ LogicalResult matchAndRewriteDotLikeHybridOp(
   // For weight-only quantization:
   // result = hybridOp(lhs, dequant(rhs))
   Value lhsFloat32Tensor = adaptor.getLhs();
-  Value rhs = adaptor.getRhs();
-  quant::UniformQuantizedType rhsElementType =
-      getElementTypeOrSelf(op.getRhs().getType())
-          .template cast<quant::UniformQuantizedType>();
+  // Insert optimization_barrier to prevent constant folding of dequantize +
+  // quantized weights.
+  auto barrier = rewriter.create<mhlo::OptimizationBarrierOp>(op->getLoc(),
+                                                              adaptor.getRhs());
+  Operation::result_range resultRange = barrier.getResults();
+  Value rhs = resultRange.front();
+  auto rhsElementType = getElementTypeOrSelf(op.getRhs().getType())
+                            .template cast<quant::UniformQuantizedType>();
   auto resFloat32TensorType =
       op.getResult().getType().template cast<TensorType>();
   auto rhsFloat32TensorType =
@@ -1280,8 +1284,8 @@ class ConvertGenericOp : public ConversionPattern {
     // This pattern only handle selected ops.
     if (!isa<mhlo::BitcastConvertOp, mhlo::BroadcastInDimOp,
              mhlo::ConcatenateOp, mhlo::ConstantOp, mhlo::DynamicReshapeOp,
-             mhlo::GatherOp, mhlo::MaxOp, mhlo::MinOp, mhlo::PadOp,
-             mhlo::ReduceWindowOp, mhlo::ReshapeOp, mhlo::ReturnOp,
+             mhlo::DynamicSliceOp, mhlo::GatherOp, mhlo::MaxOp, mhlo::MinOp,
+             mhlo::PadOp, mhlo::ReduceWindowOp, mhlo::ReshapeOp, mhlo::ReturnOp,
              mhlo::SelectOp, mhlo::SliceOp, mhlo::TransposeOp,
              mhlo::GetDimensionSizeOp, mhlo::DynamicBroadcastInDimOp>(op)) {
       return failure();

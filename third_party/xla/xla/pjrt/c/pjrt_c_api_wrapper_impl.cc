@@ -56,6 +56,7 @@ limitations under the License.
 #include "xla/pjrt/pjrt_device_description.h"
 #include "xla/pjrt/pjrt_executable.h"
 #include "xla/pjrt/pjrt_future.h"
+#include "xla/pjrt/pjrt_layout.h"
 #include "xla/service/computation_placer.h"
 #include "xla/service/hlo.pb.h"
 #include "xla/shape.h"
@@ -65,8 +66,11 @@ limitations under the License.
 #include "xla/xla.pb.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/framework/allocator.h"
+#include "tsl/platform/casts.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/statusor.h"
+#include "tsl/profiler/lib/connected_traceme.h"
+#include "tsl/profiler/lib/context_types.h"
 
 namespace pjrt {
 
@@ -572,6 +576,11 @@ PJRT_Error* PJRT_Client_Compile(PJRT_Client_Compile_Args* args) {
       args->struct_size));
   PJRT_RETURN_IF_ERROR(ActualStructSizeIsGreaterOrEqual(
       "PJRT_Program", PJRT_Program_STRUCT_SIZE, args->program->struct_size));
+
+  int64_t traceme_context_id = pjrt::GetTracemeContextId(args);
+  tsl::profiler::TraceMeConsumer consumer(
+      "PJRT_Client_Compile", tsl::profiler::ContextType::kPjrtLibraryCall,
+      traceme_context_id);
 
   PJRT_ASSIGN_OR_RETURN(
       xla::CompileOptions options,
@@ -1344,6 +1353,12 @@ PJRT_Error* PJRT_LoadedExecutable_Execute(
   PJRT_RETURN_IF_ERROR(ActualStructSizeIsGreaterOrEqual(
       "PJRT_ExecuteOptions", PJRT_ExecuteOptions_STRUCT_SIZE,
       args->options->struct_size));
+
+  int64_t traceme_context_id = pjrt::GetTracemeContextId(args);
+  tsl::profiler::TraceMeConsumer consumer(
+      "PJRT_LoadedExecutable_Execute",
+      tsl::profiler::ContextType::kPjrtLibraryCall, traceme_context_id);
+
   xla::ExecuteOptions options;
   options.launch_id = args->options->launch_id;
   options.strict_shape_checking = true;
@@ -1627,9 +1642,16 @@ PJRT_Error* PJRT_Buffer_GetMemoryLayout(
   {
     absl::MutexLock lock(&args->buffer->mu);
     if (!layout_data.has_value()) {
-      PJRT_ASSIGN_OR_RETURN(
-          BufferMemoryLayoutData data,
-          ConvertToBufferMemoryLayoutData(args->buffer->buffer->layout()));
+      // TODO(skyewm): change PJRT C API to also use opaque layout type
+      std::unique_ptr<xla::PjRtLayout> pjrt_layout =
+          args->buffer->buffer->layout();
+      xla::PjRtXlaLayout* pjrt_xla_layout =
+          tensorflow::down_cast<xla::PjRtXlaLayout*>(pjrt_layout.get());
+      CHECK(pjrt_xla_layout != nullptr) << "Got unexpected layout type";
+      const xla::Layout& xla_layout = pjrt_xla_layout->xla_layout();
+
+      PJRT_ASSIGN_OR_RETURN(BufferMemoryLayoutData data,
+                            ConvertToBufferMemoryLayoutData(xla_layout));
       layout_data.emplace(std::move(data));
     }
   }

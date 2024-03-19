@@ -39,14 +39,12 @@ class GpuServingDeviceSelector : public tsl::ServingDeviceSelector {
       absl::string_view program_fingerprint) override;
 
   // Enqueues the program on the stream of index `index_on_host`.
-  void Enqueue(int32_t index_on_host, absl::string_view fingerprint);
+  void Enqueue(int32_t index_on_host, absl::string_view fingerprint) override;
 
   // Marks the completion of a program on the given stream.
   // If `had_error` is true, this function doesn't update program's execution
   // time stats to avoid incorrect estimates.
-  void Completed(int32_t index_on_host, bool had_error = false);
-
-  int64_t TotalGpuLoadNsForTest();
+  void Completed(int32_t index_on_host, bool had_error) override;
 
  private:
   friend class ServingDeviceSelectorTestHelper;
@@ -54,6 +52,9 @@ class GpuServingDeviceSelector : public tsl::ServingDeviceSelector {
 
   void FreeDeviceReservation(
       const tsl::DeviceReservation& reservation) override;
+
+  // Only for metrics reporting purposes.
+  int64_t TotalEstimatedTimeTillIdleNs() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   absl::Mutex mu_;
   absl::FixedArray<DeviceState, 8> device_states_ ABSL_GUARDED_BY(mu_);

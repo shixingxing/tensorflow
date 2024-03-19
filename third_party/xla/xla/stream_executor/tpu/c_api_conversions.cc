@@ -388,6 +388,7 @@ xla::Layout FromC(const XLA_Layout* c_layout) {
       static_cast<xla::PrimitiveType>(c_layout->index_primitive_type),
       static_cast<xla::PrimitiveType>(c_layout->pointer_primitive_type),
       c_layout->element_size_in_bits, c_layout->memory_space,
+      /*split_configs=*/{},
       /*physical_shape=*/nullptr,
       c_layout->dynamic_shape_metadata_prefix_bytes);
 }
@@ -430,8 +431,7 @@ XLA_ShapeIndex ToC(const xla::ShapeIndex& xla_shape) {
 }
 
 xla::ShapeIndex FromC(XLA_ShapeIndex* c_shape) {
-  return xla::ShapeIndex(&c_shape->indices[0],
-                         &c_shape->indices[c_shape->count]);
+  return xla::ShapeIndex(c_shape->indices, c_shape->indices + c_shape->count);
 }
 
 void ToC(const xla::LiteralSlice& literal, XLA_Literal* c_literal) {
@@ -499,7 +499,7 @@ XLA_HloModule ToC(const xla::HloModule& module) {
   return c_module;
 }
 
-xla::StatusOr<std::unique_ptr<xla::HloModule>> FromC(
+absl::StatusOr<std::unique_ptr<xla::HloModule>> FromC(
     const XLA_HloModule& c_module) {
   xla::HloModuleProto module_proto =
       stream_executor::tpu::DeserializeProto<xla::HloModuleProto>(

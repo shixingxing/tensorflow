@@ -25,6 +25,16 @@ limitations under the License.
 
 namespace shlo_ref {
 
+std::variant<TensorElementType, QuantizedTensorElementType> BaselineType(
+    const std::variant<TensorElementType, QuantizedTensorElementType>& type) {
+  return std::visit(
+      [](auto t)
+          -> std::variant<TensorElementType, QuantizedTensorElementType> {
+        return BaselineType(t);
+      },
+      type);
+}
+
 const Shape& Tensor::shape() const {
   if (IsQuantized()) {
     return quantized_tensor_type().shape;
@@ -105,6 +115,15 @@ const TensorElementType& Tensor::tensor_element_type() const {
 const QuantizedTensorElementType& Tensor::quantized_tensor_element_type()
     const {
   return quantized_tensor_type().element_type;
+}
+
+std::variant<TensorElementType, QuantizedTensorElementType>
+Tensor::element_type() const {
+  if (const TensorType* t = std::get_if<TensorType>(&type); t != nullptr) {
+    return t->element_type;
+  } else {
+    return std::get<QuantizedTensorType>(type).element_type;
+  }
 }
 
 bool operator==(const TensorType& lhs, const TensorType& rhs) {

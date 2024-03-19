@@ -16,9 +16,11 @@ limitations under the License.
 #ifndef XLA_SERVICE_GPU_RUNTIME_CUDNN_THUNK_H_
 #define XLA_SERVICE_GPU_RUNTIME_CUDNN_THUNK_H_
 
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "absl/base/call_once.h"
 #include "absl/status/status.h"
 #include "absl/types/span.h"
 #include "xla/service/buffer_assignment.h"
@@ -40,6 +42,11 @@ class CuDnnThunk : public Thunk {
 
   absl::Status Initialize(const InitializeParams&) override;
   absl::Status ExecuteOnStream(const ExecuteParams&) override;
+
+  const se::dnn::DnnGraph& graph() const { return *graph_; }
+  const std::vector<BufferAllocation::Slice>& arguments() const {
+    return args_;
+  }
 
  private:
   absl::once_flag once_flag_;

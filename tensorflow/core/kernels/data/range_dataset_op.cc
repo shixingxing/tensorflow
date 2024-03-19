@@ -14,7 +14,9 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/kernels/data/range_dataset_op.h"
 
+#include <cstdlib>
 #include <functional>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -310,11 +312,7 @@ class RangeDatasetOp::Dataset : public DatasetBase {
         *end_of_sequence = true;
         return absl::OkStatus();
       }
-      int64_t output_index = ctx->index_mapper()(element_count_++);
-      if (output_index < 0) {
-        *end_of_sequence = true;
-        return absl::OkStatus();
-      }
+      size_t output_index = ctx->index_mapper()(element_count_++);
       int64_t value = dataset()->start_ + output_index * dataset()->step_;
       *end_of_sequence = false;
       return ConvertOutputTypes(output_dtypes(), out_tensors, value);
@@ -345,9 +343,9 @@ class RangeDatasetOp::Dataset : public DatasetBase {
 
     Status RestoreInternal(IteratorContext* ctx,
                            IteratorStateReader* reader) override {
-      if (ctx->element_count().has_value()) {
+      if (ctx->restored_element_count().has_value()) {
         tsl::mutex_lock l(mu_);
-        element_count_ = *(ctx->element_count());
+        element_count_ = *(ctx->restored_element_count());
         return absl::OkStatus();
       }
       if (reader->Contains(prefix(), kHasSplitProvider)) {
@@ -375,7 +373,7 @@ class RangeDatasetOp::Dataset : public DatasetBase {
     mutable tsl::mutex mu_;
     // Count of elements produced by this iterator when it runs in the random
     // access mode.
-    int64_t element_count_ TF_GUARDED_BY(mu_) = 0;
+    size_t element_count_ TF_GUARDED_BY(mu_) = 0;
   };
 
   const int64_t start_;

@@ -20,6 +20,7 @@ limitations under the License.
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "xla/hlo/experimental/auto_sharding/auto_sharding.pb.h"
 #include "xla/hlo/experimental/auto_sharding/auto_sharding_strategy.h"
@@ -361,6 +362,7 @@ TEST(CallORToolsSolverTest, HandlesMemoryEdgeCosts) {
                                          7000, 7100, 7200, 7300}};
   AddEdges(request.mutable_live_edges(), live_edges);
   AddCosts(request.mutable_memory_edge_costs(), memory_edge_costs);
+  request.set_enable_memory_edge_costs(true);
 
   const AutoShardingSolverResult result = CallORToolsSolver(request);
 
@@ -708,7 +710,7 @@ TEST(ScaleRequest, SkipsScaling) {
 }
 
 TEST(ValidateRequest, AcceptsAutoShardingSolverRequest) {
-  ValidateRequest(DefaultAutoShardingSolverRequest());
+  CHECK_OK(ValidateRequest(DefaultAutoShardingSolverRequest()));
 }
 
 // clang-format on

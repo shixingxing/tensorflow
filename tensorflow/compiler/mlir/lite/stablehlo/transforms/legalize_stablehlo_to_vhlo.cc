@@ -40,6 +40,7 @@ limitations under the License.
 #include "stablehlo/dialect/VhloTypes.h"  // from @stablehlo
 #include "stablehlo/transforms/Passes.h"  // from @stablehlo
 #include "tensorflow/compiler/mlir/lite/ir/tfl_ops.h"
+#include "tensorflow/compiler/mlir/lite/stablehlo/transforms/passes.h"
 
 #define DEBUG_TYPE "compat-passes"
 
@@ -255,9 +256,12 @@ LogicalResult ApplyVhloToStablehloPatterns(ModuleOp module) {
 }
 
 LogicalResult ApplyUnrealizedCastCanonicalization(ModuleOp module) {
-  RewritePatternSet patterns(module->getContext());
+  MLIRContext *context = module->getContext();
+  RewritePatternSet patterns(context);
+  ConversionTarget target(*context);
+  target.addIllegalOp<UnrealizedConversionCastOp>();
   populateReconcileUnrealizedCastsPatterns(patterns);
-  if (failed(applyPatternsAndFoldGreedily(module, std::move(patterns)))) {
+  if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
     return module->emitError("Failed to fold unrealized cast");
   }
   return success();
@@ -300,8 +304,6 @@ struct LegalizeVhloToStablehloPass
     //       VHLO --> StableHLO
     //         Remove cast(tensor->vhlo) -> cast(vhlo->tensor) pattern
     if (failed(ApplyTypeConverter(module, to_vhlo_converter)) ||
-        failed(ApplyStablehloToVhloPatterns(module,
-                                            /*is_func_legal=*/false)) ||
         failed(ApplyVhloToVersionPatterns(module,
                                           stablehlo::getCurrentVersion())) ||
         failed(ApplyVhloToStablehloPatterns(module)) ||

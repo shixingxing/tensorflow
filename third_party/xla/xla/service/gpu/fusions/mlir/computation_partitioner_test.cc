@@ -15,6 +15,7 @@ limitations under the License.
 #include "xla/service/gpu/fusions/mlir/computation_partitioner.h"
 
 #include <string>
+#include <utility>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -24,6 +25,7 @@ limitations under the License.
 #include "mlir/IR/ImplicitLocOpBuilder.h"  // from @llvm-project
 #include "mlir/IR/Location.h"  // from @llvm-project
 #include "mlir/IR/MLIRContext.h"  // from @llvm-project
+#include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/tests/hlo_test_base.h"
 
@@ -36,6 +38,15 @@ using ::testing::ElementsAre;
 using ::testing::SizeIs;
 
 using ComputationPartitionerTest = HloTestBase;
+
+std::string PrintAndErase(mlir::func::FuncOp func) {
+  std::string out;
+  llvm::raw_string_ostream os(out);
+  os << func;
+  // Erase the function so we don't leak memory.
+  func.erase();
+  return out;
+}
 
 TEST_F(ComputationPartitionerTest, PartitionDiamonds) {
   auto module = ParseAndReturnVerifiedModule(R"(
@@ -60,6 +71,7 @@ TEST_F(ComputationPartitionerTest, PartitionDiamonds) {
   auto* fusion = module->GetComputationWithName("fused_computation");
   ASSERT_NE(fusion, nullptr);
   PartitionedComputation computation(fusion);
+  auto param = fusion->GetInstructionWithName("param");
   auto slice01 = fusion->GetInstructionWithName("slice0.1");
   auto slice02 = fusion->GetInstructionWithName("slice0.2");
   auto add0 = fusion->GetInstructionWithName("add0");
@@ -74,23 +86,24 @@ TEST_F(ComputationPartitionerTest, PartitionDiamonds) {
   auto add3 = fusion->GetInstructionWithName("add3");
 
   const auto& graphs = computation.subgraphs();
-  ASSERT_THAT(graphs, SizeIs(4));
-  EXPECT_THAT(graphs[0].instructions_post_order,
-              ElementsAre(slice01, slice02, add0));
+  ASSERT_THAT(graphs, SizeIs(5));
+  EXPECT_THAT(graphs[0].instructions_post_order, ElementsAre(param));
   EXPECT_THAT(graphs[1].instructions_post_order,
-              ElementsAre(slice11, slice12, add1));
+              ElementsAre(slice01, slice02, add0));
   EXPECT_THAT(graphs[2].instructions_post_order,
-              ElementsAre(slice21, slice22, add2));
+              ElementsAre(slice11, slice12, add1));
   EXPECT_THAT(graphs[3].instructions_post_order,
+              ElementsAre(slice21, slice22, add2));
+  EXPECT_THAT(graphs[4].instructions_post_order,
               ElementsAre(slice31, slice32, add3));
 
-  EXPECT_THAT(graphs[0].roots, ElementsAre(add0));
-  EXPECT_THAT(graphs[1].roots, ElementsAre(add1));
-  EXPECT_THAT(graphs[2].roots, ElementsAre(add2));
-  EXPECT_THAT(graphs[3].roots, ElementsAre(add3));
+  EXPECT_THAT(graphs[1].roots, ElementsAre(add0));
+  EXPECT_THAT(graphs[2].roots, ElementsAre(add1));
+  EXPECT_THAT(graphs[3].roots, ElementsAre(add2));
+  EXPECT_THAT(graphs[4].roots, ElementsAre(add3));
 
-  EXPECT_EQ(&computation.GetRootSubgraph(), &graphs[3]);
-  EXPECT_EQ(&computation.FindSubgraph(slice21), &graphs[2]);
+  EXPECT_EQ(&computation.GetRootSubgraph(), &graphs[4]);
+  EXPECT_EQ(&computation.FindSubgraph(slice21), &graphs[3]);
 }
 
 TEST_F(ComputationPartitionerTest, TupleRoot) {
@@ -109,9 +122,42 @@ TEST_F(ComputationPartitionerTest, TupleRoot) {
   ASSERT_NE(fusion, nullptr);
   PartitionedComputation computation(fusion);
 
-  ASSERT_THAT(computation.subgraphs(), SizeIs(1));
-  EXPECT_THAT(computation.GetRootSubgraph().roots, SizeIs(1));
-  EXPECT_THAT(computation.GetRootSubgraph().instructions_post_order, SizeIs(3));
+  ASSERT_THAT(computation.subgraphs(), SizeIs(1)) << computation.ToString();
+}
+
+TEST_F(ComputationPartitionerTest, TupleRootWithInjectedValues) {
+  auto module = ParseAndReturnVerifiedModule(R"(
+    HloModule test_module
+
+    add {
+      p0 = f32[] parameter(0)
+      p1 = f32[] parameter(1)
+      ROOT add = f32[] add(p0, p1)
+    }
+
+    fused_computation {
+      p0 = f32[4] parameter(0)
+      c0 = f32[] constant(0)
+      reduce = f32[] reduce(p0, c0), dimensions={0}, to_apply=add
+      bitcast = f32[1] bitcast(reduce)
+      abs = f32[1] abs(bitcast)
+      log = f32[1] log(abs)
+      sign = f32[1] sign(bitcast)
+      ROOT tuple = (f32[1], f32[1]) tuple(log, sign)
+    })")
+                    .value();
+
+  auto* fused_computation = module->GetComputationWithName("fused_computation");
+  PartitionedComputations fusion(
+      fused_computation,
+      /*heroes=*/
+      {fused_computation->GetInstructionWithName("reduce")});
+
+  // The epilogue should be one subgraph.
+  EXPECT_EQ(
+      &fusion.FindSubgraph(
+          fused_computation->GetInstructionWithName("bitcast")),
+      &fusion.FindSubgraph(fused_computation->GetInstructionWithName("tuple")));
 }
 
 TEST_F(ComputationPartitionerTest, EnforcePartitioning) {
@@ -186,15 +232,6 @@ TEST_F(ComputationPartitionerTest, SubgraphSignatures) {
       ROOT %fusion = f32[10] fusion(%p0, %p1), kind=kLoop, calls=fusion
     })")
                     .value();
-  auto print = [](mlir::func::FuncOp func) {
-    // Set visibility to private so the function verifies.
-    func.setSymVisibility("private");
-    std::string out;
-    llvm::raw_string_ostream os(out);
-    os << func;
-    func.erase();
-    return out;
-  };
 
   mlir::MLIRContext context;
   context.loadDialect<mlir::func::FuncDialect>();
@@ -202,14 +239,64 @@ TEST_F(ComputationPartitionerTest, SubgraphSignatures) {
 
   PartitionedComputation fusion(module->GetComputationWithName("fusion"));
   EXPECT_EQ(
-      print(CreateSubgraphMlirFunction(fusion.GetRootSubgraph(), builder)),
+      PrintAndErase(
+          CreateSubgraphMlirFunction(fusion.GetRootSubgraph(), builder)),
       "func.func private @fusion_reduce(tensor<10x10xf32, dense<[0, 1]> : "
       "tensor<2xi64>>, tensor<10x10xf32>, index {xla.range = [0 : index, 9 : "
       "index]}) -> f32");
 
   PartitionedComputation add(module->GetComputationWithName("add"));
-  EXPECT_EQ(print(CreateSubgraphMlirFunction(add.GetRootSubgraph(), builder)),
-            "func.func private @add_add(f32, f32) -> f32");
+  EXPECT_EQ(
+      PrintAndErase(CreateSubgraphMlirFunction(add.GetRootSubgraph(), builder)),
+      "func.func private @add_add(f32, f32) -> f32");
+}
+
+TEST_F(ComputationPartitionerTest, SubgraphSignaturesWithInjectedValues) {
+  auto module = ParseAndReturnVerifiedModule(R"(
+    HloModule test_module
+
+    %fused_computation {
+      %p0 = f32[2,16,17] parameter(0)
+      %log = f32[2,16,17] log(%p0)
+      %transpose = f32[2,17,16] transpose(%log), dimensions={0,2,1}
+      %p1 = f32[] parameter(1)
+      %bc = f32[2,17,16] broadcast(%p1), dimensions={}
+      ROOT %add = f32[2,17,16] add(%transpose, %bc)
+    }
+
+    ENTRY main {
+      %p0 = f32[2,16,17] parameter(0)
+      %p1 = f32[] parameter(1)
+      ROOT %fusion = f32[2,17,16] fusion(%p0, %p1), kind=kInput,
+            calls=%fused_computation
+    }
+  )")
+                    .value();
+
+  mlir::MLIRContext context;
+  context.loadDialect<mlir::func::FuncDialect>();
+  mlir::ImplicitLocOpBuilder builder(mlir::UnknownLoc::get(&context), &context);
+
+  // We force a split at the transpose (like the transpose emitter would do) and
+  // enforce that the transpose is injected as a parameter into the epilogue.
+  auto* fused_computation = module->GetComputationWithName("fused_computation");
+  auto* transpose = fused_computation->GetInstructionWithName("transpose");
+  PartitionedComputations fusion(fused_computation,
+                                 /*heroes=*/
+                                 {transpose});
+  auto& epilogue_graph = fusion.epilogue();
+  auto& injected_values = epilogue_graph->injected_values;
+  EXPECT_EQ(injected_values.size(), 1);
+  std::pair<const HloInstruction*, int> injected_operand_key(
+      fused_computation->root_instruction(), 0);
+  ASSERT_TRUE(injected_values.contains(transpose));
+  EXPECT_EQ(injected_values.at(transpose), 0);
+  EXPECT_EQ(
+      PrintAndErase(CreateSubgraphMlirFunction(*epilogue_graph, builder)),
+      "func.func private @fused_computation__epilogue__(tensor<2x16x17xf32>, "
+      "tensor<f32>, index {xla.range = [0 : index, 1 : index]}, index "
+      "{xla.range = [0 : index, 16 : index]}, index {xla.range = [0 : "
+      "index, 15 : index]}, f32) -> f32");
 }
 
 }  // namespace
