@@ -56,7 +56,8 @@ namespace xla {
 namespace {
 
 bool IsGpuClient(const PjRtClient& client) {
-  return client.platform_id() == CudaId() || client.platform_id() == RocmId();
+  return client.platform_id() == CudaId() || client.platform_id() == RocmId() ||
+         client.platform_id() == SyclId();
 }
 
 bool IsSameTopology(const PjRtTopologyDescription& topology1,
@@ -194,7 +195,12 @@ StreamExecutorGpuCompiler::Compile(CompileOptions options,
 }
 
 STREAM_EXECUTOR_REGISTER_MODULE_INITIALIZER(pjrt_register_se_gpu_compiler, {
-  PjRtRegisterCompiler(CudaName(),
-                       std::make_unique<StreamExecutorGpuCompiler>());
+  PjRtRegisterCompiler(
+#if TENSORFLOW_USE_ROCM
+      RocmName(),
+#else
+                       CudaName(),
+#endif
+      std::make_unique<StreamExecutorGpuCompiler>());
 });
 }  // namespace xla

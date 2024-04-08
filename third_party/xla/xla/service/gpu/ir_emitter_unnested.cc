@@ -109,8 +109,6 @@ limitations under the License.
 #include "xla/service/gpu/kernels/topk_custom_kernel.h"
 #include "xla/service/gpu/launch_dimensions.h"
 #include "xla/service/gpu/matmul_utils.h"
-#include "xla/service/gpu/nccl_api.h"
-#include "xla/service/gpu/nccl_collective_thunk.h"
 #include "xla/service/gpu/parallel_loop_emitter.h"
 #include "xla/service/gpu/runtime/command_buffer_cmd.h"
 #include "xla/service/gpu/runtime/command_buffer_cmd_emitter.h"
@@ -127,8 +125,10 @@ limitations under the License.
 #include "xla/service/gpu/runtime/nccl_all_gather_thunk.h"
 #include "xla/service/gpu/runtime/nccl_all_reduce_thunk.h"
 #include "xla/service/gpu/runtime/nccl_all_to_all_thunk.h"
+#include "xla/service/gpu/runtime/nccl_api.h"
 #include "xla/service/gpu/runtime/nccl_collective_broadcast_thunk.h"
 #include "xla/service/gpu/runtime/nccl_collective_permute_thunk.h"
+#include "xla/service/gpu/runtime/nccl_collective_thunk.h"
 #include "xla/service/gpu/runtime/nccl_recv_thunk.h"
 #include "xla/service/gpu/runtime/nccl_send_thunk.h"
 #include "xla/service/gpu/runtime/norm_thunk.h"
@@ -136,9 +136,9 @@ limitations under the License.
 #include "xla/service/gpu/runtime/replica_id_thunk.h"
 #include "xla/service/gpu/runtime/send_recv_thunk.h"
 #include "xla/service/gpu/runtime/sequential_thunk.h"
+#include "xla/service/gpu/runtime/thunk.h"
 #include "xla/service/gpu/runtime/wait_for_streams_thunk.h"
 #include "xla/service/gpu/runtime/while_thunk.h"
-#include "xla/service/gpu/thunk.h"
 #include "xla/service/gpu/triton_call.h"
 #include "xla/service/llvm_ir/buffer_assignment_util.h"
 #include "xla/service/llvm_ir/ir_array.h"
@@ -1653,7 +1653,8 @@ absl::Status IrEmitterUnnested::EmitTritonCustomCall(
     TF_ASSIGN_OR_RETURN(
         auto kernel_arguments,
         KernelArguments::Create(ir_emitter_context_->buffer_assignment(), instr,
-                                instr->operands()));
+                                instr->operands(),
+                                /*dedup=*/false));
     auto launch_dimensions =
         LaunchDimensions(se::BlockDim(call.grid_x, call.grid_y, call.grid_z),
                          se::ThreadDim(call.num_warps * 32));
@@ -1696,7 +1697,8 @@ absl::Status IrEmitterUnnested::EmitTritonCustomCall(
   TF_ASSIGN_OR_RETURN(
       auto kernel_arguments,
       KernelArguments::Create(ir_emitter_context_->buffer_assignment(), instr,
-                              instr->operands()));
+                              instr->operands(),
+                              /*dedup=*/false));
 
   AddThunkToThunkSequence(std::make_unique<KernelThunk>(
       instr, entry->kernel_name, kernel_arguments.args(),
@@ -2179,7 +2181,8 @@ Status IrEmitterUnnested::EmitCollectivePermute(
   // First output is aliased.
   TF_RET_CHECK(
       instr->shape().IsTuple() && instr->shape().tuple_shapes_size() == 2 &&
-      instr->shape().tuple_shapes(0) == instr->shape().tuple_shapes(1));
+      Shape::Equal().IgnoreMemorySpaceInLayout()(
+          instr->shape().tuple_shapes(0), instr->shape().tuple_shapes(1)));
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice result_slice,
                       GetAllocationSliceForHlo(instr, {1}));
 
@@ -2187,6 +2190,9 @@ Status IrEmitterUnnested::EmitCollectivePermute(
   const auto& hlo_config = ir_emitter_context_->hlo_module().config();
   const int64_t replica_count = hlo_config.replica_count();
   const int64_t partition_count = hlo_config.num_partitions();
+  const int64_t src_memory_space = shape.layout().memory_space();
+  const int64_t dst_memory_space =
+      instr->shape().tuple_shapes(1).layout().memory_space();
 
   if (NcclCollectivePermuteStartThunk::IsDegenerate(instr, replica_count,
                                                     partition_count)) {
@@ -2202,7 +2208,9 @@ Status IrEmitterUnnested::EmitCollectivePermute(
     const NcclCollectiveThunk::Buffer buffer = {
         /*element_count=*/ShapeUtil::ElementsIn(shape),
         /*source_buffer=*/source_slice,
-        /*destination_buffer=*/result_slice};
+        /*destination_buffer=*/result_slice,
+        /*source_memory_space=*/src_memory_space,
+        /*destination_memory_space=*/dst_memory_space};
     auto thunk = std::make_unique<NcclCollectivePermuteStartThunk>(
         Thunk::ThunkInfo::WithProfileAnnotation(instr), NcclApi::Default(),
         instr, replica_count, partition_count, buffer);
@@ -2391,7 +2399,8 @@ absl::Status IrEmitterUnnested::EmitInfeed(const HloInfeedInstruction* instr) {
   // We only need the result data to construct the infeed thunk.
   std::vector<ShapedSlice> shaped_slices;
   TF_RETURN_IF_ERROR(ShapeUtil::ForEachSubshapeWithStatus(
-      instr->shape(), [&](const Shape& subshape, const ShapeIndex& index) {
+      instr->shape(),
+      [&](const Shape& subshape, const ShapeIndex& index) -> absl::Status {
         if (subshape.IsTuple() || subshape.IsToken()) return absl::OkStatus();
         if (subshape.IsArray()) {
           TF_ASSIGN_OR_RETURN(BufferAllocation::Slice data,
@@ -2417,7 +2426,8 @@ absl::Status IrEmitterUnnested::EmitOutfeed(
   const HloInstruction* source = instr->operand(0);
   std::vector<ShapedSlice> shaped_slices;
   TF_RETURN_IF_ERROR(ShapeUtil::ForEachSubshapeWithStatus(
-      source->shape(), [&](const Shape& subshape, const ShapeIndex& index) {
+      source->shape(),
+      [&](const Shape& subshape, const ShapeIndex& index) -> absl::Status {
         if (subshape.IsTuple()) return absl::OkStatus();
         if (subshape.IsArray()) {
           TF_ASSIGN_OR_RETURN(BufferAllocation::Slice data,
@@ -2619,10 +2629,16 @@ absl::Status IrEmitterUnnested::EmitSendThunk(const HloSendInstruction* instr) {
     const auto& hlo_config = ir_emitter_context_->hlo_module().config();
     const int64_t replica_count = hlo_config.replica_count();
     const int64_t partition_count = hlo_config.num_partitions();
+    const int64_t memory_space =
+        instr->shape().IsTuple()
+            ? instr->shape().tuple_shapes(0).layout().memory_space()
+            : instr->shape().layout().memory_space();
     const NcclCollectiveThunk::Buffer nccl_buffer = {
         /*element_count=*/ShapeUtil::ElementsIn(src->shape()),
         /*source_buffer=*/buffer,
-        /*destination_buffer=*/buffer};
+        /*destination_buffer=*/buffer,
+        /*source_memory_space=*/memory_space,
+        /*destination_memory_space=*/memory_space};
     auto thunk = std::make_unique<NcclSendThunk>(
         Thunk::ThunkInfo::WithProfileAnnotation(instr), NcclApi::Default(),
         instr, replica_count, partition_count, nccl_buffer);
@@ -2681,14 +2697,23 @@ absl::Status IrEmitterUnnested::EmitRecvThunk(const HloRecvInstruction* instr) {
   TF_RET_CHECK(instr->shape().IsTuple());
   TF_ASSIGN_OR_RETURN(BufferAllocation::Slice buffer,
                       GetAllocationSliceForHlo(instr, {0}));
+
   if (!instr->is_host_transfer()) {
     const auto& hlo_config = ir_emitter_context_->hlo_module().config();
     const int64_t replica_count = hlo_config.replica_count();
     const int64_t partition_count = hlo_config.num_partitions();
+
+    const int64_t memory_space =
+        instr->shape().IsTuple()
+            ? instr->shape().tuple_shapes(0).layout().memory_space()
+            : instr->shape().layout().memory_space();
+
     const NcclCollectiveThunk::Buffer nccl_buffer = {
         /*element_count=*/ShapeUtil::ElementsIn(instr->shape().tuple_shapes(0)),
         /*source_buffer=*/buffer,
-        /*destination_buffer=*/buffer};
+        /*destination_buffer=*/buffer,
+        /*source_memory_space=*/memory_space,
+        /*destination_memory_space=*/memory_space};
     auto thunk = std::make_unique<NcclRecvThunk>(
         Thunk::ThunkInfo::WithProfileAnnotation(instr), NcclApi::Default(),
         instr, replica_count, partition_count, nccl_buffer);
