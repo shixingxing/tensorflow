@@ -49,7 +49,7 @@ limitations under the License.
 namespace xla {
 namespace gpu {
 
-TSL_LIB_GTL_DEFINE_INT_TYPE(ExecutionStreamId, int64_t);
+TSL_LIB_GTL_DEFINE_INT_TYPE(ExecutionStreamId, uint64_t);
 
 // Thunk acts as the bridge between IrEmitter and GpuExecutable. It stores the
 // metadata IrEmitter generates for GpuExecutable to invoke an HloInstruction.
@@ -200,6 +200,9 @@ class Thunk {
     // if we do not have an acquired clique for a given key.
     absl::StatusOr<size_t> num_communicators(
         const NcclCliqueKey& clique_key) const;
+
+    // Returns whether the clique is a local clique.
+    absl::StatusOr<bool> is_local_clique(const NcclCliqueKey& clique_key) const;
 
     bool empty() const { return cliques_map_.empty(); }
 

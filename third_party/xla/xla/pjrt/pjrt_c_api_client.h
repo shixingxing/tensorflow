@@ -101,7 +101,8 @@ class PjRtCApiMemorySpace : public PjRtMemorySpace {
 
   int id() const override;
 
-  absl::string_view memory_space_kind() const override;
+  absl::string_view kind() const override;
+  int kind_id() const override;
 
   absl::string_view DebugString() const override;
 
@@ -488,16 +489,16 @@ class PjRtCApiBuffer : public PjRtBuffer {
   StatusOr<std::unique_ptr<ExternalReference>> AcquireExternalReference()
       override;
 
-  PjRtFuture<absl::Status> ToLiteral(MutableLiteralBase* literal) override;
-  PjRtFuture<absl::Status> LazyToLiteral(
+  PjRtFuture<> ToLiteral(MutableLiteralBase* literal) override;
+  PjRtFuture<> LazyToLiteral(
       absl::AnyInvocable<absl::StatusOr<MutableLiteralBase*>() &&> generator)
       override;
 
   StatusOr<size_t> GetOnDeviceSizeInBytes() const override;
 
-  PjRtFuture<Status> CopyRawToHost(void* dst, int64_t offset,
-                                   int64_t transfer_size) override {
-    return PjRtFuture<Status>(
+  PjRtFuture<> CopyRawToHost(void* dst, int64_t offset,
+                             int64_t transfer_size) override {
+    return PjRtFuture<>(
         Unimplemented("PJRT C API does not support CopyRawToHost"));
   }
 
@@ -780,7 +781,7 @@ class CApiCopyToDeviceStream : public CopyToDeviceStream {
                          const PJRT_Api* c_api);
   ~CApiCopyToDeviceStream() override;
 
-  PjRtFuture<Status> AddChunk(PjRtChunk chunk) override;
+  PjRtFuture<> AddChunk(PjRtChunk chunk) override;
 
  private:
   PJRT_CopyToDeviceStream* c_stream_;
