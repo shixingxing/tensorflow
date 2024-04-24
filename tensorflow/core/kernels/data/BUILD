@@ -66,12 +66,13 @@ tf_kernel_library(
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
-        "//tensorflow/core/data:dataset_utils",
+        "//tensorflow/core/data:global_shuffle_utils",
         "//tensorflow/core/data:name_utils",
         "//tensorflow/core/data:serialization_utils",
         "//tensorflow/core/framework:dataset_options_proto_cc",
         "//tensorflow/core/util/tensor_bundle",
         "//tensorflow/core/util/tensor_bundle:naming",
+        "@com_google_absl//absl/status",
     ],
 )
 
@@ -1526,8 +1527,10 @@ tf_kernel_library(
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
         "//tensorflow/core/data:dataset_utils",
+        "//tensorflow/core/data:global_shuffle_utils",
         "//tensorflow/core/data:name_utils",
         "//tensorflow/core/data:split_utils",
+        "@com_google_absl//absl/status",
     ],
 )
 

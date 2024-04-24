@@ -535,6 +535,7 @@ cc_library(
     name = "dump",
     srcs = ["dump.cc"],
     hdrs = ["dump.h"],
+    local_defines = if_cuda_is_configured(["GOOGLE_CUDA=1"]),
     deps = [
         ":hlo_graph_dumper",
         ":hlo_proto_util",
@@ -556,6 +557,7 @@ cc_library(
         "@local_tsl//tsl/platform:path",
         "@local_tsl//tsl/platform:regexp",
         "@local_tsl//tsl/platform:status",
+        "@local_tsl//tsl/profiler/lib:scoped_annotation",
     ],
 )
 
@@ -638,6 +640,7 @@ cc_library(
         ":dot_as_convolution_util",
         ":hlo_graph_dumper",
         ":hlo_pass",
+        ":host_memory_offload_annotations_hdr",
         "//xla:array",
         "//xla:protobuf_util",
         "//xla:shape_tree",
@@ -1239,6 +1242,8 @@ cc_library(
         "@com_google_absl//absl/container:inlined_vector",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/types:span",
@@ -1266,7 +1271,6 @@ cc_library(
         ":collective_ops_utils",
         ":hlo_pass",
         "//xla:status",
-        "//xla:statusor",
         "//xla:util",
         "//xla/hlo/ir:hlo",
         "//xla/hlo/ir:hlo_reachability",
@@ -1274,6 +1278,7 @@ cc_library(
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/strings",
         "@local_tsl//tsl/platform:errors",
         "@local_tsl//tsl/platform:statusor",
@@ -1542,10 +1547,12 @@ cc_library(
     name = "llvm_compiler",
     srcs = ["llvm_compiler.cc"],
     hdrs = ["llvm_compiler.h"],
+    local_defines = if_cuda_is_configured(["GOOGLE_CUDA=1"]),
     deps = [
         ":compiler",
         "@llvm-project//llvm:Core",
         "@local_tsl//tsl/platform:denormal",
+        "@local_tsl//tsl/profiler/lib:scoped_annotation",
     ],
 )
 
@@ -1888,6 +1895,7 @@ cc_library(
     name = "hlo_memory_scheduler",
     srcs = ["hlo_memory_scheduler.cc"],
     hdrs = ["hlo_memory_scheduler.h"],
+    local_defines = if_cuda_is_configured(["GOOGLE_CUDA=1"]),
     deps = [
         ":hlo_alias_analysis",
         ":hlo_pass",
@@ -1905,6 +1913,7 @@ cc_library(
         "@local_tsl//tsl/lib/gtl:map_util",
         "@local_tsl//tsl/platform:errors",
         "@local_tsl//tsl/platform:logging",
+        "@local_tsl//tsl/profiler/lib:scoped_annotation",
     ],
 )
 
@@ -4043,6 +4052,7 @@ cc_library(
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
         "@local_tsl//tsl/lib/gtl:map_util",
         "@local_tsl//tsl/platform:errors",
     ],
@@ -5961,6 +5971,7 @@ cc_library(
         "//xla:literal_util",
         "//xla:shape_util",
         "//xla:status",
+        "//xla:status_macros",
         "//xla:util",
         "//xla/hlo/ir:hlo",
         "@com_google_absl//absl/algorithm:container",
@@ -7658,6 +7669,7 @@ cc_library(
     name = "export_hlo",
     hdrs = ["export_hlo.h"],
     deps = [
+        "//xla:autotune_results_proto_cc",
         "//xla/hlo/ir:hlo",
         "//xla/stream_executor:device_description_proto_cc",
         "@com_google_absl//absl/strings",

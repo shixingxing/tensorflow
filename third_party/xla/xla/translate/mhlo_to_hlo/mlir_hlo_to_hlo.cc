@@ -168,18 +168,18 @@ xla::Array<T> ArrayFromDenseElementsAttr(mlir::DenseElementsAttr dense_attr) {
       xla::primitive_util::NativeToPrimitiveType<T>();
   xla::Shape shape = xla::TypeToShape(dense_attr.getType());
   xla::Array<T> array(shape.dimensions());
-  if constexpr (!xla::primitive_util::Is4BitType(type)) {
+  if constexpr (!xla::primitive_util::IsSubByteNonPredType(type)) {
     array.SetValues(dense_attr.getValues<T>());
   } else {
     // The only way to get subbyte integers from getValues() is to get them as
     // APInts.
     auto values = dense_attr.getValues<llvm::APInt>();
     for (int i = 0; i < values.size(); i++) {
-      if constexpr (type == xla::U4) {
-        array.data()[i] = xla::u4{values[i].getZExtValue()};
+      if constexpr (xla::primitive_util::IsUnsignedIntegralType(type)) {
+        array.data()[i] = T{values[i].getZExtValue()};
       } else {
-        static_assert(type == xla::S4);
-        array.data()[i] = xla::s4(values[i].getSExtValue());
+        static_assert(xla::primitive_util::IsSignedIntegralType(type));
+        array.data()[i] = T{values[i].getSExtValue()};
       }
     }
   }
@@ -882,13 +882,17 @@ bool SimplyReturnedOp(mlir::Operation* op) {
 
 void BuildGetTupleElementsForTupleResults(mlir::Operation* op, xla::XlaOp tuple,
                                           OpLoweringContext ctx) {
-  const std::optional<xla::OpSharding>& tuple_sharding =
-      ctx.builder->sharding();
-  if (tuple_sharding.has_value()) {
-    assert(op->getNumResults() == tuple_sharding->tuple_shardings_size());
+  const std::optional<xla::OpSharding>& sharding = ctx.builder->sharding();
+  if (sharding.has_value()) {
+    bool is_tuple_sharding = sharding->type() == xla::OpSharding::TUPLE;
+    assert(!is_tuple_sharding ||
+           op->getNumResults() == sharding->tuple_shardings_size());
     for (auto [index, result] : llvm::enumerate(op->getResults())) {
+      // If `sharding` is not a tuple sharding, then every `get-tuple-element`
+      // gets the same sharding.
       xla::XlaScopedShardingAssignment scoped_sharding(
-          ctx.builder, tuple_sharding->tuple_shardings(index));
+          ctx.builder,
+          is_tuple_sharding ? sharding->tuple_shardings(index) : sharding);
       (*ctx.values)[result] = xla::GetTupleElement(tuple, index);
     }
   } else {
@@ -3170,6 +3174,8 @@ LogicalResult ConvertToHloModule::Lower(
         CreateArrayLiteralFromAttr(const_attr, shape_or->layout());
     if (!literal_or.ok())
       return inst->emitError(literal_or.status().ToString());
+    xla::XlaScopedShardingAssignment scoped_sharding(
+        builder, CreateOpShardingFromAttribute(inst));
     auto constant = xla::ConstantLiteral(builder, literal_or.value());
     value_map[inst->getResult(0)] = constant;
 

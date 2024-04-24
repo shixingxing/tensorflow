@@ -85,8 +85,7 @@ static hipDeviceptr_t AsROCmDevicePtr(DeviceMemoryBase* gpu_mem) {
 }
 
 static GpuContext* GetGpuContext(Stream* stream) {
-  return static_cast<GpuExecutor*>(stream->parent()->implementation())
-      ->gpu_context();
+  return static_cast<GpuExecutor*>(stream->parent())->gpu_context();
 }
 
 GpuContext* ExtractGpuContext(GpuExecutor* rocm_exec) {
@@ -573,12 +572,6 @@ absl::Status GpuExecutor::SynchronousMemcpy(void* host_dst,
                                          AsROCmDevicePtr(gpu_src), size);
 }
 
-absl::Status GpuExecutor::SynchronousMemcpyDeviceToDevice(
-    DeviceMemoryBase* gpu_dst, const DeviceMemoryBase& gpu_src, uint64_t size) {
-  return GpuDriver::SynchronousMemcpyD2D(context_, AsROCmDevicePtr(gpu_dst),
-                                         AsROCmDevicePtr(gpu_src), size);
-}
-
 absl::Status GpuExecutor::MemZero(Stream* stream, DeviceMemoryBase* location,
                                   uint64_t size) {
   if (reinterpret_cast<uintptr_t>(location->opaque()) % 4 == 0 &&
@@ -713,9 +706,11 @@ bool GpuExecutor::AllocateStream(Stream* stream) {
 }
 
 void GpuExecutor::DeallocateStream(Stream* stream) {
-  dnn::DnnSupport* dnn = AsDnn();
-  if (dnn) {
-    dnn->NotifyStreamDestroyed(stream);
+  {
+    absl::MutexLock lock(&mu_);
+    if (dnn_ != nullptr) {
+      dnn_->NotifyStreamDestroyed(stream);
+    }
   }
   GpuStream* rocm_stream = AsGpuStream(stream);
   absl::MutexLock l(&alive_gpu_streams_mu_);
