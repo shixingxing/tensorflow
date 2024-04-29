@@ -744,7 +744,7 @@ std::optional<HloSharding> ReshapeSharding(const Shape& source_shape,
       source_dim_product *= source_dims_stack.back();
       source_dims_stack.pop_back();
     }
-    while (!target_dims_stack.empty() &&
+    while (!target_dims_stack.empty() && target_dims_stack.back() > 1 &&
            source_dim_product % target_dims_stack.back() == 0) {
       source_dim_product /= target_dims_stack.back();
       target_dims_stack.pop_back();
@@ -754,9 +754,12 @@ std::optional<HloSharding> ReshapeSharding(const Shape& source_shape,
       source_dims_stack.push_back(source_dim_product);
       sharding_tile_dims_stack.push_back(1);
     }
-    if (source_dims_stack.empty() && target_dims_stack.empty()) {
+
+    if (target_dims_stack.empty()) {
       break;
     }
+    int64_t t_size = target_dims_stack.back();
+    target_dims_stack.pop_back();
 
     int64_t s_size = 1;
     int64_t s_partitions = 1;
@@ -767,12 +770,6 @@ std::optional<HloSharding> ReshapeSharding(const Shape& source_shape,
       sharding_tile_dims_stack.pop_back();
     }
 
-    if (target_dims_stack.empty()) {
-      return std::nullopt;
-    }
-    int64_t t_size = target_dims_stack.back();
-    target_dims_stack.pop_back();
-
     if (s_partitions > 1 && s_size % s_partitions == 0 &&
         t_size % s_partitions == 0) {
       // If s_partitions evenly divides both s_size and t_size, we can add this
@@ -782,11 +779,14 @@ std::optional<HloSharding> ReshapeSharding(const Shape& source_shape,
       sharding_tile_dims_stack.push_back(1);
       append_sharding_dim(s_partitions);
       inplace_add_sharding_dim = true;
-      continue;
-    }
-    if (s_size == t_size) {
+    } else if (s_size == t_size) {
       // Same dimension.
       append_sharding_dim(s_partitions);
+    } else if (t_size == 1) {
+      // Trivial dimension added.
+      append_sharding_dim(1);
+      source_dims_stack.push_back(s_size);
+      sharding_tile_dims_stack.push_back(s_partitions);
     } else if (s_size == 1) {
       // Trivial dimension removed.
       target_dims_stack.push_back(t_size);

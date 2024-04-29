@@ -239,6 +239,75 @@ TEST(HloShardingUtilTest, ReshapeShardingScalar) {
   EXPECT_FALSE(result.has_value());
 }
 
+TEST(HloShardingUtilTest, ReshapeShardingSuffixShapeSizeOne1) {
+  Shape input_shape = ShapeUtil::MakeShape(F32, {64, 1, 1});
+  Shape output_shape = ShapeUtil::MakeShape(F32, {64, 1});
+  HloSharding input_sharding = HloSharding::IotaTile({4, 1, 1});
+  HloSharding output_sharding = HloSharding::IotaTile({4, 1});
+
+  std::optional<HloSharding> result =
+      ReshapeSharding(input_shape, output_shape, input_sharding);
+  EXPECT_TRUE(result.has_value());
+  EXPECT_EQ(result.value(), output_sharding);
+
+  result = ReshapeSharding(output_shape, input_shape, output_sharding);
+  EXPECT_TRUE(result.has_value());
+  EXPECT_EQ(result.value(), input_sharding);
+}
+
+TEST(HloShardingUtilTest, ReshapeShardingSuffixShapeSizeOne2) {
+  Shape input_shape = ShapeUtil::MakeShape(F32, {64, 1, 1});
+  Shape output_shape = ShapeUtil::MakeShape(F32, {64, 1});
+  HloSharding input_sharding = HloSharding::IotaTile({4, 2, 8});
+  HloSharding output_sharding =
+      HloSharding::PartialTile(TileAssignment({4, 2, 8}));
+  std::optional<HloSharding> result =
+      ReshapeSharding(input_shape, output_shape, input_sharding);
+  EXPECT_TRUE(result.has_value());
+  EXPECT_EQ(result.value(), output_sharding);
+}
+
+TEST(HloShardingUtilTest, ReshapeShardingSuffixShapeSizeOne3) {
+  Shape input_shape = ShapeUtil::MakeShape(F32, {64, 1});
+  Shape output_shape = ShapeUtil::MakeShape(F32, {64, 1, 1});
+  HloSharding input_sharding = HloSharding::IotaTile({4, 2});
+  HloSharding output_sharding = HloSharding::IotaTile({4, 2, 1});
+  std::optional<HloSharding> result =
+      ReshapeSharding(input_shape, output_shape, input_sharding);
+  EXPECT_TRUE(result.has_value());
+  EXPECT_EQ(result.value(), output_sharding);
+}
+
+TEST(HloShardingUtilTest, ReshapeShardingPrefixShapeSizeOne1) {
+  Shape input_shape = ShapeUtil::MakeShape(F32, {1, 1, 64});
+  Shape output_shape = ShapeUtil::MakeShape(F32, {1, 64});
+  HloSharding input_sharding = HloSharding::IotaTile({1, 1, 4});
+  HloSharding output_sharding = HloSharding::IotaTile({1, 4});
+  std::optional<HloSharding> result =
+      ReshapeSharding(input_shape, output_shape, input_sharding);
+  EXPECT_TRUE(result.has_value());
+  EXPECT_EQ(result.value(), output_sharding);
+
+  result = ReshapeSharding(output_shape, input_shape, output_sharding);
+  EXPECT_TRUE(result.has_value());
+  EXPECT_EQ(result.value(), input_sharding);
+}
+
+TEST(HloShardingUtilTest, ReshapeShardingPrefixShapeSizeOne2) {
+  Shape input_shape = ShapeUtil::MakeShape(F32, {1, 1, 64});
+  Shape output_shape = ShapeUtil::MakeShape(F32, {1, 64});
+  HloSharding input_sharding = HloSharding::IotaTile({2, 1, 1});
+  HloSharding output_sharding = HloSharding::IotaTile({2, 1});
+  std::optional<HloSharding> result =
+      ReshapeSharding(input_shape, output_shape, input_sharding);
+  EXPECT_TRUE(result.has_value());
+  EXPECT_EQ(result.value(), output_sharding);
+
+  result = ReshapeSharding(output_shape, input_shape, output_sharding);
+  EXPECT_TRUE(result.has_value());
+  EXPECT_EQ(result.value(), input_sharding);
+}
+
 TEST(HloShardingUtilTest, ReshapeShardingTranspose1) {
   Shape input_shape = ShapeUtil::MakeShape(F32, {6, 2, 5});
   Shape output_shape = ShapeUtil::MakeShape(F32, {4, 3, 5});

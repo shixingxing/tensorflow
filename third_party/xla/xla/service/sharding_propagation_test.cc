@@ -1508,7 +1508,7 @@ ENTRY %reshape {
   }
 }
 
-TEST_P(ParameterizedMetadataTest, ReshapeForwardPassTranspose1) {
+TEST_P(ParameterizedMetadataTest, ReshapeForwardPassTranspose) {
   const char* const hlo_string = R"(
 HloModule module
 ENTRY %reshape {
