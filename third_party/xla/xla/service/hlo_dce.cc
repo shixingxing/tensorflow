@@ -35,7 +35,6 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/status.h"
 #include "xla/statusor.h"
 #include "xla/util.h"
 #include "tsl/platform/errors.h"
@@ -183,7 +182,7 @@ bool IsRemovableWhile(HloInstruction* instruction,
   return changed;
 }
 
-Status HloDCE::RecursivelyRemoveDeadComputation(
+absl::Status HloDCE::RecursivelyRemoveDeadComputation(
     HloModule* module, HloComputation* computation,
     absl::flat_hash_map<HloComputation*, int>& live_call_counts) {
   std::vector<HloComputation*> to_be_deleted;
@@ -219,7 +218,7 @@ Status HloDCE::RecursivelyRemoveDeadComputation(
     TF_RETURN_IF_ERROR(
         RecursivelyRemoveDeadComputation(module, subcomp, live_call_counts));
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 absl::StatusOr<bool> HloDCE::RecursivelyRemoveDeadComputations(

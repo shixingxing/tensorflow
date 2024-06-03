@@ -47,7 +47,6 @@ limitations under the License.
 #include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/status.h"
 #include "xla/util.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/statusor.h"
@@ -275,10 +274,11 @@ absl::InlinedVector<HloInstruction*, 4> GetPatternCaptures(
   return captures;
 }
 
-Status CreateRootTuple(HloInstruction* hero, HloComputation::Builder& builder,
-                       DataflowPathsView sliced_user_paths,
-                       absl::flat_hash_map<const HloInstruction*,
-                                           HloInstruction*>& instr_mapping) {
+absl::Status CreateRootTuple(
+    HloInstruction* hero, HloComputation::Builder& builder,
+    DataflowPathsView sliced_user_paths,
+    absl::flat_hash_map<const HloInstruction*, HloInstruction*>&
+        instr_mapping) {
   unsigned tuple_size = hero->shape().tuple_shapes_size();
 
   std::vector<HloInstruction*> sliced_elems(tuple_size, nullptr);

@@ -30,6 +30,7 @@ limitations under the License.
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "xla/hlo/ir/hlo_instruction.h"
@@ -39,7 +40,6 @@ limitations under the License.
 #include "xla/service/hlo_phi_graph.h"
 #include "xla/service/hlo_value.h"
 #include "xla/shape_util.h"
-#include "xla/status.h"
 #include "xla/statusor.h"
 #include "xla/xla_data.pb.h"
 
@@ -226,7 +226,7 @@ class HloDataflowAnalysis {
   GetInPlaceInputOutputPairs(const HloInstruction* instruction);
 
   // Verifies various invariants of the dataflow analysis.
-  Status Verify() const;
+  absl::Status Verify() const;
 
  private:
   static bool AreTransitiveUsesElementwiseOrTuple(const HloInstruction* inst);
@@ -264,7 +264,7 @@ class HloDataflowAnalysis {
   // Constructs and initializes the InstructionValueSets of all instructions to
   // contain exactly the HloValues defined by each instruction. These values can
   // then propagated throughout the HLO graph by calling Propagate.
-  Status InitializeInstructionValueSets();
+  absl::Status InitializeInstructionValueSets();
 
   // Updates the value set of the given instruction based on the values flowing
   // into the instruction (operands and cross-computation dataflow).

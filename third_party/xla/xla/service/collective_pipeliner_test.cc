@@ -22,6 +22,7 @@ limitations under the License.
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/log/check.h"
+#include "absl/status/status.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
@@ -31,7 +32,6 @@ limitations under the License.
 #include "xla/hlo/utils/hlo_matchers.h"
 #include "xla/service/hlo_parser.h"
 #include "xla/service/hlo_pass_pipeline.h"
-#include "xla/status.h"
 #include "xla/statusor.h"
 #include "xla/tests/hlo_test_base.h"
 #include "xla/util.h"
@@ -1907,13 +1907,13 @@ TEST_F(CollectivePipelinerTest,
     xla::FrontendAttributes attributes = instr->frontend_attributes();
     (*attributes.mutable_map())[kAttr] = "1";
     instr->set_frontend_attributes(attributes);
-    return OkStatus();
+    return absl::OkStatus();
   };
   auto postprocess_rotated = [&](HloInstruction* instr) {
     xla::FrontendAttributes attributes = instr->frontend_attributes();
     (*attributes.mutable_map())[kAttr] = "2";
     instr->set_frontend_attributes(attributes);
-    return OkStatus();
+    return absl::OkStatus();
   };
   auto module = ParseAndReturnUnverifiedModule(hlo_string, config_).value();
   EXPECT_TRUE(RunOptimizer(module.get(), /*last_run=*/true, 0,

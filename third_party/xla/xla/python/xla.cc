@@ -643,12 +643,14 @@ NB_MODULE(xla_extension, m_nb) {
       .def(
           "wait_at_barrier",
           [](DistributedRuntimeClient& client, std::string barrier_id,
-             int64_t timeout_in_ms) {
+             int64_t timeout_in_ms,
+             std::optional<std::vector<int32_t>> process_ids) {
             nb::gil_scoped_release gil_release;
             xla::ThrowIfError(client.WaitAtBarrier(
-                barrier_id, absl::Milliseconds(timeout_in_ms)));
+                barrier_id, absl::Milliseconds(timeout_in_ms), process_ids));
           },
-          nb::arg("barrier_id"), nb::arg("timeout_in_ms"))
+          nb::arg("barrier_id"), nb::arg("timeout_in_ms"),
+          nb::arg("process_ids") = std::nullopt)
       // The key must be a string, but the value can either be a Python string
       // or bytes object.
       // With Python string values, use `key_value_set()` and
@@ -658,32 +660,34 @@ NB_MODULE(xla_extension, m_nb) {
       .def(
           "key_value_set",
           [](DistributedRuntimeClient& client, std::string_view key,
-             std::string_view value) {
+             std::string_view value, bool allow_overwrite) {
             nb::gil_scoped_release gil_release;
-            xla::ThrowIfError(client.KeyValueSet(key, value));
+            xla::ThrowIfError(client.KeyValueSet(key, value, allow_overwrite));
           },
-          nb::arg("key"), nb::arg("value"))
+          nb::arg("key"), nb::arg("value"), nb::arg("allow_overwrite") = false)
       .def(
           "key_value_set",
           [](DistributedRuntimeClient& client, std::string_view key,
-             nb::bytes value) {
+             nb::bytes value, bool allow_overwrite) {
             nb::gil_scoped_release gil_release;
             xla::ThrowIfError(client.KeyValueSet(
-                key, std::string_view(value.c_str(), value.size())));
+                key, std::string_view(value.c_str(), value.size()),
+                allow_overwrite));
           },
-          nb::arg("key"), nb::arg("value"))
+          nb::arg("key"), nb::arg("value"), nb::arg("allow_overwrite") = false)
       // The key must be a string, but the value must a
       // Python bytes object.
       // Use `key_value_set_bytes()` and `blocking_key_value_get_bytes()`.
       .def(
           "key_value_set_bytes",
           [](DistributedRuntimeClient& client, std::string_view key,
-             nb::bytes value) {
+             nb::bytes value, bool allow_overwrite) {
             nb::gil_scoped_release gil_release;
             xla::ThrowIfError(client.KeyValueSet(
-                key, std::string_view(value.c_str(), value.size())));
+                key, std::string_view(value.c_str(), value.size()),
+                allow_overwrite));
           },
-          nb::arg("key"), nb::arg("value"))
+          nb::arg("key"), nb::arg("value"), nb::arg("allow_overwrite") = false)
       // Assumes that all values in the directory are Python strings.
       .def(
           "key_value_dir_get",
@@ -716,7 +720,7 @@ NB_MODULE(xla_extension, m_nb) {
           "key_value_delete",
           [](DistributedRuntimeClient& client, std::string_view key) {
             nb::gil_scoped_release gil_release;
-            return client.KeyValueDelete(key);
+            return xla::ThrowIfError(client.KeyValueDelete(key));
           },
           nb::arg("key"));
 

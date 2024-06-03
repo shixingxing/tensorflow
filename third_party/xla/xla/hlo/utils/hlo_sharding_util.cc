@@ -43,6 +43,7 @@ limitations under the License.
 #include "xla/array.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_computation.h"
+#include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/ir/hlo_sharding.h"
@@ -53,10 +54,10 @@ limitations under the License.
 #include "xla/service/call_graph.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/status.h"
-#include "xla/statusor.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
+#include "tsl/platform/errors.h"
+#include "tsl/platform/statusor.h"
 
 namespace xla {
 namespace hlo_sharding_util {
@@ -350,6 +351,13 @@ bool MergeShardingIfCompatible(const HloSharding& to_merge,
     }
   }
 
+  const int64_t num_devices = to_merge.tile_assignment().num_elements();
+  const int64_t new_num_tiles = Product(merged_tile_dims);
+  if (num_devices % new_num_tiles != 0 || new_num_tiles < minimum_tiles) {
+    return false;
+  }
+  int64_t replication;
+
   if (to_merge_man_dim >= 0) {
     int64_t man_group_size = to_merge.tile_assignment().dim(to_merge_man_dim);
     if (man_group_size != dst->tile_assignment().dim(dst_man_dim)) {
@@ -363,14 +371,14 @@ bool MergeShardingIfCompatible(const HloSharding& to_merge,
     merged_tile_dims.push_back(man_group_size);
     num_merge_groups *= man_group_size;
     num_dst_groups *= man_group_size;
+    if (num_devices % (new_num_tiles * man_group_size) != 0) {
+      return false;
+    }
+    replication = num_devices / (new_num_tiles * man_group_size);
+  } else {
+    replication = num_devices / new_num_tiles;
   }
 
-  const int64_t num_devices = to_merge.tile_assignment().num_elements();
-  const int64_t new_num_tiles = Product(merged_tile_dims);
-  if (num_devices % new_num_tiles != 0 || new_num_tiles < minimum_tiles) {
-    return false;
-  }
-  const int64_t replication = num_devices / new_num_tiles;
   if (replication > 1) {
     merged_tile_dims.push_back(replication);
   }
@@ -487,7 +495,7 @@ bool MergeShardingIfCompatible(const HloSharding& to_merge,
     };
     // Try to find the intersection of to_merge and dst replication groups, in
     // order to determine the merged tile assignment.
-    Status compatible =
+    absl::Status compatible =
         new_tile_array.EachStatus([&](absl::Span<const int64_t> indices,
                                       int64_t* device) -> absl::Status {
           DimensionVector to_merge_index(
@@ -529,7 +537,7 @@ bool MergeShardingIfCompatible(const HloSharding& to_merge,
               *device = *it1;
               gm1.erase(it1);
               gm2.erase(it2);
-              return OkStatus();
+              return absl::OkStatus();
             } else if (*it1 < *it2) {
               it1++;
             } else {
@@ -813,6 +821,7 @@ std::optional<HloSharding> ReshapeSharding(const Shape& source_shape,
         source_dims_stack.push_back(s_size / t_size);
         sharding_tile_dims_stack.push_back(s_partitions / t_size);
       } else {
+        append_sharding_dim(std::gcd(t_size, s_partitions));
         break;
       }
     } else {
@@ -1856,7 +1865,7 @@ IdentityValueAndHloOpcodeForScatterReduceComputation(
   auto computation = scatter.to_apply();
   // We only handle computations with 2 parameters and only 1 calculation.
   if (computation->instruction_count() != 3) {
-    return Status(
+    return absl::Status(
         absl::StatusCode::kInvalidArgument,
         "Expected scatter reduce computation with 2 parameters and only 1 "
         "calculation");
@@ -1883,9 +1892,9 @@ IdentityValueAndHloOpcodeForScatterReduceComputation(
                           root_instruction->opcode());
   }
 
-  return Status(absl::StatusCode::kInvalidArgument,
-                "Expected scatter reduce computation which is "
-                "add/or/multiply/add/min/max");
+  return absl::Status(absl::StatusCode::kInvalidArgument,
+                      "Expected scatter reduce computation which is "
+                      "add/or/multiply/add/min/max");
 }
 
 namespace {
@@ -2236,6 +2245,19 @@ std::optional<GatherScatterParallelDims> GetGatherScatterBatchParallelDims(
   absl::InlinedVector<const HloIotaInstruction*, 4> iotas;
   const int num_indices = index_map.size();
   std::vector<int64_t> index_parallel_in_dim(num_indices, -1);
+
+  // looks through any copies to find the concatenate.
+  auto findConcatenate = [&](const HloInstruction* indices) {
+    const HloInstruction* orig_indices = indices;
+    while (indices->opcode() == HloOpcode::kCopy) {
+      indices = indices->operand(0);
+    }
+    if (indices->opcode() == HloOpcode::kConcatenate) {
+      return indices;
+    }
+    return orig_indices;
+  };
+  indices = findConcatenate(indices);
   // Handle cases where we concatenate pieces of the indices one at a time.
   if (indices->opcode() == HloOpcode::kConcatenate &&
       indices->concatenate_dimension() == index_vector_dim) {
@@ -3144,6 +3166,43 @@ Shape TileLeafShape(const HloSharding& sharding, const Shape& shape) {
         i, shape.dimensions(i) / sharding.tile_assignment().dim(i));
   }
   return result_shape;
+}
+
+absl::Status CanonicalizeLayoutAfterShardingPropagation(
+    HloModule* module, bool update_output_layout,
+    bool update_parameters_layout) {
+  if (!update_output_layout && !update_parameters_layout) {
+    return absl::OkStatus();
+  }
+  if (!module->layout_canonicalization_callback()) {
+    LOG(INFO) << "There is no registered layout_canonicalization_callback.";
+    return absl::OkStatus();
+  }
+  TF_ASSIGN_OR_RETURN(auto shapes_with_layout,
+                      module->layout_canonicalization_callback()(*module));
+
+  if (update_output_layout &&
+      module->entry_computation_layout().result_layout().LayoutIsSet()) {
+    TF_RETURN_IF_ERROR(module->mutable_entry_computation_layout()
+                           ->mutable_result_layout()
+                           ->CopyLayoutFromShape(shapes_with_layout.second));
+  }
+
+  if (update_parameters_layout) {
+    for (int64_t i = 0; i < module->entry_computation()->num_parameters();
+         ++i) {
+      if (module->entry_computation_layout()
+              .parameter_layout(i)
+              .LayoutIsSet()) {
+        TF_RETURN_IF_ERROR(
+            module->mutable_entry_computation_layout()
+                ->mutable_parameter_layout(i)
+                ->CopyLayoutFromShape(shapes_with_layout.first[i]));
+      }
+    }
+  }
+
+  return absl::OkStatus();
 }
 
 }  // namespace hlo_sharding_util

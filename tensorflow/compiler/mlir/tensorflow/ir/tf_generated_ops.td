@@ -6230,7 +6230,9 @@ See also `tf.gather` and `tf.batch_gather`.
 
   let arguments = (ins
     Arg<TF_Tensor, [{The tensor from which to gather values.}]>:$params,
-    Arg<TensorOf<[TF_Int16, TF_Int32, TF_Int64]>, [{Index tensor.}]>:$indices
+    Arg<TensorOf<[TF_Int16, TF_Int32, TF_Int64]>, [{Index tensor.}]>:$indices,
+
+    DefaultValuedOptionalAttr<StrAttr, "\"\"">:$bad_indices_policy
   );
 
   let results = (outs
@@ -6273,6 +6275,10 @@ indices.shape[batch_dims:] + params.shape[axis + 1:]` where:
 Note that on CPU, if an out of bound index is found, an error is returned.
 On GPU, if an out of bound index is found, a 0 is stored in the
 corresponding output value.
+
+Note that on TPU, if any dimension of `params` is of size 0 then the output will
+be the expected shape filled with zeros. On CPU and GPU an error will be
+returned.
 
 See also `tf.batch_gather` and `tf.gather_nd`.
   }];

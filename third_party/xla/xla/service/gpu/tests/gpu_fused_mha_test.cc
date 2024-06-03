@@ -24,8 +24,6 @@ limitations under the License.
 #include "absl/algorithm/container.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/match.h"
-#include "absl/strings/str_cat.h"
-#include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "xla/array4d.h"
 #include "xla/client/xla_builder.h"
@@ -85,26 +83,22 @@ class MultiHeadedAttentionTest : public GpuCodegenTest {
         .cuda_compute_capability();
   }
 
-  ErrorSpec error_spec_{2.5E-3, 1e-5};
+  ErrorSpec mha_error_spec_{2.5E-3, 1e-5};
 
  protected:
   DebugOptions GetDebugOptionsForTest() override {
     auto debug_options = HloTestBase::GetDebugOptionsForTest();
-    debug_options.set_xla_gpu_enable_xla_runtime_executable(false);
-    debug_options.set_xla_gpu_enable_cudnn_fmha(false);
+    debug_options.set_xla_gpu_enable_cudnn_fmha(true);
     return debug_options;
   }
 
-  absl::StatusOr<int> CountFMHACalls(absl::string_view hlo_string,
-                                     const HloModuleConfig &config) {
-    TF_ASSIGN_OR_RETURN(std::unique_ptr<HloModule> verified_module,
-                        ParseAndReturnVerifiedModule(hlo_string, config));
-
-    TF_ASSIGN_OR_RETURN(std::unique_ptr<HloModule> optimized_verified_module,
-                        GetOptimizedModule(std::move(verified_module)));
+  absl::StatusOr<int> CountFMHACalls(
+      std::unique_ptr<HloModule> unoptimized_module) {
+    TF_ASSIGN_OR_RETURN(std::unique_ptr<HloModule> optimized_module,
+                        GetOptimizedModule(std::move(unoptimized_module)));
 
     return absl::c_count_if(
-        optimized_verified_module->entry_computation()->instructions(),
+        optimized_module->entry_computation()->instructions(),
         [&](const HloInstruction *inst) {
           return inst->opcode() == HloOpcode::kCustomCall &&
                  absl::StrContains(inst->custom_call_target(), "__cudnn$fmha");
@@ -114,32 +108,30 @@ class MultiHeadedAttentionTest : public GpuCodegenTest {
   void ExecuteAndCompare(absl::string_view hlo_string,
                          const std::vector<Literal *> &literals,
                          int expected_num_fmha_calls = 1) {
-    HloModuleConfig config;
-    DebugOptions debug_options = GetDebugOptionsForTest();
-    config.set_debug_options(debug_options);
-    TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
-                            ParseAndReturnVerifiedModule(hlo_string, config));
-    auto expected_result = ExecuteAndTransfer(std::move(module), literals);
-
+    TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> reference_module,
+                            ParseAndReturnVerifiedModule(hlo_string));
+    {
+      DebugOptions debug_options = GetDebugOptionsForTest();
+      debug_options.set_xla_gpu_enable_cudnn_fmha(false);
+      reference_module->mutable_config().set_debug_options(debug_options);
+    }
     // Sanity check to ensure the first computation doesn't use FMHA.
     TF_ASSERT_OK_AND_ASSIGN(int num_fmha_calls,
-                            CountFMHACalls(hlo_string, config));
+                            CountFMHACalls(reference_module->Clone()));
     EXPECT_EQ(num_fmha_calls, 0);
+    const Literal expected_result =
+        ExecuteAndTransfer(std::move(reference_module), literals);
 
-    debug_options.set_xla_gpu_enable_cudnn_fmha(true);
-    HloModuleConfig config_with_fmha;
-    config_with_fmha.set_debug_options(debug_options);
-
-    TF_ASSERT_OK_AND_ASSIGN(
-        std::unique_ptr<HloModule> new_module,
-        ParseAndReturnVerifiedModule(hlo_string, config_with_fmha));
-    auto actual_result = ExecuteAndTransfer(std::move(new_module), literals);
-    EXPECT_TRUE(
-        LiteralTestUtil::Near(expected_result, actual_result, error_spec_));
-
+    TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> test_module,
+                            ParseAndReturnVerifiedModule(hlo_string));
     TF_ASSERT_OK_AND_ASSIGN(num_fmha_calls,
-                            CountFMHACalls(hlo_string, config_with_fmha));
+                            CountFMHACalls(test_module->Clone()));
     EXPECT_EQ(num_fmha_calls, expected_num_fmha_calls);
+    const Literal actual_result =
+        ExecuteAndTransfer(std::move(test_module), literals);
+
+    EXPECT_TRUE(
+        LiteralTestUtil::Near(expected_result, actual_result, mha_error_spec_));
   }
 
   template <typename T>
@@ -360,7 +352,7 @@ class FlashAttentionBMMScaleCausalMaskSoftmaxBMM
   template <typename T>
   void TestImpl_Flash_Attention_BMM1_CausalMask_Softmax_BMM2() {
     if (skip_reason_) GTEST_SKIP() << *skip_reason_;
-    if (GetDnnVersionInfo(backend().default_stream_executor()) <
+    if (GetDnnVersionInfoOrDefault(backend().default_stream_executor()) <
         se::dnn::VersionInfo(8, 9, 4)) {
       GTEST_SKIP() << "Flash Attention requires cuDNN >= 8.9.4.";
     }
@@ -381,7 +373,7 @@ class FlashAttentionBMMScaleCausalMaskSoftmaxBMM
   template <typename T>
   void TestImpl_Flash_Attention_Training_BMM1_CausalMask_Softmax_BMM2() {
     if (skip_reason_) GTEST_SKIP() << *skip_reason_;
-    if (GetDnnVersionInfo(backend().default_stream_executor()) <
+    if (GetDnnVersionInfoOrDefault(backend().default_stream_executor()) <
         se::dnn::VersionInfo(8, 9, 4)) {
       GTEST_SKIP() << "Flash Attention requires cuDNN >= 8.9.4.";
     }
@@ -676,7 +668,7 @@ class FlashAttentionBMMScaleBiasSoftmaxBMM : public MultiHeadedAttentionTest {
   template <typename T>
   void TestImpl_Flash_Attention_BMM1_Bias_Softmax_BMM2() {
     if (skip_reason_) GTEST_SKIP() << *skip_reason_;
-    if (GetDnnVersionInfo(backend().default_stream_executor()) <
+    if (GetDnnVersionInfoOrDefault(backend().default_stream_executor()) <
         se::dnn::VersionInfo(8, 9, 4)) {
       GTEST_SKIP() << "Flash Attention requires cuDNN >= 8.9.4.";
     }
@@ -698,7 +690,7 @@ class FlashAttentionBMMScaleBiasSoftmaxBMM : public MultiHeadedAttentionTest {
   template <typename T>
   void TestImpl_Flash_Attention_Training_BMM1_Bias_Softmax_BMM2() {
     if (skip_reason_) GTEST_SKIP() << *skip_reason_;
-    if (GetDnnVersionInfo(backend().default_stream_executor()) <
+    if (GetDnnVersionInfoOrDefault(backend().default_stream_executor()) <
         se::dnn::VersionInfo(8, 9, 4)) {
       GTEST_SKIP() << "Flash Attention requires cuDNN >= 8.9.4.";
     }
@@ -723,7 +715,7 @@ class FlashAttentionBMMScaleBiasSoftmaxBMM : public MultiHeadedAttentionTest {
   template <typename T>
   void TestImpl_Flash_Attention_BMM1_Bias_Softmax_BMM2_Cross_Attention() {
     if (skip_reason_) GTEST_SKIP() << *skip_reason_;
-    if (GetDnnVersionInfo(backend().default_stream_executor()) <
+    if (GetDnnVersionInfoOrDefault(backend().default_stream_executor()) <
         se::dnn::VersionInfo(8, 9, 4)) {
       GTEST_SKIP() << "Flash Attention cross attention requires "
                       "cuDNN >= 8.9.4.";
@@ -746,9 +738,12 @@ class FlashAttentionBMMScaleBiasSoftmaxBMM : public MultiHeadedAttentionTest {
   template <typename T>
   void TestImpl_Flash_Attention_BMM1_Bias_Softmax_BMM2_Dbias() {
     if (skip_reason_) GTEST_SKIP() << *skip_reason_;
-    if (GetDnnVersionInfo(backend().default_stream_executor()) <
-        se::dnn::VersionInfo(8, 9, 4)) {
-      GTEST_SKIP() << "Flash Attention requires cuDNN >= 8.9.4.";
+    auto cc = GetCudaComputeCapability();
+    if (GetDnnVersionInfoOrDefault(backend().default_stream_executor()) <
+            se::dnn::VersionInfo(8, 9, 6) ||
+        !cc.IsAtLeastHopper() || cc.minor != 0) {
+      GTEST_SKIP()
+          << "Flash Attention dbias requires cuDNN >= 8.9.6 and Hopper arch.";
     }
     XlaBuilder builder(TestName());
     auto lhs_bmm1_literal =
@@ -864,7 +859,7 @@ class FlashAttentionBMMScaleSoftmaxBMM : public MultiHeadedAttentionTest {
   template <typename T>
   void TestImpl_Flash_Attention_Training_BMM1_Softmax_BMM2() {
     if (skip_reason_) GTEST_SKIP() << *skip_reason_;
-    if (GetDnnVersionInfo(backend().default_stream_executor()) <
+    if (GetDnnVersionInfoOrDefault(backend().default_stream_executor()) <
         se::dnn::VersionInfo(8, 9, 4)) {
       GTEST_SKIP() << "Flash Attention requires cuDNN >= 8.9.4.";
     }
@@ -995,9 +990,9 @@ class FlashAttentionBMMScalePaddingMaskSoftmaxBMM
       Arg_2.3 = bf16[4,1024,4,64]{3,2,1,0} parameter(2)
       constant.5 = s32[] constant(512)
       broadcast.6 = s32[4]{0} broadcast(constant.5), dimensions={}
-      custom-call.7 = (bf16[4,4,1024,64]{3,1,2,0}, u8[0]{0}, f32[4,4,1024]{2,1,0}) custom-call(Arg_0.1, Arg_1.2, Arg_2.3, broadcast.6, broadcast.6), custom_call_target="__cudnn$fmhaSoftmax", operand_layout_constraints={bf16[4,1024,4,64]{3,2,1,0}, bf16[4,1024,4,64]{3,2,1,0}, bf16[4,1024,4,64]{3,2,1,0}, s32[4]{0}, s32[4]{0}}, api_version=API_VERSION_STATUS_RETURNING, backend_config={"operation_queue_id": "0", "wait_on_operation_queues": [], "cudnn_fmha_backend_config": {"algorithm": {"algo_id": "0", "math_type": "TENSOR_OP_MATH", "tuning_knobs": {"17": "1", "24": "0"}, "is_cudnn_frontend": true, "workspace_size": "0"}, "fmha_scale": 1.0, "dropout_rate": 0, "intermediate_tensor_shape": {"element_type": "BF16", "dimensions": ["4", "4", "1024", "1024"], "tuple_shapes": [], "layout": {"dim_level_types": [], "dim_unique": [], "dim_ordered": [], "minor_to_major": ["3", "2", "1", "0"], "tiles": [], "element_size_in_bits": "0", "memory_space": "0", "index_primitive_type": "PRIMITIVE_TYPE_INVALID", "pointer_primitive_type": "PRIMITIVE_TYPE_INVALID", "dynamic_shape_metadata_prefix_bytes": "0"}, "is_dynamic_dimension": [false, false, false, false]}, "seed": 42, "is_flash_attention": true, "mask_type": "PADDING", "bmm1_dot_dimension_numbers": {"lhs_contracting_dimensions": ["3"], "rhs_contracting_dimensions": ["3"], "lhs_batch_dimensions": ["0", "2"], "rhs_batch_dimensions": ["0", "2"]}, "bmm2_dot_dimension_numbers": {"lhs_contracting_dimensions": ["3"], "rhs_contracting_dimensions": ["1"], "lhs_batch_dimensions": ["0", "1"], "rhs_batch_dimensions": ["0", "2"]}}}
-      get-tuple-element.9 = u8[0]{0} get-tuple-element(custom-call.7), index=1
-      get-tuple-element.10 = f32[4,4,1024]{2,1,0} get-tuple-element(custom-call.7), index=2
+      custom-call.7 = (bf16[4,4,1024,64]{3,1,2,0}, f32[4,4,1024]{2,1,0}, u8[0]{0}) custom-call(Arg_0.1, Arg_1.2, Arg_2.3, broadcast.6, broadcast.6), custom_call_target="__cudnn$fmhaSoftmax", operand_layout_constraints={bf16[4,1024,4,64]{3,2,1,0}, bf16[4,1024,4,64]{3,2,1,0}, bf16[4,1024,4,64]{3,2,1,0}, s32[4]{0}, s32[4]{0}}, api_version=API_VERSION_STATUS_RETURNING, backend_config={"operation_queue_id": "0", "wait_on_operation_queues": [], "cudnn_fmha_backend_config": {"algorithm": {"algo_id": "0", "math_type": "TENSOR_OP_MATH", "tuning_knobs": {"17": "1", "24": "0"}, "is_cudnn_frontend": true, "workspace_size": "0"}, "fmha_scale": 1.0, "dropout_rate": 0, "intermediate_tensor_shape": {"element_type": "BF16", "dimensions": ["4", "4", "1024", "1024"], "tuple_shapes": [], "layout": {"dim_level_types": [], "dim_unique": [], "dim_ordered": [], "minor_to_major": ["3", "2", "1", "0"], "tiles": [], "element_size_in_bits": "0", "memory_space": "0", "index_primitive_type": "PRIMITIVE_TYPE_INVALID", "pointer_primitive_type": "PRIMITIVE_TYPE_INVALID", "dynamic_shape_metadata_prefix_bytes": "0"}, "is_dynamic_dimension": [false, false, false, false]}, "seed": 42, "is_flash_attention": true, "mask_type": "PADDING", "bmm1_dot_dimension_numbers": {"lhs_contracting_dimensions": ["3"], "rhs_contracting_dimensions": ["3"], "lhs_batch_dimensions": ["0", "2"], "rhs_batch_dimensions": ["0", "2"]}, "bmm2_dot_dimension_numbers": {"lhs_contracting_dimensions": ["3"], "rhs_contracting_dimensions": ["1"], "lhs_batch_dimensions": ["0", "1"], "rhs_batch_dimensions": ["0", "2"]}}}
+      get-tuple-element.9 = u8[0]{0} get-tuple-element(custom-call.7), index=2
+      get-tuple-element.10 = f32[4,4,1024]{2,1,0} get-tuple-element(custom-call.7), index=1
       Arg_3.4 = bf16[4,1024,4,64]{3,2,1,0} parameter(3)
       get-tuple-element.8 = bf16[4,4,1024,64]{3,1,2,0} get-tuple-element(custom-call.7), index=0
       transpose.11 = bf16[4,1024,4,64]{3,2,1,0} transpose(get-tuple-element.8), dimensions={0,2,1,3}
@@ -1018,7 +1013,7 @@ class FlashAttentionBMMScalePaddingMaskSoftmaxBMM
   template <typename T>
   void TestImpl_Flash_Attention_Training_BMM1_PaddingMask_Softmax_BMM2() {
     if (skip_reason_) GTEST_SKIP() << *skip_reason_;
-    if (GetDnnVersionInfo(backend().default_stream_executor()) <
+    if (GetDnnVersionInfoOrDefault(backend().default_stream_executor()) <
         se::dnn::VersionInfo(8, 9, 3)) {
       GTEST_SKIP() << "Flash Attention requires cuDNN >= 8.9.3.";
     }
@@ -1031,9 +1026,8 @@ class FlashAttentionBMMScalePaddingMaskSoftmaxBMM
     // so directly lower to custom call instead for reference
     std::string hlo_string_ref =
         GetModuleFlash_Attention_Training_BMM1_PaddingMask_Generation_Softmax_BMM2_HloString_BF16();  // NOLINT
-    HloModuleConfig config{};
-    EXPECT_TRUE(RunAndCompareTwoModules(hlo_string, hlo_string_ref, config,
-                                        config, ErrorSpec{1e-5, 1e-5}));
+    EXPECT_TRUE(RunAndCompareTwoModules(hlo_string, hlo_string_ref,
+                                        ErrorSpec{1e-5, 1e-5}));
   }
 };
 

@@ -4984,13 +4984,13 @@ static absl::StatusOr<cudnn_frontend::ExecutionPlan> GetExecPlanFromHeuristics(
     } else {
       VLOG(4) << "Failed to build cuDNN execution plan for opGraph "
               << opGraph.getTag()
-              << ". Status: " << CudnnStatusToString(status);
+              << ". absl::Status: " << CudnnStatusToString(status);
     }
   }
 
   LOG(FATAL) << "Failed to generate cuDNN execution plan for opGraph "
              << opGraph.getTag()
-             << ". Status of final plan: " << CudnnStatusToString(status);
+             << ". absl::Status of final plan: " << CudnnStatusToString(status);
 #else
   return absl::UnimplementedError("Supported only for cuDNN >= 8.8.0");
 #endif
@@ -5699,7 +5699,7 @@ class CudnnLegacyConvRunner : public dnn::ConvRunner {
         filter_(std::move(filter)),
         conv_(std::move(conv)) {}
 
-  // Internal form of ToAlgorithmDesc without the StatusOr.
+  // Internal form of ToAlgorithmDesc without the absl::StatusOr.
   dnn::AlgorithmDesc MakeAlgorithmDesc() const {
     return {algo_id_, tensor_ops_enabled_, workspace_size_};
   }
@@ -6054,7 +6054,7 @@ class CudnnExecutionPlanRunner<void(Args...)>
               << profile_result->elapsed_time_in_ms() << "ms";
     }
 
-    return tsl::OkStatus();
+    return absl::OkStatus();
   }
 
   static absl::StatusOr<CudnnExecutionPlanRunner> Create(
@@ -6172,7 +6172,7 @@ class CudnnGraphRunner<void(Args...)> : public dnn::OpRunner<void(Args...)> {
     RETURN_IF_CUDNN_FRONTEND_ERROR(graph_.Graph().execute(
         handle.handle(), variant_pack, scratch_memory.opaque()));
 
-    return tsl::OkStatus();
+    return absl::OkStatus();
   }
 
   static absl::StatusOr<CudnnGraphRunner> Create(
@@ -6712,7 +6712,7 @@ class CudnnLegacyFusedConvRunner : public dnn::FusedConvRunner {
         conv_(std::move(conv)),
         activation_desc_(std::move(activation_desc)) {}
 
-  // Internal form of ToAlgorithmDesc without the StatusOr.
+  // Internal form of ToAlgorithmDesc without the absl::StatusOr.
   dnn::AlgorithmDesc MakeAlgorithmDesc() const {
     return {algo_id_, tensor_ops_enabled_, workspace_size_};
   }
@@ -7059,7 +7059,7 @@ CudnnSupport::NormRunnerFromDesc(
   };
 
   auto create_cudnn_tensor = [next_uid](dnn::TensorDescriptor tensor_descriptor)
-      -> tsl::StatusOr<cudnn_frontend::Tensor> {
+      -> absl::StatusOr<cudnn_frontend::Tensor> {
     return CreateCudnnTensor(tensor_descriptor.dimensions(),
                              tensor_descriptor.GetPhysicalStridesMajorToMinor(),
                              next_uid(), tensor_descriptor.type(), 1, -1);
@@ -8403,9 +8403,7 @@ absl::Status CudnnGraph::Build(dnn::DnnSupport& dnn_support,
 
 absl::Status CudnnGraph::Execute(Stream& stream,
                                  absl::Span<DeviceMemoryBase> operands) const {
-  std::unordered_map<std::shared_ptr<cudnn_frontend::graph::Tensor_attributes>,
-                     void*>
-      tensor_to_ptr_map;
+  std::unordered_map<int64_t, void*> tensor_to_ptr_map;
   absl::Span<DeviceMemoryBase> operands_without_workspace = operands;
   DeviceMemoryBase workspace;
   if (graph_.get_workspace_size() != 0) {
@@ -8415,13 +8413,7 @@ absl::Status CudnnGraph::Execute(Stream& stream,
   }
   int operand_number = 0;
   for (DeviceMemoryBase operand : operands_without_workspace) {
-    const cudnn_frontend::graph::Tensor_attributes attr =
-        cudnn_frontend::graph::Tensor_attributes().set_uid(
-            CuDnnTensorUID(operand_number));
-    ++operand_number;
-    tensor_to_ptr_map
-        [std::make_shared<cudnn_frontend::graph::Tensor_attributes>(attr)] =
-            operand.opaque();
+    tensor_to_ptr_map[CuDnnTensorUID(operand_number++)] = operand.opaque();
   }
   const CudnnSupport& dnn_support =
       static_cast<CudnnSupport&>(*stream.parent()->AsDnn());

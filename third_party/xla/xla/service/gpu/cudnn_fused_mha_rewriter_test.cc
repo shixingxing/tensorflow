@@ -107,7 +107,6 @@ class CudnnFusedMhaRewriterTestHloTest : public HloTestBase {
 
   DebugOptions GetDebugOptionsForTest() override {
     auto debug_options = HloTestBase::GetDebugOptionsForTest();
-    debug_options.set_xla_gpu_enable_xla_runtime_executable(false);
     debug_options.set_xla_gpu_enable_cudnn_fmha(true);
     debug_options.set_xla_gpu_fused_attention_use_cudnn_rng(true);
     return debug_options;
@@ -3151,8 +3150,9 @@ TEST_F(CudnnFusedMhaRewriterTestHloTest, BF16Bmm1BiasSoftmaxBmm2PatternDbias) {
   TF_ASSERT_OK_AND_ASSIGN(
       auto m,
       ParseAndReturnVerifiedModule(hlo_BF16Bmm1BiasSoftmaxBmm2Pattern_dbias));
-  CudnnFusedMHARewriter fusedMhaRewriter{GetCudaComputeCapability(),
-                                         GetCudnnVersion()};
+  // require cudnn 8.9.6 + hopper for dbias
+  CudnnFusedMHARewriter fusedMhaRewriter{se::CudaComputeCapability(9, 0),
+                                         se::dnn::VersionInfo(8, 9, 6)};
   TF_ASSERT_OK(RunHloPass(&fusedMhaRewriter, m.get()).status());
 
   ComputationLayout computation_layout(
@@ -3187,7 +3187,7 @@ TEST_F(CudnnFusedMhaRewriterTestHloTest, BF16Bmm1BiasSoftmaxBmm2PatternDbias) {
           m::Reshape(
               m::GetTupleElement(
                   m::CustomCall({kCudnnfMHAScaleBiasSoftmaxBackwardCallTarget}),
-                  4))
+                  3))
               .WithShape(BF16, {4, 1024, 1024}))));
   TF_ASSERT_OK_AND_ASSIGN(auto gpu_config,
                           fmha->backend_config<GpuBackendConfig>());

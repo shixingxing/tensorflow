@@ -50,7 +50,6 @@ limitations under the License.
 #include "xla/service/gpu/triton_tiling_propagation.h"
 #include "xla/service/instruction_fusion.h"
 #include "xla/shape_util.h"
-#include "xla/status.h"
 #include "xla/stream_executor/device_description.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
@@ -739,7 +738,7 @@ class GemmFusionVisitor : public DfsHloRewriteVisitor {
               *Cast<HloDotInstruction>(dot),
               std::get<se::CudaComputeCapability>(gpu_version_)) &&
           !should_fuse) {
-        return OkStatus();
+        return absl::OkStatus();
       }
     }
 
