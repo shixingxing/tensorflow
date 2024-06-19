@@ -399,8 +399,8 @@ cc_library(
         "//xla/service:custom_call_target_registry",
         "//xla/service:platform_util",
         "//xla/tsl/concurrency:ref_count",
+        "//xla/tsl/framework:allocator",
         "//xla/tsl/python/lib/core:numpy",
-        "@local_tsl//tsl/framework:allocator",
         "@local_tsl//tsl/platform:casts",
         "@local_tsl//tsl/platform:errors",
         "@local_tsl//tsl/platform:fingerprint",
@@ -517,6 +517,7 @@ cc_library(
         "//xla:util",
         "//xla/pjrt:exceptions",
         "//xla/pjrt:pjrt_client",
+        "//xla/pjrt:pjrt_common",
         "//xla/pjrt:pjrt_compiler",
         "//xla/pjrt:pjrt_layout",
         "//xla/python/ifrt",
@@ -887,6 +888,7 @@ cc_library(
     visibility = [":friends"],
     deps = [
         ":nb_class_ptr",
+        ":nb_helpers",
         ":pytree_proto_cc",
         # placeholder for index annotation deps
         "@com_google_absl//absl/algorithm:container",
@@ -1068,9 +1070,8 @@ cc_library(
     features = ["-use_header_modules"],
     deps = [
         "//xla:util",
-        "//xla/pjrt:pjrt_client",
-        "//xla/pjrt:pjrt_future",
         "//xla/python/ifrt",
+        "//xla/tsl/concurrency:ref_count",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/types:span",
     ],
@@ -1380,6 +1381,7 @@ tsl_pybind_extension(
         "@local_tsl//tsl/platform:status",
         "@local_tsl//tsl/platform:statusor",
         "@local_tsl//tsl/platform/cloud:gcs_file_system",
+        "@llvm-project//llvm:Support",
         "@llvm-project//mlir:IR",
     ] + select({
         # gloo transport only builds on linux

@@ -92,6 +92,7 @@ using ::testing::HasSubstr;
 using ::testing::Invoke;
 using ::testing::Not;
 using ::testing::NotNull;
+using ::testing::Optional;
 using ::testing::Pointee;
 using ::testing::Return;
 using ::testing::ReturnRef;
@@ -644,6 +645,47 @@ TEST_F(IfrtBackendHandlerTest,
       StatusIs(absl::StatusCode::kUnknown, StrEq(kDisassembleErrorMessage)));
 }
 
+TEST_F(IfrtBackendHandlerTest, CopyArrays) {
+  std::vector<tsl::RCReference<xla::ifrt::Array>> src_arrays;
+  src_arrays.push_back(tsl::MakeRef<xla::ifrt::MockArray>());
+
+  std::vector<tsl::RCReference<xla::ifrt::Array>> copied_arrays;
+  copied_arrays.push_back(tsl::MakeRef<xla::ifrt::MockArray>());
+
+  DeviceList::Devices ds;
+  TF_ASSERT_OK_AND_ASSIGN(ds.emplace_back(),
+                          mock_client_->LookupDevice(DeviceId(1)));
+  DeviceList devices(std::move(ds));
+  MemoryKind memory_kind("device");
+
+  EXPECT_CALL(
+      *mock_client_,
+      CopyArrays(ElementsAreArray(src_arrays), Optional(devices),
+                 Optional(memory_kind), ArrayCopySemantics::kAlwaysCopy))
+      .WillOnce(Return(
+          std::vector<tsl::RCReference<xla::ifrt::Array>>(copied_arrays)));
+
+  auto ifrt_request = NewIfrtRequest(NewOpId());
+  auto* copy_arrays_request = ifrt_request->mutable_copy_arrays_request();
+  for (const auto& src_array : src_arrays) {
+    TF_ASSERT_OK_AND_ASSIGN(auto src_array_handle, MakeTestArray(src_array));
+    copy_arrays_request->add_array_handles(src_array_handle);
+  }
+  for (const auto& device : devices.devices()) {
+    copy_arrays_request->add_device_ids(device->Id().value());
+  }
+  copy_arrays_request->set_memory_kind(std::string(*memory_kind.memory_kind()));
+  copy_arrays_request->set_copy_semantics(
+      proto::ARRAY_COPY_SEMANTICS_ALWAYS_COPY);
+
+  TF_ASSERT_OK_AND_ASSIGN(auto response, CallBackend(std::move(ifrt_request)));
+
+  EXPECT_THAT(tsl::StatusFromProto(response->response_metadata().status()),
+              IsOk());
+  EXPECT_THAT(response->copy_arrays_response().array_handles(),
+              SizeIs(copied_arrays.size()));
+}
+
 TEST_F(IfrtBackendHandlerTest, ReshardSuccess) {
   auto src_mock_array = tsl::MakeRef<xla::ifrt::MockArray>();
   auto resharded_mock_array = tsl::MakeRef<xla::ifrt::MockArray>();
@@ -758,27 +800,27 @@ TEST_F(IfrtBackendHandlerTest, ReshardFailsWithNonExistentArrayHandle) {
 TEST_F(IfrtBackendHandlerTest,
        CheckArrayReadyRequestRelaysTheResultFromBackend) {
   auto mock_array = tsl::MakeRef<xla::ifrt::MockArray>();
-  EXPECT_CALL(*mock_array, GetReadyFuture())
-      .WillOnce(Return(Future<>(absl::OkStatus())))
-      .WillOnce(Return(Future<>(absl::UnknownError("injected error"))));
   TF_ASSERT_OK_AND_ASSIGN(auto array_handle,
                           MakeTestArray(std::move(mock_array)));
+  EXPECT_CALL(*mock_client_, GetReadyFuture(_))
+      .WillOnce(Return(Future<>(absl::OkStatus())))
+      .WillOnce(Return(Future<>(absl::UnknownError("injected error"))));
 
   {
     auto ifrt_request = NewIfrtRequest(NewOpId());
-    ifrt_request->mutable_check_array_ready_request()->set_array_handle(
+    ifrt_request->mutable_check_value_ready_request()->add_value_handles(
         array_handle);
     TF_ASSERT_OK_AND_ASSIGN(auto ifrt_response,
                             CallBackend(std::move(ifrt_request)));
 
     EXPECT_THAT(ifrt_response->response_metadata().status().code(),
                 tensorflow::error::OK);
-    EXPECT_TRUE(ifrt_response->has_check_array_ready_response());
+    EXPECT_TRUE(ifrt_response->has_check_value_ready_response());
   }
 
   {
     auto ifrt_request = NewIfrtRequest(NewOpId());
-    ifrt_request->mutable_check_array_ready_request()->set_array_handle(
+    ifrt_request->mutable_check_value_ready_request()->add_value_handles(
         array_handle);
     EXPECT_THAT(CallBackend(std::move(ifrt_request)),
                 StatusIs(absl::StatusCode::kUnknown, StrEq("injected error")));
@@ -788,7 +830,7 @@ TEST_F(IfrtBackendHandlerTest,
 TEST_F(IfrtBackendHandlerTest,
        CheckArrayReadyRequestFailsWithNonExistentArrayHandle) {
   auto ifrt_request = NewIfrtRequest(NewOpId());
-  ifrt_request->mutable_check_array_ready_request()->set_array_handle(0);
+  ifrt_request->mutable_check_value_ready_request()->add_value_handles(0);
   EXPECT_THAT(CallBackend(std::move(ifrt_request)),
               StatusIs(absl::StatusCode::kNotFound));
 }

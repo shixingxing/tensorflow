@@ -31,12 +31,12 @@ limitations under the License.
 #include "xla/service/instruction_fusion.h"
 #include "xla/service/pattern_matcher.h"
 #include "xla/service/pattern_matcher_gmock.h"
-#include "xla/statusor.h"
 #include "xla/stream_executor/device_description.h"
 #include "xla/tests/hlo_test_base.h"
 #include "tsl/lib/core/status_test_util.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/status_matchers.h"
+#include "tsl/platform/statusor.h"
 
 namespace xla {
 namespace gpu {
@@ -53,9 +53,9 @@ absl::StatusOr<bool> SoftmaxRewriterTritonMatchAndRewrite(
     se::GpuComputeCapability gpu_version, HloModule* module) {
   CHECK_NE(module, nullptr);
   SoftmaxRewriterTriton softmax_rewriter_triton(gpu_version);
-  std::vector<DiamondChainDescriptor> diamond_chains =
-      softmax_rewriter_triton.FindAllFusibleDiamondChains(
-          *module, /*execution_threads=*/{});
+  TF_ASSIGN_OR_RETURN(std::vector<DiamondChainDescriptor> diamond_chains,
+                      softmax_rewriter_triton.FindAllFusibleDiamondChains(
+                          *module, /*execution_threads=*/{}));
 
   for (auto diamond_chain = diamond_chains.rbegin();
        diamond_chain != diamond_chains.rend(); ++diamond_chain) {
@@ -230,7 +230,7 @@ ENTRY main {
 }
 
 TEST_P(SoftmaxRewriterTritonTest,
-       CanFuseSoftmaxWithBatchDimMergingAndSplittingBitcastsOnEveryEdge) {
+       CanNotFuseSoftmaxWhenResultingComputationCanNotBeTiledCorrectly) {
   PrimitiveType data_type = GetParam();
   const std::string hlo_string_template = R"(
 HloModule softmax
@@ -271,23 +271,8 @@ ENTRY main {
 
   auto module = ParseAndReturnVerifiedModule(hlo_string).value();
 
-  EXPECT_TRUE(
+  EXPECT_FALSE(
       SoftmaxRewriterTritonMatchAndRewrite(gpu_version_, module.get()).value());
-  EXPECT_TRUE(verifier().Run(module.get()).status().ok());
-
-  switch (data_type) {
-    case F32:
-    case BF16:
-      EXPECT_THAT(module->entry_computation()->root_instruction(),
-                  GmockMatch(m::Fusion(m::Parameter())));
-      break;
-    case F16:
-      EXPECT_THAT(module->entry_computation()->root_instruction(),
-                  GmockMatch(m::Bitcast(m::Divide())));
-      break;
-    default:
-      ABSL_UNREACHABLE();
-  }
 }
 
 TEST_P(SoftmaxRewriterTritonTest, CanNotFuseSoftmaxDiamondWithWrongLayout) {
@@ -1138,8 +1123,34 @@ ENTRY main {
           .Run(module.get()),
       tsl::testing::StatusIs(
           tsl::error::FAILED_PRECONDITION,
-          ::testing::StrEq(
-              "Triton support is only enabled for Ampere GPUs and up.")));
+          ::testing::HasSubstr("Triton support is only enabled for Ampere GPUs "
+                               "(compute capability 8.0) and up, but got")));
+}
+
+TEST_F(SoftmaxRewriterTritonTest, RewriterBailsOutOnNonCudaGpu) {
+  const std::string hlo_string = R"(
+HloModule softmax
+max_computation {
+  arg_0 = f32[] parameter(0)
+  arg_1 = f32[] parameter(1)
+  ROOT maximum = f32[] maximum(arg_0, arg_1)
+}
+ENTRY main {
+  param_0 = bf16[127,125]{1,0} parameter(0)
+  param_0_f32 = f32[127,125]{1,0} convert(param_0)
+  constant_neg_inf = f32[] constant(-inf)
+  reduce = f32[127]{0} reduce(param_0_f32, constant_neg_inf), dimensions={1}, to_apply=max_computation
+  broadcast = f32[127,125]{1,0} broadcast(reduce), dimensions={0}
+  ROOT subtract = f32[127,125]{1,0} subtract(param_0_f32, broadcast)
+})";
+
+  auto module = ParseAndReturnVerifiedModule(hlo_string).value();
+
+  EXPECT_THAT(
+      SoftmaxRewriterTriton(se::RocmComputeCapability{}).Run(module.get()),
+      tsl::testing::StatusIs(
+          tsl::error::FAILED_PRECONDITION,
+          ::testing::StrEq("Triton support is only enabled for CUDA GPUs.")));
 }
 
 TEST_P(SoftmaxRewriterTritonTest, DoesNotFuseConvertWithC64DataType) {

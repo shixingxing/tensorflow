@@ -39,6 +39,7 @@ limitations under the License.
 #include "absl/functional/any_invocable.h"
 #include "absl/log/check.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
@@ -73,7 +74,6 @@ limitations under the License.
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/status_macros.h"
-#include "xla/statusor.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/casts.h"
@@ -3721,25 +3721,32 @@ MsaAlgorithm::Result MsaAlgorithm::AllocateSegment(
                      return allocation->memory_space() == MemorySpace::kDefault;
                    });
 
-  if (prev_allocation_in_default_mem_it == allocation_sequence->rend() &&
-      prev_allocation_it != allocation_sequence->rend() &&
-      (*prev_allocation_it)->memory_space() == MemorySpace::kAlternate &&
-      (*prev_allocation_it)->defining_position() == defining_position &&
-      !request.allocation_value->requires_contiguous_allocation()) {
-    // If there was an allocation for this HloValue that was in the alternate
-    // memory space, we also need to perform an eviction.
-    Result eviction_result = Evict(request);
-    if (eviction_result != Result::kSuccess) {
-      // A non-success eviction requires us to uncommit previous allocations.
-      return result_mark(Result::kFailRequiresUncommit, eviction_result);
+  if (!request.allocation_value->requires_contiguous_allocation()) {
+    if (prev_allocation_in_default_mem_it == allocation_sequence->rend() &&
+        prev_allocation_it != allocation_sequence->rend() &&
+        (*prev_allocation_it)->memory_space() == MemorySpace::kAlternate &&
+        (*prev_allocation_it)->defining_position() == defining_position) {
+      // If there was an allocation for this HloValue that was in the alternate
+      // memory space, we also need to perform an eviction.
+      Result eviction_result = Evict(request);
+      if (eviction_result != Result::kSuccess) {
+        // A non-success eviction requires us to uncommit previous allocations.
+        return result_mark(Result::kFailRequiresUncommit, eviction_result);
+      }
+      prev_allocation_in_default_mem_it = allocation_sequence->rbegin();
+    } else if (prev_allocation_in_default_mem_it ==
+               allocation_sequence->rend()) {
+      allocation_sequence->push_back(std::make_unique<PinnedAllocation>(
+          defining_position, MemorySpace::kDefault,
+          /*chunk=*/std::nullopt, request.inclusive_start_time,
+          request.end_time,
+          /*is_scoped_allocation=*/false));
+      prev_allocation_in_default_mem_it = allocation_sequence->rbegin();
     }
-    prev_allocation_in_default_mem_it = allocation_sequence->rbegin();
   } else if (prev_allocation_in_default_mem_it == allocation_sequence->rend()) {
-    allocation_sequence->push_back(std::make_unique<PinnedAllocation>(
-        defining_position, MemorySpace::kDefault,
-        /*chunk=*/std::nullopt, request.inclusive_start_time, request.end_time,
-        /*is_scoped_allocation=*/false));
-    prev_allocation_in_default_mem_it = allocation_sequence->rbegin();
+    VLOG(3) << "Allocation requires contiguous allocation, but it wasn't "
+               "possible to find one.";
+    return result_mark(Result::kFailRequiresUncommit, allocation_result);
   }
 
   CHECK(prev_allocation_in_default_mem_it != allocation_sequence->rend());

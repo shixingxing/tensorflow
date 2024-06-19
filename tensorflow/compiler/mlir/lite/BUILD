@@ -1,6 +1,8 @@
+load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
-load("//tensorflow:tensorflow.bzl", "tf_cc_binary", "tf_cc_test", "tf_native_cc_binary")
+load("//tensorflow:tensorflow.bzl", "if_google", "if_oss", "tf_cc_binary", "tf_cc_test", "tf_native_cc_binary")
 load("//tensorflow:tensorflow.default.bzl", "filegroup", "get_compatible_with_portable")
 load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
@@ -1084,6 +1086,7 @@ cc_library(
         ":flatbuffer_tflite_operator_lib",
         ":low_bit_utils",
         ":stateful_ops_utils",
+        ":string_utils",
         ":tensorflow_lite",
         "//tensorflow/compiler/mlir:op_or_arg_name_mapper",
         "//tensorflow/compiler/mlir/lite/metrics:error_collector_inst",
@@ -1099,7 +1102,6 @@ cc_library(
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/lite:graph_info",
         "//tensorflow/lite:schema_fbs_version",
-        "//tensorflow/lite:string_util",
         "//tensorflow/lite/core:framework",
         "//tensorflow/lite/core/c:private_common",
         "//tensorflow/lite/delegates/flex:allowlisted_flex_ops_lib",
@@ -1377,6 +1379,7 @@ cc_library(
         "//tensorflow/compiler/mlir/lite/quantization/tensorflow:tf_quantization_passes",
         "//tensorflow/compiler/mlir/lite/stablehlo:compose_uniform_quantized_type_pass",
         "//tensorflow/compiler/mlir/lite/stablehlo:composite_lowering",
+        "//tensorflow/compiler/mlir/lite/stablehlo:legalize_stablehlo_composite_to_tfl_custom",
         "//tensorflow/compiler/mlir/lite/stablehlo:legalize_tf_xla_call_module_to_stablehlo_pass",
         "//tensorflow/compiler/mlir/lite/stablehlo:rename_entrypoint_to_main",
         "//tensorflow/compiler/mlir/lite/stablehlo:tf_legalize_hlo",  # buildcleaner: keep
@@ -1491,11 +1494,11 @@ cc_library(
     deps = [
         ":convert_type",
         ":low_bit_utils",
+        ":string_utils",
         "//tensorflow/compiler/mlir/lite/schema:schema_fbs",
         "//tensorflow/compiler/mlir/tensorflow:dynamic_shape_utils",
         "//tensorflow/compiler/mlir/tensorflow:tensorflow_types",
         "//tensorflow/core:protos_all_cc",
-        "//tensorflow/lite:string_util",
         "@com_google_absl//absl/base",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -1507,6 +1510,13 @@ cc_library(
         "@llvm-project//mlir:Support",
         "@local_tsl//tsl/platform:statusor",
     ],
+)
+
+cc_library(
+    name = "string_utils",
+    srcs = ["utils/string_utils.cc"],
+    hdrs = ["utils/string_utils.h"],
+    visibility = ["//tensorflow/lite:__pkg__"],
 )
 
 tf_cc_test(
@@ -1525,3 +1535,55 @@ build_test(
         ":tensorflow_lite",
     ],
 )
+
+# LINT.IfChange
+
+bool_flag(
+    name = "enable_fuchsia_mmap",
+    build_setting_default = True,
+)
+
+config_setting(
+    name = "tflite_with_xnnpack_explicit_false",
+    define_values = {"tflite_with_xnnpack": "false"},
+)
+
+# A config for enabling tensorflow profiler in TFLite. Currently, it only supports dynamic
+# allocation. Add '--define=tflite_tensorflow_profiler=true' in your build command line to use it.
+config_setting(
+    name = "tensorflow_profiler_config",
+    define_values = {"tflite_tensorflow_profiler": "true"},
+)
+
+config_setting(
+    name = "fuchsia_mmap_disabled",
+    constraint_values = if_google(
+        ["//third_party/bazel_platforms/os:fuchsia"],
+        [],
+    ),
+    flag_values = {
+        ":enable_fuchsia_mmap": "False",
+    },
+    values = if_oss(
+        # TODO(b/149248802) When we have a Fuchsia Bazel SDK update to use the values it sets.
+        {"cpu": "fuchsia"},
+        {},
+    ),
+)
+
+config_setting(
+    name = "tflite_mmap_disabled_true",
+    values = {
+        "copt": "-DTFLITE_MMAP_DISABLED",
+    },
+)
+
+selects.config_setting_group(
+    name = "tflite_mmap_disabled",
+    match_any = [
+        ":fuchsia_mmap_disabled",
+        ":tflite_mmap_disabled_true",
+        "//tensorflow:windows",
+    ],
+)
+# LINT.ThenChange(//tensorflow/lite/BUILD)

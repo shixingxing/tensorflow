@@ -55,7 +55,6 @@ limitations under the License.
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/statusor.h"
-#include "tsl/platform/tensor_float_32_utils.h"
 
 namespace xla {
 namespace gpu {
@@ -523,7 +522,7 @@ HlosAndRequirements FuseTowardUsers(
     return existing_hlos_and_requirements;
   }
   const HloInstruction& user = *hlo.users()[0];
-  if (!IsDistributiveOverAddition(user)) {
+  if (!legacy_triton::IsDistributiveOverAddition(user)) {
     return existing_hlos_and_requirements;
   }
 
@@ -618,7 +617,7 @@ absl::StatusOr<FusionDecision> CreateDotFusion(
     HloInstruction** fusion_output_ptr) {
   VLOG(5) << dot.ToString();
   if (CodegenDecision is_supported =
-          IsTritonSupportedInstruction(dot, gpu_version);
+          legacy_triton::IsTritonSupportedInstruction(dot, gpu_version);
       !is_supported) {
     VLOG(3) << is_supported.Explain();
     return is_supported;
@@ -802,9 +801,15 @@ absl::StatusOr<bool> GemmFusion::Run(
     const absl::flat_hash_set<absl::string_view>& execution_threads) {
   auto cuda_compute_capability =
       std::get_if<se::CudaComputeCapability>(&gpu_version_);
-  if (!cuda_compute_capability || !cuda_compute_capability->IsAtLeastAmpere()) {
+  if (!cuda_compute_capability) {
     return absl::FailedPreconditionError(
-        "Triton support is only enabled for Ampere GPUs and up.");
+        "Triton support is only enabled for CUDA GPUs.");
+  } else if (!cuda_compute_capability->IsAtLeastAmpere()) {
+    return absl::FailedPreconditionError(
+        absl::StrCat("Triton support is only enabled for Ampere GPUs (compute ",
+                     "capability 8.0) and up, but got compute capability ",
+                     cuda_compute_capability->major, ".",
+                     cuda_compute_capability->minor, "."));
   }
 
   bool changed = false;

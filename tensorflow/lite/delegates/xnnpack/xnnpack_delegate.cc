@@ -58,6 +58,8 @@ namespace tflite {
 namespace xnnpack {
 namespace {
 
+constexpr char kOdmlSDPA[] = "odml.scaled_dot_product_attention";
+
 template <typename T>
 void SafeCopyCustomData(const TfLiteNode& node, T* target) {
   const size_t safe_size =
@@ -534,23 +536,23 @@ class Delegate {
     // If no weight cache is provided, add one when requested.
     if (!options_.weights_cache) {
       if (options_.experimental_weight_cache_file_path) {
-        if (weight_cache_provider_.Load(
+        if (weight_cache_provider_.LoadOrStartBuild(
                 options_.experimental_weight_cache_file_path)) {
-          TFLITE_LOG(tflite::TFLITE_LOG_INFO,
-                     "XNNPack weight cache loaded from '%s'.",
-                     options_.experimental_weight_cache_file_path);
+          options_.weights_cache =
+              reinterpret_cast<TfLiteXNNPackDelegateWeightsCache*>(
+                  weight_cache_provider_.GetCacheProvider().context);
+          options_.experimental_weight_cache_file_path =
+              weight_cache_provider_.GetFilePath().data();
         } else {
-          TFLITE_LOG(tflite::TFLITE_LOG_INFO,
-                     "XNNPack weight cache not found at '%s', building it.",
-                     options_.experimental_weight_cache_file_path);
+          TFLITE_LOG_PROD(tflite::TFLITE_LOG_ERROR,
+                          "XNNPack weight cache could neither be loaded from "
+                          "or saved to '%s'. Check that this location is "
+                          "readable and writable.",
+                          options_.experimental_weight_cache_file_path);
+          options_.experimental_weight_cache_file_path = nullptr;
         }
-        options_.weights_cache =
-            reinterpret_cast<TfLiteXNNPackDelegateWeightsCache*>(
-                weight_cache_provider_.GetCacheProvider().context);
-        options_.experimental_weight_cache_file_path =
-            weight_cache_provider_.GetFilePath().data();
       } else {
-        TFLITE_LOG(tflite::TFLITE_LOG_INFO,
+        TFLITE_LOG(tflite::TFLITE_LOG_VERBOSE,
                    "XNNPack weight cache not enabled.");
       }
     }
@@ -2914,6 +2916,25 @@ class Subgraph {
       case kTfLiteBuiltinVarHandle:
         return VisitVarHandleNode(subgraph, delegate, logging_context,
                                   node_index, node);
+      case kTfLiteBuiltinStablehloComposite: {
+        const TfLiteStablehloCompositeParams* composite_params =
+            static_cast<const TfLiteStablehloCompositeParams*>(
+                node->builtin_data);
+        if (strcmp(composite_params->name, kOdmlSDPA) == 0) {
+          return VisitScaledDotAttentionCompositeNode(
+              subgraph, delegate, context, node_index, node, context->tensors,
+              composite_params->attributes, composite_params->attributes_size,
+              input_output_tensors);
+        } else {
+#ifdef XNNPACK_DELEGATE_ENABLE_LOGGING
+          TF_LITE_KERNEL_LOG(context,
+                             "unsupported stablehlo.composite operator type "
+                             "\"%s\" in node #%d",
+                             composite_params->name, node_index);
+#endif  // XNNPACK_DELEGATE_ENABLE_LOGGING
+        }
+        return kTfLiteError;
+      }
       case kTfLiteBuiltinCustom: {
         if (strcmp(registration->custom_name, "Convolution2DTransposeBias") ==
             0) {
@@ -2938,28 +2959,11 @@ class Subgraph {
           return VisitMediaPipeUnpoolingNode(
               subgraph, delegate, context, node_index, node, context->tensors,
               &pool_params, input_output_tensors);
-        } else if (strcmp(registration->custom_name,
-                          "odml.scaled_dot_product_attention") == 0) {
-          const float* scale_val = nullptr;
-          // ensure 28 bytes as we expect
-          // TODO(b/339106680): this reading method may not work for every case.
-          if (node->custom_initial_data_size == 28 && sizeof(float) == 4) {
-            // Custom data here is a flexbuffer map.
-            // byte_width is 4 for our map.
-            // First 5 values are "scale", then is the float value, and last is
-            // flexbuffer metadata.
-            const uint8_t* buffer =
-                reinterpret_cast<const uint8_t*>(node->custom_initial_data);
-            if (strcmp("scale", reinterpret_cast<const char*>(buffer)) == 0) {
-              constexpr size_t kScaleValOffset = 20;
-              scale_val =
-                  reinterpret_cast<const float*>(buffer + kScaleValOffset);
-            }
-          }
-
-          return VisitDotAttentionNode(subgraph, delegate, context, node_index,
-                                       node, context->tensors, scale_val,
-                                       input_output_tensors);
+        } else if (strcmp(registration->custom_name, kOdmlSDPA) == 0) {
+          return VisitScaledDotAttentionCompositeNode(
+              subgraph, delegate, context, node_index, node, context->tensors,
+              reinterpret_cast<const uint8_t*>(node->custom_initial_data),
+              node->custom_initial_data_size, input_output_tensors);
         } else {
 #ifdef XNNPACK_DELEGATE_ENABLE_LOGGING
           TF_LITE_KERNEL_LOG(
@@ -6591,6 +6595,31 @@ class Subgraph {
     return kTfLiteOk;
   }
 
+  static TfLiteStatus VisitScaledDotAttentionCompositeNode(
+      xnn_subgraph_t subgraph, const Delegate& delegate,
+      TfLiteContext* logging_context, int node_index, TfLiteNode* node,
+      const TfLiteTensor* tensors, const uint8_t* buffer,
+      const size_t buffer_size,
+      const std::unordered_map<int, uint32_t>& input_output_tensors) {
+    const float* scale_val = nullptr;
+    // ensure 28 bytes as we expect
+    // TODO(b/339106680): this reading method may not work for every case.
+    if (buffer_size == 28 && sizeof(float) == 4) {
+      // Custom data here is a flexbuffer map.
+      // byte_width is 4 for our map.
+      // First 5 values are "scale", then is the float value, and last is
+      // flexbuffer metadata.
+      if (strcmp("scale", reinterpret_cast<const char*>(buffer)) == 0) {
+        constexpr size_t kScaleValOffset = 20;
+        scale_val = reinterpret_cast<const float*>(buffer + kScaleValOffset);
+      }
+    }
+
+    return VisitDotAttentionNode(subgraph, delegate, logging_context,
+                                 node_index, node, tensors, scale_val,
+                                 input_output_tensors);
+  }
+
   static TfLiteStatus VisitDotAttentionNode(
       xnn_subgraph_t subgraph, const Delegate& delegate,
       TfLiteContext* logging_context, int node_index, TfLiteNode* node,
@@ -7112,22 +7141,16 @@ class Subgraph {
 
     bool dynamically_quantized = (input_tensor.type == kTfLiteFloat32 &&
                                   filter_tensor.type == kTfLiteInt8);
-    if (dynamically_quantized) {
-      TF_LITE_ENSURE_STATUS(CheckTensorFloat32OrQCInt8Type(
-          delegate, logging_context, filter_tensor,
-          /*expected_quantized_dimension=*/0, filter_tensor_index, node_index));
-    } else {
-      TF_LITE_ENSURE_STATUS(CheckTensorFloat32OrQUInt8Type(
-          delegate, logging_context, filter_tensor, filter_tensor_index,
-          node_index));
-    }
+    TF_LITE_ENSURE_STATUS(CheckTensorFloat32OrQCInt8Type(
+        delegate, logging_context, filter_tensor,
+        /*expected_quantized_dimension=*/0, filter_tensor_index, node_index));
 
     uint32_t xnnpack_tensor_bias = XNN_INVALID_VALUE_ID;  // "No bias".
     if (use_bias) {
       const int bias_tensor_index = node->inputs->data[3];
       if (bias_tensor_index != kTfLiteOptionalTensor) {
         const TfLiteTensor& bias_tensor = tensors[bias_tensor_index];
-        TF_LITE_ENSURE_STATUS(CheckTensorFloat32OrQInt32Type(
+        TF_LITE_ENSURE_STATUS(CheckTensorFloat32OrQCInt32Type(
             delegate, logging_context, bias_tensor, bias_tensor_index,
             node_index));
         TF_LITE_ENSURE_STATUS(

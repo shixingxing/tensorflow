@@ -1,3 +1,4 @@
+#include "xla/stream_executor/stream.h"
 /* Copyright 2020 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -24,7 +25,6 @@ limitations under the License.
 #include "xla/stream_executor/platform.h"
 #include "xla/stream_executor/stream_common.h"
 #include "xla/stream_executor/stream_executor.h"
-#include "xla/stream_executor/stream_executor_interface.h"
 #include "tsl/platform/statusor.h"
 
 namespace stream_executor {
@@ -45,6 +45,17 @@ absl::Status InitStreamExecutorPlugin(void* dso_handle,
 absl::Status InitStreamExecutorPlugin(SEInitPluginFn init_fn,
                                       std::string* device_type,
                                       std::string* platform_name);
+
+// Converts DeviceMemoryBase to a C struct.
+inline SP_DeviceMemoryBase DeviceMemoryBaseToC(const DeviceMemoryBase* mem) {
+  SP_DeviceMemoryBase device_memory_base{SP_DEVICE_MEMORY_BASE_STRUCT_SIZE};
+  // `opaque` field inside SP_DeviceMemoryBase is not const.
+  // Therefore, we need to cast away the constness before setting it.
+  device_memory_base.opaque = const_cast<void*>(mem->opaque());
+  device_memory_base.size = mem->size();
+  device_memory_base.payload = mem->payload();
+  return device_memory_base;
+}
 
 // This file implements core stream executor base classes in terms of
 // the C API defined in stream_executor.h. A class "CSomething" represents a
@@ -97,42 +108,6 @@ class CPlatform : public Platform {
   stream_executor::ExecutorCache executor_cache_;
 };
 
-class CStream : public StreamCommon {
- public:
-  CStream(SP_Device* device, SP_StreamExecutor* stream_executor,
-          StreamExecutor* executor)
-      : StreamCommon(executor),
-        device_(device),
-        stream_executor_(stream_executor),
-        stream_handle_(nullptr) {}
-  ~CStream() override {
-    parent()->BlockHostUntilDone(this).IgnoreError();
-    parent()->DeallocateStream(this);
-    Destroy();
-  }
-
-  absl::Status Create() {
-    tensorflow::TF_StatusPtr c_status(TF_NewStatus());
-    stream_executor_->create_stream(device_, &stream_handle_, c_status.get());
-    absl::Status s = tensorflow::StatusFromTF_Status(c_status.get());
-    return s;
-  }
-
-  void Destroy() {
-    if (stream_handle_ != nullptr) {
-      stream_executor_->destroy_stream(device_, stream_handle_);
-      stream_handle_ = nullptr;
-    }
-  }
-
-  SP_Stream Handle() { return stream_handle_; }
-
- private:
-  SP_Device* device_;
-  SP_StreamExecutor* stream_executor_;
-  SP_Stream stream_handle_;
-};
-
 class CEvent : public Event {
  public:
   CEvent(SP_Device* device, SP_StreamExecutor* stream_executor)
@@ -183,6 +158,75 @@ class CEvent : public Event {
   SP_Device* device_;
   SP_StreamExecutor* stream_executor_;
   SP_Event event_handle_;
+};
+
+class CStream : public StreamCommon {
+ public:
+  CStream(SP_Device* device, SP_StreamExecutor* stream_executor,
+          StreamExecutor* executor)
+      : StreamCommon(executor),
+        device_(device),
+        stream_executor_(stream_executor),
+        stream_handle_(nullptr) {}
+  ~CStream() override {
+    parent()->BlockHostUntilDone(this).IgnoreError();
+    parent()->DeallocateStream(this);
+    Destroy();
+  }
+
+  absl::Status Create() {
+    tensorflow::TF_StatusPtr c_status(TF_NewStatus());
+    stream_executor_->create_stream(device_, &stream_handle_, c_status.get());
+    return tensorflow::StatusFromTF_Status(c_status.get());
+  }
+
+  void Destroy() {
+    if (stream_handle_ != nullptr) {
+      stream_executor_->destroy_stream(device_, stream_handle_);
+      stream_handle_ = nullptr;
+    }
+  }
+  absl::Status RefreshStatus() override {
+    tensorflow::TF_StatusPtr c_status(TF_NewStatus());
+    stream_executor_->get_stream_status(device_, stream_handle_,
+                                        c_status.get());
+    absl::Status status = tensorflow::StatusFromTF_Status(c_status.get());
+    CheckStatus(status);
+    return status;
+  }
+
+  absl::Status RecordEvent(Event* event) override {
+    return static_cast<CEvent*>(event)->Record(stream_handle_);
+  }
+
+  absl::Status WaitFor(Stream* other) override {
+    tensorflow::TF_StatusPtr c_status(TF_NewStatus());
+    SP_Stream other_handle = static_cast<CStream*>(other)->Handle();
+    stream_executor_->create_stream_dependency(device_, stream_handle_,
+                                               other_handle, c_status.get());
+    return tensorflow::StatusFromTF_Status(c_status.get());
+  }
+  absl::Status WaitFor(Event* event) override {
+    SP_Event event_handle = static_cast<CEvent*>(event)->Handle();
+    tensorflow::TF_StatusPtr c_status(TF_NewStatus());
+    stream_executor_->wait_for_event(device_, stream_handle_, event_handle,
+                                     c_status.get());
+    return tensorflow::StatusFromTF_Status(c_status.get());
+  }
+  absl::Status MemZero(DeviceMemoryBase* location, uint64_t size) override {
+    tensorflow::TF_StatusPtr c_status(TF_NewStatus());
+    SP_DeviceMemoryBase device_mem = DeviceMemoryBaseToC(location);
+    stream_executor_->mem_zero(device_, stream_handle_, &device_mem, size,
+                               c_status.get());
+    return tensorflow::StatusFromTF_Status(c_status.get());
+  }
+
+  SP_Stream Handle() { return stream_handle_; }
+
+ private:
+  SP_Device* device_;
+  SP_StreamExecutor* stream_executor_;
+  SP_Stream stream_handle_;
 };
 
 }  // namespace stream_executor
