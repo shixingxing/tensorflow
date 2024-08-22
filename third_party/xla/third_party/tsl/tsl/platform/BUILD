@@ -153,6 +153,28 @@ cc_library(
 )
 
 cc_library(
+    name = "threadpool_async_executor",
+    hdrs = ["threadpool_async_executor.h"],
+    deps = [
+        ":env",
+        "@local_xla//xla/tsl/concurrency:async_value",
+    ],
+)
+
+tsl_cc_test(
+    name = "threadpool_async_executor_test",
+    srcs = ["threadpool_async_executor_test.cc"],
+    deps = [
+        ":env",
+        ":env_impl",
+        ":test",
+        ":test_main",
+        ":threadpool_async_executor",
+        "@com_google_absl//absl/synchronization",
+    ],
+)
+
+cc_library(
     name = "env_impl",
     deps = tf_windows_aware_platform_deps("env_impl"),
 )
@@ -847,6 +869,7 @@ cc_library(
     deps = [
         ":logging",
         ":path",
+        ":platform",
         ":test",
     ],
 )
@@ -903,6 +926,7 @@ cc_library(
         ":macros",
         ":stringpiece",
         ":types",
+        "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/strings",
     ],
 )
@@ -926,6 +950,7 @@ cc_library(
     hdrs = ["stringpiece.h"],
     compatible_with = get_compatible_with_portable(),
     deps = [
+        "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/strings",
     ],
 )
@@ -1462,7 +1487,7 @@ tsl_cc_test(
         ":subprocess",
         ":test",
         ":test_main",
-        "//tsl/lib/core:status_test_util",
+        "@local_xla//xla/tsl/lib/core:status_test_util",
     ],
 )
 
@@ -1561,6 +1586,7 @@ tsl_cc_test(
         ":stacktrace_handler",
         ":statusor",
         ":test",
+        "@com_google_absl//absl/base:log_severity",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings:str_format",
@@ -1764,7 +1790,7 @@ tsl_cc_test(
         ":str_util",
         ":test",
         ":test_main",
-        "//tsl/lib/core:status_test_util",
+        "@local_xla//xla/tsl/lib/core:status_test_util",
     ],
 )
 
@@ -1780,7 +1806,7 @@ tsl_cc_test(
         ":str_util",
         ":test",
         ":test_main",
-        "//tsl/lib/core:status_test_util",
         "@com_google_absl//absl/time",
+        "@local_xla//xla/tsl/lib/core:status_test_util",
     ],
 )

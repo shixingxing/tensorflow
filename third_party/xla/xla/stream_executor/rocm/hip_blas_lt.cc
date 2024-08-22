@@ -24,10 +24,10 @@ limitations under the License.
 #include "xla/util.h"
 
 #if TF_HIPBLASLT
+#include "xla/stream_executor/event_based_timer.h"
 #include "xla/stream_executor/gpu/gpu_activation.h"
 #include "xla/stream_executor/gpu/gpu_helpers.h"
 #include "xla/stream_executor/gpu/gpu_stream.h"
-#include "xla/stream_executor/gpu/gpu_timer.h"
 #include "xla/stream_executor/rocm/hip_blas_lt.h"
 #include "xla/stream_executor/rocm/rocm_blas.h"
 #include "xla/stream_executor/scratch_allocator.h"
@@ -395,12 +395,12 @@ absl::Status BlasLt::MatmulPlan::DoMatmul(
       blas_lt_ref_.parent_->RecordApiTrace(StreamExecutor::GemmCallTrace{
           StreamExecutor::GemmCallTrace::GemmType::kBlasLt, 0, a.size(),
           b.size()});
+  std::unique_ptr<EventBasedTimer> timer;
 
-  TF_ASSIGN_OR_RETURN(
-      std::optional<gpu::GpuTimer> timer,
-      gpu::GpuTimer::CreateIfNeeded(
-          stream, profile_result && profile_result->warmup_run_executed(),
-          profile_result));
+  if (profile_result != nullptr) {
+    TF_ASSIGN_OR_RETURN(timer, stream->CreateEventBasedTimer(
+                                   profile_result->warmup_run_executed()));
+  }
 
   void* workspace_addr = nullptr;
   uint64_t workspace_size = 0;
@@ -558,6 +558,8 @@ absl::Status BlasLt::MatmulPlan::ExecuteOnStream(
         profile_result);                                                   \
   }
 
+// FP8 compatible types combinations (Full table in
+// https://github.com/ROCm/hipBLASLt/blob/develop/docs/api-reference.rst?plain=1)
 #if TF_ROCM_VERSION >= 60000
   TYPED_MATMUL(float, HIP_R_8F_E4M3_FNUZ, HIP_R_8F_E4M3_FNUZ, HIP_R_16F,
                HIP_R_16F)
@@ -573,6 +575,21 @@ absl::Status BlasLt::MatmulPlan::ExecuteOnStream(
                HIP_R_16F)
   TYPED_MATMUL(float, HIP_R_8F_E5M2_FNUZ, HIP_R_8F_E4M3_FNUZ, HIP_R_32F,
                HIP_R_32F)
+#endif
+
+#if TF_ROCM_VERSION >= 60200
+  TYPED_MATMUL(float, HIP_R_8F_E4M3_FNUZ, HIP_R_8F_E4M3_FNUZ, HIP_R_16BF,
+               HIP_R_16BF)
+  TYPED_MATMUL(float, HIP_R_8F_E4M3_FNUZ, HIP_R_8F_E5M2_FNUZ, HIP_R_16BF,
+               HIP_R_16BF)
+  TYPED_MATMUL(float, HIP_R_8F_E5M2_FNUZ, HIP_R_8F_E4M3_FNUZ, HIP_R_16BF,
+               HIP_R_16BF)
+  TYPED_MATMUL(float, HIP_R_8F_E4M3_FNUZ, HIP_R_8F_E4M3_FNUZ,
+               HIP_R_8F_E4M3_FNUZ, HIP_R_8F_E4M3_FNUZ)
+  TYPED_MATMUL(float, HIP_R_8F_E4M3_FNUZ, HIP_R_8F_E5M2_FNUZ,
+               HIP_R_8F_E5M2_FNUZ, HIP_R_8F_E5M2_FNUZ)
+  TYPED_MATMUL(float, HIP_R_8F_E5M2_FNUZ, HIP_R_8F_E4M3_FNUZ,
+               HIP_R_8F_E5M2_FNUZ, HIP_R_8F_E5M2_FNUZ)
 #endif
 
   // Other data types:

@@ -28,6 +28,8 @@ limitations under the License.
 #include "xla/stream_executor/device_description.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/event.h"
+#include "xla/stream_executor/platform.h"
+#include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/tpu/c_api_conversions.h"
 #include "xla/stream_executor/tpu/c_api_decl.h"
 #include "xla/stream_executor/tpu/status_helper.h"
@@ -38,7 +40,6 @@ limitations under the License.
 #include "xla/tsl/c/tsl_status.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/logging.h"  // IWYU pragma: keep
-#include "tsl/platform/status.h"
 
 namespace stream_executor {
 namespace tpu {
@@ -170,26 +171,6 @@ absl::Status TpuExecutor::EnqueueInfeed(int32_t infeed_queue_index,
   return status.status();
 }
 
-absl::Status TpuExecutor::Memcpy(
-    Stream* stream, void* host_dst,
-    const ::stream_executor::DeviceMemoryBase& device_src, uint64_t size) {
-  StatusHelper status;
-  SE_DeviceMemoryBase se_base = ApiConverter::ToC(device_src);
-  ExecutorApiFn()->TpuExecutor_MemcpyToHostFn(
-      executor_, get_stream(stream), host_dst, &se_base, size, status.c_status);
-  return status.status();
-}
-
-absl::Status TpuExecutor::Memcpy(
-    Stream* stream, ::stream_executor::DeviceMemoryBase* device_dst,
-    const void* host_src, uint64_t size) {
-  StatusHelper status;
-  SE_DeviceMemoryBase se_base = ApiConverter::ToC(*device_dst);
-  ExecutorApiFn()->TpuExecutor_MemcpyFromHostFn(
-      executor_, get_stream(stream), &se_base, host_src, size, status.c_status);
-  return status.status();
-}
-
 absl::Status TpuExecutor::SynchronousMemcpy(
     ::stream_executor::DeviceMemoryBase* device_dst, const void* host_src,
     uint64_t size) {
@@ -210,12 +191,6 @@ absl::Status TpuExecutor::SynchronousMemcpy(
   return status.status();
 }
 
-bool TpuExecutor::MemcpyDeviceToDevice(
-    Stream* stream, ::stream_executor::DeviceMemoryBase* gpu_dst,
-    const ::stream_executor::DeviceMemoryBase& host_src, uint64_t size) {
-  LOG(FATAL) << __func__ << " not supported on TpuExecutor";
-}
-
 absl::Status TpuExecutor::UnloadAllPrograms() {
   StatusHelper status;
   ExecutorApiFn()->TpuExecutor_UnloadAllProgramsFn(executor_, status.c_status);
@@ -228,26 +203,6 @@ absl::Status TpuExecutor::EnqueueCompactionOnStreamForHbm(
   ExecutorApiFn()->TpuExecutor_EnqueueCompactionOnStreamForHbmFn(
       executor_, get_stream(compaction_stream), status.c_status);
   return status.status();
-}
-
-struct HostCallbackContext {
-  absl::AnyInvocable<absl::Status() &&> callback;
-};
-
-TSL_Status* HostCallbackTrampoline(void* ctx) {
-  HostCallbackContext* host_ctx = reinterpret_cast<HostCallbackContext*>(ctx);
-  absl::Status status = std::move(host_ctx->callback)();
-  TSL_Status* c_status = ExecutorApiFn()->TpuStatus_CreateFn(
-      status.raw_code(), absl::StatusMessageAsCStr(status));
-  delete host_ctx;
-  return c_status;
-}
-
-bool TpuExecutor::HostCallback(Stream* stream,
-                               absl::AnyInvocable<absl::Status() &&> callback) {
-  HostCallbackContext* ctx = new HostCallbackContext{std::move(callback)};
-  return ExecutorApiFn()->TpuExecutor_HostCallbackFn(
-      executor_, get_stream(stream), &HostCallbackTrampoline, ctx);
 }
 
 absl::StatusOr<std::unique_ptr<::stream_executor::DeviceDescription>>

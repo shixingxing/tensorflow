@@ -91,8 +91,15 @@ class PrimitiveType(enum.IntEnum):
 # === BEGIN xla_compiler.cc
 
 class Layout:
+  @overload
   def __init__(self, minor_to_major: Tuple[int, ...]): ...
+  @overload
+  def __init__(self, minor_to_major: Tuple[int, ...],
+               tiling: Tuple[Tuple[int, ...], ...],
+               element_size_in_bits: int): ...
   def minor_to_major(self) -> Tuple[int, ...]: ...
+  def tiling(self) -> Sequence[Tuple[int, ...]]: ...
+  def element_size_in_bits(self) -> int: ...
   def to_string(self) -> str: ...
   def __eq__(self, other: Layout) -> bool: ...
   def __ne__(self, other: Layout) -> bool: ...
@@ -311,6 +318,9 @@ class DebugOptions:
   xla_gpu_dump_autotune_results_to: str
   xla_gpu_load_autotune_results_from: str
   xla_gpu_dump_autotune_logs_to: str
+  xla_gpu_kernel_cache_file: str
+  xla_gpu_enable_llvm_module_compilation_parallelism: bool
+  xla_gpu_per_fusion_autotune_cache_dir: str
 
 class CompiledMemoryStats:
   generated_code_size_in_bytes: int
@@ -339,6 +349,7 @@ class ExecutableBuildOptions:
   use_auto_spmd_partitioning: bool
   auto_spmd_partitioning_mesh_shape: List[int]
   auto_spmd_partitioning_mesh_ids: List[int]
+  use_shardy_partitioner: bool
 
 class PrecisionConfig_Precision(enum.IntEnum):
   DEFAULT: int
@@ -456,6 +467,7 @@ class PjRtLayout:
   def __hash__(self) -> int: ...
   def __getstate__(self) -> Any: ...
   def __setstate__(self, Any): ...
+  def _xla_layout(self) -> Layout: ...
 
 class GpuAllocatorConfig:
   class Kind(enum.IntEnum):
@@ -662,7 +674,6 @@ class ExecuteResults:
 
 class LoadedExecutable:
   client: Client
-  def local_logical_device_ids(self) -> List[Tuple[int, int]]: ...
   def local_devices(self) -> List[Device]: ...
   def size_of_generated_code_in_bytes(self) -> int: ...
   def delete(self) -> None: ...
@@ -743,12 +754,19 @@ class Frame:
   function_name: str
   function_line_start: int
   line_num: int
+  def __init__(self,
+               file_name: str,
+               function_name: str,
+               function_line_start: int,
+               line_num: int): ...
   def __repr__(self) -> str: ...
 
 class Traceback:
   enabled: ClassVar[bool]
   @staticmethod
   def get_traceback() -> Traceback: ...
+  @staticmethod
+  def traceback_from_frames(frames: Sequence[Frame]) -> Any: ...
   frames: Sequence[Frame]
   def __str__(self) -> str: ...
   def as_python_traceback(self) -> Any: ...
@@ -914,7 +932,7 @@ def pjit(
     cache_miss: Callable,
     static_argnums: Sequence[int],
     static_argnames: Sequence[str],
-    donate_argnums: Sequence[int],
+    global_cache_key: Any,
     pytree_registry: pytree.PyTreeRegistry,
     shard_arg_fallback: Callable,
     cache: Optional[PjitFunctionCache] = ...,

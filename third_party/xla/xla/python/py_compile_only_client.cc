@@ -26,17 +26,18 @@ limitations under the License.
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ExtensibleRTTI.h"
-#include "mlir/IR/BuiltinOps.h"  // from @llvm-project
-#include "mlir/IR/MLIRContext.h"  // from @llvm-project
-#include "mlir/IR/OwningOpRef.h"  // from @llvm-project
-#include "third_party/nanobind/include/nanobind/nanobind.h"
-#include "third_party/nanobind/include/nanobind/stl/shared_ptr.h"  // IWYU pragma: keep
-#include "third_party/nanobind/include/nanobind/stl/string_view.h"  // IWYU pragma: keep
-#include "third_party/nanobind/include/nanobind/stl/vector.h"  // IWYU pragma: keep
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/OwningOpRef.h"
+#include "nanobind/nanobind.h"
+#include "nanobind/stl/shared_ptr.h"  // IWYU pragma: keep
+#include "nanobind/stl/string_view.h"  // IWYU pragma: keep
+#include "nanobind/stl/vector.h"  // IWYU pragma: keep
 #include "xla/layout.h"
 #include "xla/pjrt/mlir_to_hlo.h"
 #include "xla/pjrt/pjrt_compiler.h"
@@ -45,6 +46,7 @@ limitations under the License.
 #include "xla/pjrt/pjrt_layout.h"
 #include "xla/pjrt/status_casters.h"
 #include "xla/python/ifrt/array.h"
+#include "xla/python/ifrt/attribute_map.h"
 #include "xla/python/ifrt/client.h"
 #include "xla/python/ifrt/compiler.h"
 #include "xla/python/ifrt/device.h"
@@ -61,6 +63,7 @@ limitations under the License.
 #include "xla/python/ifrt/value.h"
 #include "xla/python/nb_class_ptr.h"
 #include "xla/python/pjrt_ifrt/pjrt_array.h"
+#include "xla/python/pjrt_ifrt/pjrt_attribute_map_util.h"
 #include "xla/python/pjrt_ifrt/pjrt_executable.h"
 #include "xla/python/pjrt_ifrt/pjrt_topology.h"
 #include "xla/python/pjrt_ifrt/xla_compiler.h"
@@ -78,11 +81,46 @@ namespace xla {
 
 namespace {
 
+class CompileOnlyMemory
+    : public llvm::RTTIExtends<CompileOnlyMemory, ifrt::Memory> {
+ public:
+  explicit CompileOnlyMemory(
+      int id, const PjRtMemorySpaceDescription* memory_description,
+      ifrt::Device* device)
+      : id_(id),
+        kind_(memory_description->kind()),
+        debug_string_(absl::StrFormat("CompileOnlyMemory(id=%d, kind=%s)", id,
+                                      memory_description->kind())),
+        device_(device) {}
+
+  ifrt::MemoryId Id() const override { return ifrt::MemoryId(id_); }
+
+  const ifrt::MemoryKind& Kind() const override { return kind_; }
+
+  absl::string_view ToString() const override { return debug_string_; }
+  absl::string_view DebugString() const override { return debug_string_; }
+
+  absl::Span<ifrt::Device* const> Devices() const override {
+    return absl::Span<ifrt::Device* const>{&device_, 1};
+  }
+
+  static char ID;  // NOLINT
+
+ private:
+  int id_;
+  ifrt::MemoryKind kind_;
+  std::string debug_string_;
+  ifrt::Device* device_;
+};
+
+[[maybe_unused]] char CompileOnlyMemory::ID = 0;
+
 class CompileOnlyDevice
     : public llvm::RTTIExtends<CompileOnlyDevice, ifrt::Device> {
  public:
   explicit CompileOnlyDevice(const PjRtDeviceDescription* description)
-      : description_(std::move(description)) {}
+      : description_(std::move(description)),
+        attributes_(ifrt::FromPjRtAttributeMap(description_->Attributes())) {}
 
   const PjRtDeviceDescription& description() const { return *description_; }
 
@@ -106,18 +144,31 @@ class CompileOnlyDevice
     return description_->DebugString();
   }
 
-  absl::Span<ifrt::Memory* const> Memories() const override { return {}; }
+  absl::Span<ifrt::Memory* const> Memories() const override {
+    return unowned_memories_;
+  }
   absl::StatusOr<ifrt::Memory*> DefaultMemory() const override {
+    if (default_memory_) {
+      return default_memory_;
+    }
     return Unimplemented("DefaultMemory is not supported");
   }
 
-  const absl::flat_hash_map<std::string, PjRtDeviceAttribute>& Attributes()
-      const {
-    return description_->Attributes();
+  const ifrt::AttributeMap& Attributes() const override { return attributes_; }
+
+  void AttachMemory(std::unique_ptr<ifrt::Memory> memory) {
+    unowned_memories_.push_back(memory.get());
+    owned_memories_.push_back(std::move(memory));
   }
+
+  void SetDefaultMemory(ifrt::Memory* memory) { default_memory_ = memory; }
 
  private:
   const PjRtDeviceDescription* description_;
+  ifrt::AttributeMap attributes_;
+  ifrt::Memory* default_memory_ = nullptr;
+  std::vector<ifrt::Memory*> unowned_memories_;
+  std::vector<std::unique_ptr<ifrt::Memory>> owned_memories_;
 };
 
 class InvalidIfrtCompiler final
@@ -151,11 +202,26 @@ class CompileOnlyIfRtClient final
  public:
   explicit CompileOnlyIfRtClient(std::shared_ptr<ifrt::PjRtTopology> topology)
       : topology_(std::move(topology)),
-        descriptions_(topology_->DeviceDescriptions()) {
+        descriptions_(topology_->DeviceDescriptions()),
+        attributes_(ifrt::AttributeMap::Map()) {
+    int offset = 0;
     for (auto& description : descriptions_) {
       owned_devices_.push_back(
           std::make_unique<CompileOnlyDevice>(description.get()));
-      devices_.push_back(owned_devices_.back().get());
+      auto* device = owned_devices_.back().get();
+      devices_.push_back(device);
+      if (description->process_index() == process_index()) {
+        auto default_memory = description->default_memory_space();
+        for (auto* memory_description : description->memory_spaces()) {
+          auto memory = std::make_unique<CompileOnlyMemory>(
+              offset, memory_description, device);
+          if (default_memory.ok() && memory_description == *default_memory) {
+            device->SetDefaultMemory(memory.get());
+          }
+          device->AttachMemory(std::move(memory));
+          ++offset;
+        }
+      }
     }
   }
 
@@ -218,10 +284,7 @@ class CompileOnlyIfRtClient final
   ifrt::PlatformId platform_id() const override {
     return topology_->platform_id();
   }
-  absl::flat_hash_map<std::string, ClientAttribute> attributes()
-      const override {
-    return {};
-  }
+  const ifrt::AttributeMap& Attributes() const override { return attributes_; }
 
   int device_count() const override { return devices().size(); }
   int addressable_device_count() const override { return 0; }
@@ -271,6 +334,7 @@ class CompileOnlyIfRtClient final
   InvalidIfrtCompiler default_compiler_;
   std::shared_ptr<ifrt::PjRtTopology> topology_;
   std::vector<std::unique_ptr<const PjRtDeviceDescription>> descriptions_;
+  ifrt::AttributeMap attributes_;
   std::vector<std::unique_ptr<CompileOnlyDevice>> owned_devices_;
   std::vector<ifrt::Device*> devices_;
 };

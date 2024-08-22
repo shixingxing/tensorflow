@@ -20,6 +20,7 @@ limitations under the License.
 #include <functional>
 #include <memory>
 #include <optional>
+#include <variant>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/functional/any_invocable.h"
@@ -32,6 +33,7 @@ limitations under the License.
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/event.h"
 #include "xla/stream_executor/memory_allocation.h"
+#include "xla/stream_executor/platform.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
 #include "xla/stream_executor/tpu/c_api_decl.h"
@@ -89,24 +91,9 @@ class TpuExecutor : public tensorflow::tpu::TpuExecutorInterface {
       const override;
 
   absl::StatusOr<std::unique_ptr<Stream>> CreateStream(
-      std::optional<std::variant<StreamPriority, int>> priority =
-          std::nullopt) override;
+      std::optional<std::variant<StreamPriority, int>> priority) override;
 
   absl::StatusOr<std::unique_ptr<Event>> CreateEvent() override;
-
-  bool HostCallback(Stream* stream,
-                    absl::AnyInvocable<absl::Status() &&> callback) override;
-
-  absl::Status Memcpy(Stream* stream, void* host_dst,
-                      const DeviceMemoryBase& device_src,
-                      uint64_t size) override;
-
-  absl::Status Memcpy(Stream* stream, DeviceMemoryBase* device_dst,
-                      const void* host_src, uint64_t size) override;
-
-  bool MemcpyDeviceToDevice(Stream* stream, DeviceMemoryBase* gpu_dst,
-                            const DeviceMemoryBase& host_src,
-                            uint64_t size) override;
 
   bool SynchronizeAllActivity() override;
 
@@ -115,7 +102,6 @@ class TpuExecutor : public tensorflow::tpu::TpuExecutorInterface {
   absl::Status SynchronousMemcpy(void* host_dst,
                                  const DeviceMemoryBase& device_src,
                                  uint64_t size) override;
-
   absl::Status UnloadAllPrograms() override;
 
   absl::Status EnqueueCompactionOnStreamForHbm(
@@ -140,10 +126,6 @@ class TpuExecutor : public tensorflow::tpu::TpuExecutorInterface {
 
   // -- Unimplemented (stubbed out) methods.
 
-  absl::Status Memset32(Stream* stream, DeviceMemoryBase* location,
-                        uint32_t pattern, uint64_t size) override {
-    LOG(FATAL) << "not yet implemented";
-  }
   absl::Status EnablePeerAccessTo(StreamExecutor* other) override {
     LOG(FATAL) << "not yet implemented";
   }

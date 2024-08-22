@@ -2,13 +2,10 @@
 """
 
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_library")
-load("@local_config_rocm//rocm:build_defs.bzl", "if_rocm_is_configured", "rocm_copts")
+load("@local_config_rocm//rocm:build_defs.bzl", "if_rocm_is_configured", "rocm_copts", "rocm_library")
 load("@local_tsl//tsl/platform/default:cuda_build_defs.bzl", "if_cuda_is_configured")
 load("@bazel_skylib//lib:paths.bzl", "paths")
-load(
-    "//xla/tests:build_defs.bzl",
-    "prepare_gpu_backend_data",
-)
+load("//xla/tests:build_defs.bzl", "prepare_gpu_backend_data")
 
 # buildifier: disable=out-of-order-load
 # Internally this loads a macro, but in OSS this is a function
@@ -56,13 +53,25 @@ def build_cub_sort_kernels(name, types, local_defines = [], **kwargs):
 
 register_extension_info(extension = build_cub_sort_kernels, label_regex_for_dep = "{extension_name}_.*")
 
-def gpu_kernel_library(name, copts = [], local_defines = [], **kwargs):
+def gpu_kernel_library(name, copts = [], local_defines = [], tags = [], **kwargs):
     cuda_library(
-        name = name,
-        local_defines = local_defines + if_cuda_is_configured(["GOOGLE_CUDA=1"]) +
-                        if_rocm_is_configured(["TENSORFLOW_USE_ROCM=1"]),
-        copts = copts + rocm_copts(),
+        name = name + "_cuda",
+        local_defines = local_defines + if_cuda_is_configured(["GOOGLE_CUDA=1"]),
+        copts = copts,
+        tags = ["manual"] + tags,
         **kwargs
+    )
+    rocm_library(
+        name = name + "_rocm",
+        local_defines = local_defines + if_rocm_is_configured(["TENSORFLOW_USE_ROCM=1"]),
+        copts = copts + rocm_copts(),
+        tags = ["manual"] + tags,
+        **kwargs
+    )
+    native.alias(
+        name = name,
+        actual = if_rocm_is_configured(":%s_rocm" % name, "%s_cuda" % name),
+        tags = ["gpu"] + tags,
     )
 
 register_extension_info(extension = gpu_kernel_library, label_regex_for_dep = "{extension_name}")
@@ -185,5 +194,5 @@ def gen_gpu_hlo_compile_tests(
                     hlo_path,
                 ] + xla_flags,
                 data = ["//xla/tools/multihost_hlo_runner:hlo_runner_main_gpu", data_label],
-                tags = backend_tags[backend] + ["requires-mem:16g"] + tags,
+                tags = backend_tags[backend] + ["requires-mem:16g", "nozapfhahn"] + tags,
             )

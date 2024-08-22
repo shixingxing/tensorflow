@@ -176,6 +176,7 @@ tsl_gpu_library(
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/types:optional",
+        "@com_google_absl//absl/types:span",
         "@local_tsl//tsl/platform:env",
         "@local_tsl//tsl/platform:errors",
         "@local_tsl//tsl/platform:logging",
@@ -310,7 +311,10 @@ tsl_gpu_library(
         "@local_tsl//tsl/profiler/utils:xplane_builder",
         "@local_tsl//tsl/profiler/utils:xplane_schema",
         "@local_tsl//tsl/profiler/utils:xplane_utils",
-    ] + if_cuda(["//xla/tsl/cuda:cupti"]),
+    ] + if_cuda([
+        "//xla/tsl/cuda:cupti",
+        "//xla/tsl/cuda",
+    ]),
 )
 
 tsl_gpu_library(

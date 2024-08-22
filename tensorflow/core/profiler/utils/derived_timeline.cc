@@ -69,7 +69,6 @@ inline std::string HloOpEventPrefix(const GpuEventStats& stats) {
 std::vector<XEventMetadata*> GetOrCreateHloOpEventsMetadata(
     XPlaneBuilder& xplane, const GpuEventStats& stats, const Symbol symbol) {
   DCHECK(stats.IsXlaOp());
-  DCHECK(!stats.hlo_module_name.empty());
   std::vector<XEventMetadata*> hlo_op_events_metadata;
   hlo_op_events_metadata.reserve(stats.hlo_op_names.size());
   // Prepend an HLO module identifier so HLO operators with the same name but in
@@ -464,13 +463,8 @@ void DeriveLinesFromStats(XPlane* device_trace) {
       &plane_builder, tensorflow::profiler::kThreadIdSource,
       tensorflow::profiler::kSourceLineName, start_timestamp_ns, {});
 
-  XLineBuilder host_offload_op_line_builder =
-      plane_builder.GetOrCreateLine(kThreadIdHostOffloadOp);
-  host_offload_op_line_builder.SetName(kHostOffloadOpLineName);
-  host_offload_op_line_builder.SetTimestampNs(start_timestamp_ns);
-
-  HostOffloadEventProcessor host_offload_event_processor(
-      &plane_builder, &host_offload_op_line_builder);
+  HostOffloadEventProcessor host_offload_event_processor(&plane_builder,
+                                                         start_timestamp_ns);
 
   for (const XEventVisitor& event :
        GetSortedEvents<XEventVisitor>(plane_visitor, true)) {
@@ -555,11 +549,10 @@ void DeriveLinesForXlaCpuOps(XPlane* host_trace) {
         xla_cpu_ops.ExpandOrAddEvent(
             *plane_builder.GetOrCreateEventMetadata(*hlo_module_name),
             event.GetTimespan(), std::nullopt);
-      }
-
-      if (framework_op_name.has_value()) {
-        ProcessTfOpEvent(*framework_op_name, event.GetTimespan(), std::nullopt,
-                         plane_builder, tf_name_scope, tf_ops);
+        if (framework_op_name.has_value()) {
+          ProcessTfOpEvent(*framework_op_name, event.GetTimespan(),
+                           std::nullopt, plane_builder, tf_name_scope, tf_ops);
+        }
       }
     });
   });

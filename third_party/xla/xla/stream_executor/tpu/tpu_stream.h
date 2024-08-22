@@ -1,5 +1,3 @@
-#include "xla/stream_executor/event.h"
-#include "xla/stream_executor/stream.h"
 /* Copyright 2020 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,9 +17,13 @@ limitations under the License.
 #define XLA_STREAM_EXECUTOR_TPU_TPU_STREAM_H_
 
 #include <cstdint>
+#include <utility>
 
+#include "absl/functional/any_invocable.h"
 #include "absl/status/status.h"
 #include "xla/stream_executor/device_memory.h"
+#include "xla/stream_executor/event.h"
+#include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
 #include "xla/stream_executor/tpu/c_api_conversions.h"
 #include "xla/stream_executor/tpu/c_api_decl.h"
@@ -121,6 +123,51 @@ class TpuStream : public tensorflow::tpu::TpuStreamInterface {
     stream_executor::tpu::ExecutorApiFn()->TpuExecutor_RecordEventFn(
         se_executor_, stream_, se_event, status.c_status);
     return status.status();
+  }
+
+  absl::Status Memcpy(stream_executor::DeviceMemoryBase* device_dst,
+                      const void* host_src, uint64_t size) override {
+    StatusHelper status;
+    SE_DeviceMemoryBase se_base = ApiConverter::ToC(*device_dst);
+    stream_executor::tpu::ExecutorApiFn()->TpuExecutor_MemcpyFromHostFn(
+        se_executor_, stream_, &se_base, host_src, size, status.c_status);
+    return status.status();
+  }
+  absl::Status Memcpy(stream_executor::DeviceMemoryBase* device_dst,
+                      const stream_executor::DeviceMemoryBase& device_src,
+                      uint64_t size) override {
+    return absl::UnimplementedError(
+        "Memcpy from device to deviceis not implemented for TPU");
+  }
+  absl::Status Memcpy(void* host_dst,
+                      const stream_executor::DeviceMemoryBase& device_src,
+                      uint64_t size) override {
+    StatusHelper status;
+    SE_DeviceMemoryBase se_base = ApiConverter::ToC(device_src);
+    stream_executor::tpu::ExecutorApiFn()->TpuExecutor_MemcpyToHostFn(
+        se_executor_, stream_, host_dst, &se_base, size, status.c_status);
+    return status.status();
+  }
+  struct HostCallbackContext {
+    absl::AnyInvocable<absl::Status() &&> callback;
+  };
+  static TSL_Status* HostCallbackTrampoline(void* ctx) {
+    HostCallbackContext* host_ctx = reinterpret_cast<HostCallbackContext*>(ctx);
+    absl::Status status = std::move(host_ctx->callback)();
+    TSL_Status* c_status =
+        stream_executor::tpu::ExecutorApiFn()->TpuStatus_CreateFn(
+            status.raw_code(), absl::StatusMessageAsCStr(status));
+    delete host_ctx;
+    return c_status;
+  }
+  absl::Status DoHostCallbackWithStatus(
+      absl::AnyInvocable<absl::Status() &&> callback) override {
+    HostCallbackContext* ctx = new HostCallbackContext{std::move(callback)};
+    if (stream_executor::tpu::ExecutorApiFn()->TpuExecutor_HostCallbackFn(
+            se_executor_, stream_, &HostCallbackTrampoline, ctx)) {
+      return absl::OkStatus();
+    }
+    return absl::InternalError("Failed to  host callback.");
   }
 
   SE_Stream* se_stream() const { return stream_; }

@@ -18,6 +18,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/strings/match.h"
+#include "xla/tsl/lib/core/status_test_util.h"
 #include "tensorflow/core/common_runtime/kernel_benchmark_testlib.h"
 #include "tensorflow/core/framework/allocator.h"
 #include "tensorflow/core/framework/fake_input.h"
@@ -37,7 +38,6 @@ limitations under the License.
 #include "tensorflow/core/platform/status.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/platform/test_benchmark.h"
-#include "tsl/lib/core/status_test_util.h"
 
 namespace tensorflow {
 
@@ -157,7 +157,7 @@ TEST_F(GatherNdOpConstructionTest, Error_BadIndicesPolicyInvalid) {
                    .Input(FakeInput(DT_INT32))
                    .Attr("bad_indices_policy", "AN_UNRECOGNIZED_POLICY")
                    .Finalize(node_def()));
-  EXPECT_NE(InitOp(), OkStatus());
+  EXPECT_NE(InitOp(), absl::OkStatus());
 }
 
 constexpr int kLookups = 2000;

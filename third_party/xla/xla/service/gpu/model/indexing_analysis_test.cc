@@ -18,9 +18,8 @@ limitations under the License.
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/strings/string_view.h"
-#include "mlir/IR/MLIRContext.h"  // from @llvm-project
+#include "mlir/IR/MLIRContext.h"
 #include "xla/hlo/ir/hlo_instruction.h"
-#include "xla/service/gpu/fusions/tiling_util.h"
 #include "xla/service/gpu/hlo_traversal.h"
 #include "xla/service/gpu/model/indexing_test_utils.h"
 #include "xla/tests/hlo_test_base.h"
@@ -2564,32 +2563,6 @@ TEST_F(IndexingAnalysisTest, FusionWithUnsupportedOp) {
                   ElementsAre(UndefinedMap()), ElementsAre(UndefinedMap())));
 }
 
-TEST_F(IndexingAnalysisTest, TilingIndexing) {
-  Tiling tiling{/*shape=*/{1022, 256, 16},
-                /*tile_sizes=*/{8, 1, 4},
-                /*num_threads=*/{1, 4, 4}};
-  auto indexing_map = GetIndexingMapForTiling(tiling, &mlir_context_);
-  indexing_map.Simplify();
-  EXPECT_THAT(indexing_map.ToString(), MatchIndexingString(R"(
-        (d0, d1, d2, d3, d4, d5)[s0, s1, s2] -> (
-          (d3 floordiv 64) * 8 + s0,
-          (d3 mod 64) * 4 + d0 floordiv 4,
-          d0 mod 4 + s2 * 4
-        )
-        domain:
-        d0 in [0, 15]
-        d1 in [0, 0]
-        d2 in [0, 0]
-        d3 in [0, 8191]
-        d4 in [0, 0]
-        d5 in [0, 0]
-        s0 in [0, 7]
-        s1 in [0, 0]
-        s2 in [0, 3]
-        (d3 floordiv 64) * 8 + s0 in [0, 1021]
-      )"));
-}
-
 TEST_F(IndexingAnalysisTest, EpilogueIndexing) {
   auto module = ParseAndReturnVerifiedModule(R"(
     HloModule m
@@ -2651,6 +2624,35 @@ TEST_F(IndexingAnalysisTest, EpilogueIndexing_NoEpilogue) {
                   domain:
                   d0 in [0, 999]
                   d1 in [0, 999]
+              )"));
+}
+
+TEST_F(IndexingAnalysisTest, BroadcastingElementwise) {
+  auto root = ParseAndGetRoot(R"(
+    HloModule m
+    ENTRY e {
+      p0 = pred[] parameter(0)
+      p1 = f32[1000, 1000] parameter(1)
+      p2 = f32[1000, 1000] parameter(2)
+      ROOT select = f32[1000, 1000] select(p0, p1, p2)
+    }
+  )");
+  auto input_indexing = GetOutputToInputIndexing(root);
+
+  EXPECT_THAT(GetOutputToInputIndexing(root).ToString(), MatchIndexingString(R"(
+                  operand id = 0
+                    (d0, d1) -> ()
+                    domain:
+                    d0 in [0, 999]
+                    d1 in [0, 999]
+                  operand id = 1 (d0, d1) -> (d0, d1)
+                    domain:
+                    d0 in [0, 999]
+                    d1 in [0, 999]
+                  operand id = 2 (d0, d1) -> (d0, d1)
+                    domain:
+                    d0 in [0, 999]
+                    d1 in [0, 999]
               )"));
 }
 

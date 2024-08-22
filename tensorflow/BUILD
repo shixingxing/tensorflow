@@ -69,7 +69,6 @@ load("//tensorflow/python/tools/api/generator2:generate_api.bzl", "generate_apis
 
 PACKAGE_STATIC_DEPS = [
     "//:__subpackages__",
-    "@cudnn_frontend_archive//:__subpackages__",
     "@gif//:__subpackages__",
     "@highwayhash//:__subpackages__",
     "@hwloc//:__subpackages__",
@@ -1054,7 +1053,7 @@ package_group(
         "//learning/serving/experimental/remote_predict/...",
         "//perftools/accelerators/xprof/convert/...",
         "//perftools/accelerators/xprof/integration_tests/...",
-        "//smartass/brain/configure/...",
+        "//smartass/brain/...",
         "//tensorflow/...",
         "//tensorflow_decision_forests/...",
         "//tensorflow_federated/...",
@@ -1111,7 +1110,6 @@ bzl_library(
         "//tensorflow/core/platform:rules_cc_bzl",
         "//third_party/compute_library:build_defs_bzl",
         "//third_party/llvm_openmp:openmp_bzl",
-        "//third_party/mkl_dnn:build_defs_bzl",
         "@bazel_skylib//lib:new_sets",
         "@bazel_skylib//rules:common_settings",
         "@local_config_cuda//cuda:build_defs_bzl",
@@ -1352,7 +1350,7 @@ tf_cc_shared_library(
         "//tensorflow/core:tensorflow",
         "//tensorflow/core/data:standalone",
         # Exports for pywrap_tensorflow_internal. Many of these are transitive
-        # depedencies of the above, but must be explicitly listed for
+        # dependencies of the above, but must be explicitly listed for
         # cc_shared_library to work.
         "//tensorflow/c/eager:c_api_experimental",
         "//tensorflow/c/eager:c_api_internal",
@@ -1389,7 +1387,6 @@ tf_cc_shared_library(
         "//tensorflow/compiler/mlir/tensorflow",
         "//tensorflow/compiler/mlir/tensorflow/c:mlir_c_api_registration",
         "//tensorflow/compiler/mlir/tensorflow:error_util",
-        "//tensorflow/compiler/mlir/tensorflow:export_graphdef",
         "//tensorflow/compiler/mlir/tensorflow:mlir_import_options",
         "//tensorflow/compiler/mlir/tensorflow:mlir_roundtrip_flags",
         "//tensorflow/compiler/mlir/tensorflow:translate_lib",
@@ -1448,7 +1445,7 @@ tf_cc_shared_library(
         "//tensorflow/lite/kernels/internal:compatibility",
         "//tensorflow/lite/kernels:builtin_ops",
         "//tensorflow/lite/kernels:reference_ops",
-        "//tensorflow/lite/schema:schema_fbs",
+        "//tensorflow/compiler/mlir/lite/schema:schema_fbs",
         "//tensorflow/lite/toco/logging:conversion_log_util",
         "//tensorflow/lite/toco/logging:toco_conversion_log_proto_cc",
         "//tensorflow/lite/toco:model_flags_proto_cc",

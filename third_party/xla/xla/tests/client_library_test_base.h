@@ -37,9 +37,9 @@ limitations under the License.
 #include "xla/tests/literal_test_util.h"
 #include "xla/tests/manifest_checking_test.h"
 #include "xla/tests/test_utils.h"
+#include "xla/tsl/lib/core/bitmap.h"
 #include "xla/types.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/lib/core/bitmap.h"
 #include "tsl/platform/ml_dtypes.h"
 #include "tsl/platform/test.h"
 
@@ -70,6 +70,9 @@ class ClientLibraryTestBase : public ManifestCheckingTest {
   // Creates a new ClientLibraryTestBase with custom client options.
   ClientLibraryTestBase(se::Platform* platform,
                         const LocalClientOptions& client_options);
+
+  // Returns the name of the suite currently being run.
+  std::string SuiteName() const;
 
   // Returns the name of the test currently being run.
   std::string TestName() const;

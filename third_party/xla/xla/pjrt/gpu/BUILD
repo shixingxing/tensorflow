@@ -19,7 +19,6 @@ cc_library(
     hdrs = ["gpu_helpers.h"],
     visibility = internal_visibility(["//xla/pjrt:friends"]),
     deps = [
-        "//xla:statusor",
         "//xla:types",
         "//xla:util",
         "//xla/client:client_library",
@@ -30,6 +29,7 @@ cc_library(
         "//xla/tsl/framework:bfc_allocator",
         "//xla/tsl/framework:device_id_impl",
         "//xla/tsl/util:env_var",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
     ],
 )
@@ -44,10 +44,10 @@ cc_library(
         ":gpu_helpers",
         ":gpu_metrics",
         ":gpu_topology",
+        ":gpu_topology_proto_cc",
         "//xla:literal",
         "//xla:shape_util",
         "//xla:status_macros",
-        "//xla:statusor",
         "//xla:util",
         "//xla:xla_proto_cc",
         "//xla/client:client_library",
@@ -91,6 +91,7 @@ cc_library(
         "//xla/tsl/framework:bfc_allocator",
         "//xla/tsl/framework:device_id",
         "//xla/tsl/framework:device_id_impl",
+        "//xla/tsl/lib/strings:proto_serialization",
         "//xla/tsl/util:env_var",
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/base:core_headers",
@@ -108,7 +109,6 @@ cc_library(
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:span",
-        "@local_tsl//tsl/lib/strings:proto_serialization",
         "@local_tsl//tsl/platform:casts",
         "@local_tsl//tsl/platform:env",
         "@local_tsl//tsl/platform:errors",
@@ -116,14 +116,20 @@ cc_library(
         "@local_tsl//tsl/platform:status",
         "@local_tsl//tsl/platform:statusor",
         "@local_tsl//tsl/profiler/lib:connected_traceme",
+        "@local_tsl//tsl/profiler/lib:nvtx_utils",
         "@local_tsl//tsl/profiler/lib:traceme",
     ] + if_cuda_or_rocm([
+        # keep sorted
         ":nccl_id_store",
+        "//xla:debug_options_flags",
         "//xla/service/gpu:gpu_compiler",
+        "//xla/service/gpu:gpu_memory_space_assignment",
     ]) + if_cuda([
-        "@local_config_cuda//cuda:cuda_headers",
+        # keep sorted
         "//xla/stream_executor/gpu:gpu_cudamallocasync_allocator",
+        "@local_config_cuda//cuda:cuda_headers",
     ]) + if_rocm([
+        # keep sorted
         "@local_config_rocm//rocm:rocm_headers",
     ]),
 )
@@ -145,13 +151,14 @@ xla_cc_test(
         "//xla:literal_util",
         "//xla:shape_util",
         "//xla:status_macros",
-        "//xla:statusor",
         "//xla:test",
+        "//xla:util",
         "//xla:xla_data_proto_cc",
         "//xla/client:xla_computation",
         "//xla/ffi",
         "//xla/ffi:ffi_api",
         "//xla/pjrt:host_memory_spaces",
+        "//xla/pjrt:mlir_to_hlo",
         "//xla/pjrt:pjrt_client",
         "//xla/pjrt:pjrt_executable",
         "//xla/pjrt:pjrt_future",
@@ -162,13 +169,14 @@ xla_cc_test(
         "//xla/service:platform_util",
         "//xla/stream_executor",
         "//xla/tests:literal_test_util",
+        "//xla/tsl/lib/core:status_test_util",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/time",
-        "@local_tsl//tsl/lib/core:status_test_util",
+        "@com_google_absl//absl/types:span",
         "@local_tsl//tsl/platform:env",
         "@local_tsl//tsl/platform:errors",
         "@local_tsl//tsl/platform:status",
@@ -184,13 +192,13 @@ cc_library(
     hdrs = ["nccl_id_store.h"],
     deps = [
         "//xla:status_macros",
-        "//xla:statusor",
         "//xla/pjrt/distributed:key_value_store_interface",
         "//xla/service:global_device_id",
         "//xla/service/gpu/runtime:nccl_api",
         "//xla/service/gpu/runtime:nccl_clique_key",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/time",
         "@local_tsl//tsl/platform:errors",
@@ -292,15 +300,15 @@ cc_library(
     ],
 )
 
-xla_cc_test(
+xla_test(
     name = "se_gpu_pjrt_compiler_test",
     srcs = if_gpu_is_configured(["se_gpu_pjrt_compiler_test.cc"]),
+    backends = ["gpu"],
     tags = [
-        "gpu",
         "no_oss",
-        "requires-gpu-nvidia",
     ] + if_google(["config-cuda-only"]),
     deps = [
+        ":gpu_topology",
         ":se_gpu_pjrt_client",
         ":se_gpu_pjrt_compiler",
         "//xla:test",
@@ -308,7 +316,6 @@ xla_cc_test(
         "//xla/mlir_hlo",
         "//xla/pjrt:pjrt_client",
         "//xla/pjrt:pjrt_compiler",
-        "//xla/service:gpu_plugin",
         "//xla/service:hlo_parser",
         "//xla/stream_executor/cuda:cublas_plugin",
         "//xla/tests:literal_test_util",
@@ -322,13 +329,12 @@ xla_cc_test(
     ],
 )
 
-xla_cc_test(
+xla_test(
     name = "se_gpu_pjrt_compiler_aot_test",
     srcs = if_gpu_is_configured(["se_gpu_pjrt_compiler_aot_test.cc"]),
+    backends = ["gpu"],
     tags = [
-        "gpu",
         "no_oss",
-        "requires-gpu-nvidia",
     ] + if_google(["config-cuda-only"]),
     deps = [
         ":se_gpu_pjrt_client",
@@ -341,7 +347,6 @@ xla_cc_test(
         "//xla/pjrt:pjrt_compiler",
         "//xla/pjrt:pjrt_executable",
         "//xla/service:compiler",
-        "//xla/service:gpu_plugin",
         "//xla/service:hlo_parser",
         "//xla/tests:literal_test_util",
         "@com_google_absl//absl/memory",

@@ -1,4 +1,3 @@
-#include "xla/stream_executor/stream.h"
 /* Copyright 2020 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,10 +18,21 @@ limitations under the License.
 #ifndef TENSORFLOW_C_EXPERIMENTAL_STREAM_EXECUTOR_STREAM_EXECUTOR_INTERNAL_H_
 #define TENSORFLOW_C_EXPERIMENTAL_STREAM_EXECUTOR_STREAM_EXECUTOR_INTERNAL_H_
 
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
+
+#include "absl/functional/any_invocable.h"
+#include "absl/status/status.h"
 #include "tensorflow/c/experimental/stream_executor/stream_executor.h"
+#include "tensorflow/c/tf_status.h"
 #include "tensorflow/c/tf_status_helper.h"
+#include "xla/stream_executor/device_memory.h"
+#include "xla/stream_executor/event.h"
 #include "xla/stream_executor/executor_cache.h"
 #include "xla/stream_executor/platform.h"
+#include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_common.h"
 #include "xla/stream_executor/stream_executor.h"
 #include "tsl/platform/statusor.h"
@@ -88,14 +98,15 @@ class CPlatform : public Platform {
   absl::StatusOr<std::unique_ptr<DeviceDescription>> DescriptionForDevice(
       int ordinal) const override;
   absl::StatusOr<StreamExecutor*> ExecutorForDevice(int ordinal) override;
-  absl::StatusOr<StreamExecutor*> GetExecutor(
-      const StreamExecutorConfig& config) override;
-  absl::StatusOr<std::unique_ptr<StreamExecutor>> GetUncachedExecutor(
-      const StreamExecutorConfig& config) override;
-
-  void DestroyAllExecutors() { executor_cache_.DestroyAllExecutors(); }
+  absl::StatusOr<StreamExecutor*> FindExisting(int ordinal) override;
 
  private:
+  // Returns a device constructed with the ordinal without
+  // looking in or storing to the Platform's executor cache.
+  // Ownership IS transferred to the caller.
+  absl::StatusOr<std::unique_ptr<StreamExecutor>> GetUncachedExecutor(
+      int ordinal);
+
   SP_Platform platform_;
   void (*destroy_platform_)(SP_Platform*);
   SP_PlatformFns platform_fns_;
@@ -220,7 +231,71 @@ class CStream : public StreamCommon {
                                c_status.get());
     return tensorflow::StatusFromTF_Status(c_status.get());
   }
+  absl::Status Memset32(DeviceMemoryBase* location, uint32_t pattern,
+                        uint64_t size) override {
+    tensorflow::TF_StatusPtr c_status(TF_NewStatus());
+    SP_DeviceMemoryBase device_mem = DeviceMemoryBaseToC(location);
+    stream_executor_->memset32(device_, stream_handle_, &device_mem, pattern,
+                               size, c_status.get());
+    return tensorflow::StatusFromTF_Status(c_status.get());
+  }
+  absl::Status Memcpy(DeviceMemoryBase* gpu_dst, const void* host_src,
+                      uint64_t size) override {
+    tensorflow::TF_StatusPtr c_status(TF_NewStatus());
+    SP_DeviceMemoryBase device_mem_dst = DeviceMemoryBaseToC(gpu_dst);
+    stream_executor_->memcpy_htod(device_, stream_handle_, &device_mem_dst,
+                                  host_src, size, c_status.get());
+    if (TF_GetCode(c_status.get()) != TF_OK) {
+      LOG(ERROR) << TF_Message(c_status.get());
+    }
+    return tensorflow::StatusFromTF_Status(c_status.get());
+  }
+  absl::Status Memcpy(DeviceMemoryBase* gpu_dst,
+                      const DeviceMemoryBase& gpu_src, uint64_t size) override {
+    tensorflow::TF_StatusPtr c_status(TF_NewStatus());
+    SP_DeviceMemoryBase device_mem_dst = DeviceMemoryBaseToC(gpu_dst);
+    SP_DeviceMemoryBase device_mem_src = DeviceMemoryBaseToC(&gpu_src);
+    stream_executor_->memcpy_dtod(device_, stream_handle_, &device_mem_dst,
+                                  &device_mem_src, size, c_status.get());
+    if (TF_GetCode(c_status.get()) != TF_OK) {
+      LOG(ERROR) << TF_Message(c_status.get());
+    }
+    return tensorflow::StatusFromTF_Status(c_status.get());
+  }
+  absl::Status Memcpy(void* host_dst, const DeviceMemoryBase& gpu_src,
+                      uint64_t size) override {
+    tensorflow::TF_StatusPtr c_status(TF_NewStatus());
+    SP_DeviceMemoryBase device_mem_src = DeviceMemoryBaseToC(&gpu_src);
+    stream_executor_->memcpy_dtoh(device_, stream_handle_, host_dst,
+                                  &device_mem_src, size, c_status.get());
+    if (TF_GetCode(c_status.get()) != TF_OK) {
+      LOG(ERROR) << TF_Message(c_status.get());
+    }
+    return tensorflow::StatusFromTF_Status(c_status.get());
+  }
+  // Wrapper that allows passing std::function across C API.
+  struct HostCallbackContext {
+    absl::AnyInvocable<absl::Status() &&> callback;
+  };
 
+  // This wrapper allows calling `HostCallbackContext::callback` across C API.
+  // This function matches `SE_StatusCallbackFn` signature and will be passed as
+  // `callback_fn` to `host_callback` in `SP_StreamExecutor`.
+  static void HostCallbackTrampoline(void* ctx, TF_Status* status) {
+    HostCallbackContext* host_ctx = static_cast<HostCallbackContext*>(ctx);
+    absl::Status s = std::move(host_ctx->callback)();
+    tsl::Set_TF_Status_from_Status(status, s);
+    delete host_ctx;
+  }
+  absl::Status DoHostCallbackWithStatus(
+      absl::AnyInvocable<absl::Status() &&> callback) override {
+    HostCallbackContext* ctx = new HostCallbackContext{std::move(callback)};
+    if (stream_executor_->host_callback(device_, stream_handle_,
+                                        &HostCallbackTrampoline, ctx)) {
+      return absl::OkStatus();
+    }
+    return absl::InternalError("Failed to host callback.");
+  }
   SP_Stream Handle() { return stream_handle_; }
 
  private:

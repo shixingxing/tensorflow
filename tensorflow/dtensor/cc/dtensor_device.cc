@@ -48,7 +48,6 @@ limitations under the License.
 #include "tensorflow/c/tf_status.h"
 #include "tensorflow/c/tf_status_helper.h"
 #include "tensorflow/c/tf_tensor_internal.h"
-#include "tensorflow/compiler/mlir/tensorflow/translate/export_graphdef.h"
 #include "tensorflow/compiler/mlir/tensorflow/translate/mlir_roundtrip_flags.h"
 #include "tensorflow/compiler/mlir/tf2xla/api/v2/tf_executor_to_graph.h"
 #include "xla/status_macros.h"
@@ -1717,7 +1716,7 @@ void DTensorDevice::ModuleToExecutionFunctions(
   absl::flat_hash_set<Node*> control_ret_nodes;
   GraphExportConfig export_config;
   RETURN_C_STATUS_IF_NOT_OK(
-      tensorflow::tf2xla::v2::ConvertMlirToGraph(
+      tensorflow::tf2xla::v2::ConvertTfExecutorToGraph(
           *lowering_context.module, export_config, &(lowering_context.graph),
           flib_def, &control_ret_nodes),
       status);

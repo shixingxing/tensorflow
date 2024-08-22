@@ -19,7 +19,6 @@ limitations under the License.
 
 #include <cstdint>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include <gmock/gmock.h>
@@ -221,6 +220,14 @@ TEST_F(PtxCompilerTest, AcceptsExtraArguments) {
                     /*disable_gpuasm_optimizations=*/false,
                     /*cancel_if_reg_spill=*/false, {"--flag-does-not-exist"}),
       tsl::testing::StatusIs(absl::StatusCode::kInternal));
+}
+
+TEST_F(PtxCompilerTest, ReturnsReasonableVersion) {
+  constexpr stream_executor::LibNvPtxCompilerVersion kMinSupportedVersion = {
+      12, 0, 0};
+
+  EXPECT_THAT(stream_executor::GetLibNvPtxCompilerVersion(),
+              tsl::testing::IsOkAndHolds(testing::Ge(kMinSupportedVersion)));
 }
 
 }  // namespace

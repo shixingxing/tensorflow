@@ -119,11 +119,6 @@ struct AutoShardingOption {
   // If true, allow adding 1d strategies in 2d logical mesh.
   bool allow_mixed_mesh_shape = true;
 
-  // The number of micro batches if gradient accumulation is used.
-  // If this is not 1, the cost of all-reduce for gradient synchronization
-  // is divided by this number.
-  int grad_acc_num_micro_batches = 1;
-
   // If true, N-D sharding (e.g., N maybe be 2 or 3) will be solved in N
   // iterations, where one iteration chooses one tensor dimension to shard. If
   // false, solve N-D sharding directly, i.e., generating all possible sharding
@@ -194,7 +189,7 @@ struct AutoShardingOption {
 
   // Whether or not to model the memory usage of intermediate tensors, if any,
   // for resharding edges.
-  bool model_resharding_memory_costs = true;
+  bool model_resharding_memory_costs = false;
 
   // Whether or not to generate strategies that model the windowed einsum (or
   // collective matmul) optimization
@@ -205,6 +200,12 @@ struct AutoShardingOption {
   // Whether or not to allow shardings where a tensor dim is shared across a
   // number of devices larger than the size of the tensor dimension
   bool allow_shardings_small_dims_across_many_devices = false;
+
+  // Split constant expressions as well when invoking HloConstantSplitter.
+  bool enable_expression_constant_splitter = false;
+
+  // Whether to post-process the solution by reshaping / resharding tensors.
+  bool insert_resharding_reshapes = false;
 
   // Prints a debug string.
   std::string ToString() const;

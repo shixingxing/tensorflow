@@ -22,19 +22,18 @@ limitations under the License.
 #ifndef XLA_STREAM_EXECUTOR_GPU_GPU_EXECUTOR_H_
 #define XLA_STREAM_EXECUTOR_GPU_GPU_EXECUTOR_H_
 
-#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
-#include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <variant>
+#include <vector>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
-#include "absl/functional/any_invocable.h"
 #include "absl/numeric/int128.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -46,6 +45,7 @@ limitations under the License.
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/dnn.h"
 #include "xla/stream_executor/event.h"
+#include "xla/stream_executor/event_based_timer.h"
 #include "xla/stream_executor/fft.h"
 #include "xla/stream_executor/gpu/gpu_collectives.h"
 #include "xla/stream_executor/gpu/gpu_driver.h"
@@ -53,10 +53,10 @@ limitations under the License.
 #include "xla/stream_executor/host_memory_allocation.h"
 #include "xla/stream_executor/kernel.h"
 #include "xla/stream_executor/kernel_spec.h"
-#include "xla/stream_executor/launch_dim.h"
 #include "xla/stream_executor/memory_allocation.h"
 #include "xla/stream_executor/module_spec.h"
 #include "xla/stream_executor/platform.h"
+#include "xla/stream_executor/stream_executor.h"
 #include "xla/stream_executor/stream_executor_common.h"
 #include "tsl/platform/thread_annotations.h"
 
@@ -66,8 +66,10 @@ class StreamExecutor;
 
 namespace gpu {
 
+class GpuEvent;
 class GpuKernel;
 class GpuCommandBuffer;
+class GpuStream;
 
 // CUDA-platform implementation of the platform-agnostic
 // StreamExecutor.
@@ -120,11 +122,11 @@ class GpuExecutor : public StreamExecutorCommon {
 
   int device_ordinal() const override { return device_ordinal_; };
 
-  absl::Status GetKernel(const MultiKernelLoaderSpec& spec,
-                         Kernel* kernel) override;
+  absl::StatusOr<std::unique_ptr<Kernel>> LoadKernel(
+      const MultiKernelLoaderSpec& spec) override;
 
-  // (supported on CUDA only)
-  void UnloadKernel(const Kernel* kernel) override;
+  // Releases any state associated with the previously loaded kernel.
+  void UnloadKernel(const Kernel* kernel);
   absl::Status LoadModule(const MultiModuleLoaderSpec& spec,
                           ModuleHandle* module_handle) override;
   bool UnloadModule(ModuleHandle module_handle) override;
@@ -134,29 +136,6 @@ class GpuExecutor : public StreamExecutorCommon {
   // returns a pointer to that buffer with shared ownership.
   absl::StatusOr<std::shared_ptr<DeviceMemoryBase>> CreateOrShareConstant(
       Stream* stream, absl::Span<const uint8_t> content) override;
-
-  absl::Status Launch(Stream* stream, const ThreadDim& thread_dims,
-                      const BlockDim& block_dims, const Kernel& kernel,
-                      const KernelArgs& args) override;
-
-  absl::Status Launch(Stream* stream, const ThreadDim& thread_dims,
-                      const BlockDim& block_dims,
-                      const ClusterDim& cluster_dims, const Kernel& kernel,
-                      const KernelArgs& args) override;
-
-  absl::Status Submit(Stream* stream,
-                      const CommandBuffer& command_buffer) override;
-
-  int CalculateOccupancy(const DeviceDescription& device_description,
-                         uint64_t registers_per_thread,
-                         uint64_t shared_memory_per_block,
-                         const ThreadDim& thread_dims, GpuFunctionHandle func);
-
-  int CompareOccupancy(int* initial_blocks,
-                       const DeviceDescription& device_description,
-                       uint64_t registers_per_thread,
-                       uint64_t shared_memory_per_block,
-                       const ThreadDim& thread_dims, GpuFunctionHandle func);
 
   DeviceMemoryBase Allocate(uint64_t size, int64_t memory_space) override;
 
@@ -196,6 +175,11 @@ class GpuExecutor : public StreamExecutorCommon {
     return GpuDriver::HostDeallocate(context_, location);
   }
 
+  absl::StatusOr<MemoryType> GetPointerMemorySpace(const void* ptr) override {
+    return GpuDriver::GetPointerMemorySpace(
+        reinterpret_cast<GpuDevicePtr>(const_cast<void*>(ptr)));
+  }
+
   bool SynchronizeAllActivity() override;
 
   absl::Status SynchronousMemZero(DeviceMemoryBase* location,
@@ -207,24 +191,6 @@ class GpuExecutor : public StreamExecutorCommon {
   absl::Status SynchronousMemcpy(void* host_dst,
                                  const DeviceMemoryBase& gpu_src,
                                  uint64_t size) override;
-
-  absl::Status Memset(Stream* stream, DeviceMemoryBase* location,
-                      uint8_t pattern, uint64_t size) override;
-  absl::Status Memset32(Stream* stream, DeviceMemoryBase* location,
-                        uint32_t pattern, uint64_t size) override;
-
-  absl::Status Memcpy(Stream* stream, void* host_dst,
-                      const DeviceMemoryBase& gpu_src, uint64_t size) override;
-
-  absl::Status Memcpy(Stream* stream, DeviceMemoryBase* gpu_dst,
-                      const void* host_src, uint64_t size) override;
-
-  bool MemcpyDeviceToDevice(Stream* stream, DeviceMemoryBase* gpu_dst,
-                            const DeviceMemoryBase& gpu_src,
-                            uint64_t size) override;
-
-  bool HostCallback(Stream* stream,
-                    absl::AnyInvocable<absl::Status() &&> callback) override;
 
   void DeallocateStream(Stream* stream) override;
 
@@ -256,10 +222,7 @@ class GpuExecutor : public StreamExecutorCommon {
   absl::StatusOr<std::unique_ptr<Event>> CreateEvent() override;
 
   absl::StatusOr<std::unique_ptr<Stream>> CreateStream(
-      std::optional<std::variant<StreamPriority, int>> priority =
-          std::nullopt) override;
-
-  absl::StatusOr<std::unique_ptr<Kernel>> CreateKernel() override;
+      std::optional<std::variant<StreamPriority, int>> priority) override;
 
   absl::StatusOr<std::unique_ptr<CommandBuffer>> CreateCommandBuffer(
       CommandBuffer::Mode mode) override;
@@ -321,22 +284,14 @@ class GpuExecutor : public StreamExecutorCommon {
 
   uint64_t GetArgumentLoggingMode() const { return argument_logging_mode_; }
 
- private:
-  // Host callback landing routine invoked by CUDA.
-  // data: User-provided callback provided to HostCallback() above, captured
-  //       as a std::function<void()>. Allocated/initialized inside
-  //       HostCallback() and owned and deleted by this call.
-  static void InternalHostCallback(void* data);
+  // Creates an EventBasedTimer for the given stream.
+  absl::StatusOr<std::unique_ptr<EventBasedTimer>> CreateEventBasedTimer(
+      GpuStream* stream, bool use_delay_kernel);
 
+ private:
   // Collects metadata for the specified kernel.
   absl::Status GetKernelMetadata(GpuKernel* cuda_kernel,
                                  KernelMetadata* kernel_metadata);
-
-  // Prints to VLOG(2) information about the kernel's occupancy and how it might
-  // be improved.
-  void VlogOccupancyInfo(const DeviceDescription& device_description,
-                         const Kernel& kernel, const ThreadDim& thread_dims,
-                         const BlockDim& block_dims);
 
   // (supported on CUDA only)
   absl::Status LoadModuleFromCuBin(const char* cubin, GpuModuleHandle* module)
@@ -351,13 +306,14 @@ class GpuExecutor : public StreamExecutorCommon {
   absl::Status LoadModuleFromHsaco(const char* hsaco, GpuModuleHandle* module)
       TF_EXCLUSIVE_LOCKS_REQUIRED(in_memory_modules_mu_);
 
-  absl::Status Launch(Stream* stream, const ThreadDim& thread_dims,
-                      const BlockDim& block_dims,
-                      const std::optional<ClusterDim>& cluster_dims,
-                      const Kernel& kernel, const KernelArgs& args);
-
   bool UnloadGpuBinary(const void* gpu_binary)
       TF_EXCLUSIVE_LOCKS_REQUIRED(in_memory_modules_mu_);
+
+  // Creates a GpuEvent for the given stream.
+  absl::StatusOr<std::unique_ptr<GpuEvent>> CreateGpuEvent(bool allow_timing);
+
+  // Returns true if a delay kernel is supported for the given stream.
+  absl::StatusOr<bool> DelayKernelIsSupported(GpuStream* stream);
 
   // Guards the on-disk-module mapping.
   absl::Mutex disk_modules_mu_;
@@ -388,14 +344,6 @@ class GpuExecutor : public StreamExecutorCommon {
   // GPU binary (PTX or CUBIN or HSACO) -> {CUDA module, reference count}.
   std::unordered_map<const void*, std::pair<GpuModuleHandle, uint64_t>>
       gpu_binary_to_module_ ABSL_GUARDED_BY(in_memory_modules_mu_);
-
-  // Guards the launched kernel set.
-  absl::Mutex launched_kernels_mu_;
-
-  // Keeps track of the set of launched kernels. Currently used to suppress the
-  // occupancy check on subsequent launches.
-  std::set<GpuFunctionHandle> launched_kernels_
-      ABSL_GUARDED_BY(launched_kernels_mu_);
 
   // Handle for the CUDA device being operated on. Immutable
   // post-initialization.

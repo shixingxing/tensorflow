@@ -30,10 +30,9 @@ limitations under the License.
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
-#include "absl/strings/str_format.h"
-#include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
 #include "xla/hlo/ir/hlo_computation.h"
@@ -47,8 +46,10 @@ limitations under the License.
 #include "xla/service/collective_ops_utils.h"
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/gpu_latency_hiding_scheduler.h"
-#include "xla/service/gpu/gpu_schedule_postprocessing.h"
 #include "xla/service/gpu/model/analytical_latency_estimator.h"
+#include "xla/service/gpu/transforms/pgle_accuracy_checker.h"
+#include "xla/service/gpu/transforms/schedule_postprocessing.h"
+#include "xla/service/gpu/transforms/scheduling_instruction_annotator.h"
 #include "xla/service/hlo_memory_scheduler.h"
 #include "xla/service/hlo_pass_pipeline.h"
 #include "xla/service/latency_hiding_scheduler.h"
@@ -63,6 +64,7 @@ limitations under the License.
 #include "tsl/platform/path.h"
 #include "tsl/platform/protobuf.h"
 #include "tsl/platform/statusor.h"
+#include "tsl/profiler/lib/traceme.h"
 
 namespace xla {
 namespace gpu {
@@ -74,6 +76,9 @@ bool ShouldScheduleAsEarlyAsPossible(const HloInstruction& instr) {
     case HloOpcode::kAllReduceStart:
     case HloOpcode::kCollectivePermuteStart:
       return !IsSyncCollective(&instr);
+    case HloOpcode::kAsyncStart:
+      // Start async ops as early as possible to allow more concurrency.
+      return true;
     case HloOpcode::kCustomCall:
       return static_cast<const HloCustomCallInstruction&>(instr)
                  .custom_call_schedule() ==
@@ -95,6 +100,10 @@ bool ShouldScheduleAsLateAsPossible(const HloInstruction& instr) {
     case HloOpcode::kAllReduceDone:
     case HloOpcode::kCollectivePermuteDone:
       return ShouldScheduleAsEarlyAsPossible(*instr.operand(0));
+    case HloOpcode::kAsyncDone:
+      // Schedule as many other ops as possible before blocking on the
+      // completion of async ops.
+      return true;
     case HloOpcode::kCustomCall:
       return static_cast<const HloCustomCallInstruction&>(instr)
                  .custom_call_schedule() == CustomCallSchedule::SCHEDULE_LATEST;
@@ -416,42 +425,6 @@ std::optional<tensorflow::profiler::ProfiledInstructionsProto> ReadPGLEProfile(
 }
 }  // end namespace
 
-absl::Status IsProfileApplicable(
-    const HloModule* module,
-    const tensorflow::profiler::ProfiledInstructionsProto& profile) {
-  absl::flat_hash_set<absl::string_view> all_instruction_names;
-  for (HloComputation* comp : module->MakeNonfusionComputations()) {
-    for (HloInstruction* instr : comp->instructions()) {
-      all_instruction_names.insert(instr->name());
-    }
-  }
-
-  std::vector<std::string> missing_costs_names;
-  for (const auto& cost : profile.costs()) {
-    if (!all_instruction_names.contains(cost.name())) {
-      missing_costs_names.push_back(cost.name());
-    }
-  }
-  std::vector<std::string> missing_latency_names;
-  for (const auto& latency : profile.latencies()) {
-    if (!all_instruction_names.contains(latency.source())) {
-      missing_latency_names.push_back(latency.source());
-    }
-
-    if (!all_instruction_names.contains(latency.target())) {
-      missing_latency_names.push_back(latency.target());
-    }
-  }
-  if (!(missing_costs_names.empty() && missing_latency_names.empty())) {
-    return absl::InvalidArgumentError(
-        absl::StrFormat("\nMissing costs: %s;\nMissing latencies: %s",
-                        absl::StrJoin(missing_costs_names, ", "),
-                        absl::StrJoin(missing_latency_names, ", ")));
-  }
-
-  return absl::OkStatus();
-}
-
 static int64_t GetSchedulerMemoryLimit(
     const HloModule* module, const se::DeviceDescription& gpu_device_info,
     int pointer_size);
@@ -459,6 +432,7 @@ static int64_t GetSchedulerMemoryLimit(
 absl::StatusOr<ScheduleMetadata> ScheduleGpuModule(
     HloModule* module, int64_t pointer_size,
     const se::DeviceDescription& gpu_device_info) {
+  tsl::profiler::TraceMe traceme("GpuCompiler::CompileToBackendResult");
   int64_t memory_limit =
       GetSchedulerMemoryLimit(module, gpu_device_info, pointer_size);
   if (module->has_schedule()) {
@@ -505,18 +479,17 @@ absl::StatusOr<ScheduleMetadata> ScheduleGpuModule(
       module->config()
           .debug_options()
           .xla_gpu_enable_analytical_latency_estimator();
+  HloPassPipeline pipeline("latency-hiding-scheduler");
   if (profile.has_value()) {
-    latency_estimator = std::make_unique<ProfileGuidedLatencyEstimator>(
-        config, std::move(gpu_latency_estimator), profile.value());
+    auto aggregator = std::make_unique<GPUProfileStatisticsAggregator>();
+    auto pg_latency_estimator = std::make_unique<ProfileGuidedLatencyEstimator>(
+        config, std::move(gpu_latency_estimator), profile.value(),
+        std::move(aggregator));
     LOG(INFO)
         << "Found profile, using profile guided latency estimator. Profile:\n"
         << profile->DebugString();
-    absl::Status s = IsProfileApplicable(module, profile.value());
-    if (!s.ok()) {
-      LOG(INFO) << "PGLE profile may not applicable to the module, but will "
-                   "still be used : "
-                << s.message();
-    }
+    pipeline.AddPass<PGLEAccuracyChecker>(*pg_latency_estimator);
+    latency_estimator = std::move(pg_latency_estimator);
   } else if (enable_analytical_latency_estimator) {
     latency_estimator = std::make_unique<AnalyticalLatencyEstimator>(
         config, std::move(gpu_latency_estimator), gpu_device_info,
@@ -540,18 +513,18 @@ absl::StatusOr<ScheduleMetadata> ScheduleGpuModule(
   auto shape_size_in_bytes = [pointer_size](const Shape& shape) {
     return GetSizeOfShape(shape, pointer_size);
   };
-  HloPassPipeline pipeline("latency-hiding-scheduler");
   auto scheduler_core = std::make_unique<DefaultSchedulerCore>(
       shape_size_in_bytes, async_tracker.get(), latency_estimator.get(),
       config);
+  pipeline.AddPass<SchedulingInstructionAnnotator>();
   pipeline.AddPass<LatencyHidingScheduler>(
       std::move(latency_estimator), std::move(async_tracker),
       std::move(scheduler_core), shape_size_in_bytes);
 
   TF_RETURN_IF_ERROR(pipeline.Run(module).status());
 
-  HloPassPipeline postprocessing_pipeline("gpu-schedule-postprocessing");
-  postprocessing_pipeline.AddPass<GpuSchedulePostprocessing>();
+  HloPassPipeline postprocessing_pipeline("schedule-postprocessing");
+  postprocessing_pipeline.AddPass<SchedulePostprocessing>();
   TF_RETURN_IF_ERROR(postprocessing_pipeline.Run(module).status());
 
   return ScheduleMetadata{memory_limit};

@@ -23,11 +23,11 @@ limitations under the License.
 // The classes defined here are not supposed to be instantiated by the user.
 // Instead, this file provides a single entry point:
 //
-//   BatchStats& GlobalBatchStats();
+//   BatchStatsRegistry& GlobalBatchStatsRegistry();
 //
 // For example, to register batch cost, do:
 //
-//   GlobalBatchStats()
+//   GlobalBatchStatsRegistry()
 //       .model(/* model_name= */ "m", /* op_name= */ "o")
 //       .batch_size(4)
 //       .tpu_cost
@@ -36,7 +36,7 @@ limitations under the License.
 // To get the mean cost later, do:
 //
 //   std::optional<absl::Duration> cost =
-//       .GlobalBatchStats()
+//       .GlobalBatchStatsRegistry()
 //           .model(/* model_name= */ "m", /* op_name= */ "o")
 //           .batch_size(4)
 //           .tpu_cost
@@ -50,19 +50,25 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_KERNELS_BATCHING_UTIL_BATCH_STATS_H_
 #define TENSORFLOW_CORE_KERNELS_BATCHING_UTIL_BATCH_STATS_H_
 
+#include <atomic>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <tuple>
+#include <vector>
 
 #include "absl/container/node_hash_map.h"
-#include "absl/log/check.h"
 #include "absl/time/time.h"
+#include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/types.h"
 #include "tsl/platform/thread_annotations.h"
 
 namespace tensorflow::serving {
+
+// Default values for when there is no recorded statistic in ModelBatchStats.
+constexpr int64_t kNumBatchThreadsUnknown = -1;
+constexpr int64_t kBatchTimeoutMicrosUnknown = -1;
 
 // Tracks the average cost of registered samples.
 //
@@ -139,6 +145,49 @@ class ModelBatchStats {
     return batch_size_stats_by_batch_size_[batch_size];
   }
 
+  // Registers that the model server has processed a batch of size `size`
+  // non-padding tasks for this model, updating the current cumulative
+  // processed size.
+  void RegisterProcessedSize(int64_t size) {
+    cumulative_processed_size_.fetch_add(size, std::memory_order_relaxed);
+  }
+
+  // Returns the cumulative size processed by this model (the total
+  // count of individual unit-sized queries processed by the model).
+  int64_t cumulative_processed_size() const {
+    return cumulative_processed_size_.load(std::memory_order_relaxed);
+  }
+
+  // Returns the list of batch sizes for which this model has statistics.
+  //
+  // The returned list is not guaranteed to be sorted.
+  std::vector<int32> BatchSizes() const {
+    std::vector<int32> result;
+    mutex_lock l(mu_);
+    result.reserve(batch_size_stats_by_batch_size_.size());
+    for (const auto& [key, value] : batch_size_stats_by_batch_size_) {
+      result.push_back(key);
+    }
+    return result;
+  }
+
+  void SetNumBatchThreads(int64_t num_batch_threads) {
+    num_batch_threads_.store(num_batch_threads, std::memory_order_relaxed);
+  }
+
+  int64_t num_batch_threads() const {
+    return num_batch_threads_.load(std::memory_order_relaxed);
+  }
+
+  void SetBatchTimeoutMicros(int64_t batch_timeout_micros) {
+    batch_timeout_micros_.store(batch_timeout_micros,
+                                std::memory_order_relaxed);
+  }
+
+  int64_t batch_timeout_micros() const {
+    return batch_timeout_micros_.load(std::memory_order_relaxed);
+  }
+
  private:
   mutable mutex mu_;
 
@@ -151,12 +200,24 @@ class ModelBatchStats {
   // elements, once created, are fixed in memory.
   absl::node_hash_map<int32, BatchSizeStats> batch_size_stats_by_batch_size_
       TF_GUARDED_BY(mu_);
+
+  // The total count of individual unit-sized queries processed by this model.
+  // Can be used to generate an internal load metric per model. See
+  // RegisterQuerySize for more details.
+  std::atomic<int64_t> cumulative_processed_size_ = 0;
+
+  // The number of batch threads assigned to this model.
+  std::atomic<int64_t> num_batch_threads_ = kNumBatchThreadsUnknown;
+
+  // The timeout in microseconds for this model (after which the current batch
+  // is sent to be processed by the TPU).
+  std::atomic<int64_t> batch_timeout_micros_ = kBatchTimeoutMicrosUnknown;
 };
 
 // Tracks batch statistics for all models.
 //
 // Thread-safe.
-class BatchStats {
+class BatchStatsRegistry {
  public:
   // Returns a reference to ModelBatchStats for the provided model_name and
   // op_name.
@@ -172,8 +233,19 @@ class BatchStats {
     return model_batch_stats_by_model_and_op_names_[key];
   }
 
-  // TODO: b/325954758 - Add a public method for scanning model_batch_stats_ and
-  // mention that it will always returns elements in the same order.
+  // Returns a list of all model and op names.
+  //
+  // This is the set of model/op names tracked by this BatchStats instance.
+  // Note that the returned list is not guaranteed to be sorted.
+  std::vector<std::tuple<std::string, std::string>> ModelAndOpNames() const {
+    std::vector<std::tuple<std::string, std::string>> result;
+    mutex_lock l(mu_);
+    result.reserve(model_batch_stats_by_model_and_op_names_.size());
+    for (const auto& [key, value] : model_batch_stats_by_model_and_op_names_) {
+      result.push_back(key);
+    }
+    return result;
+  }
 
  private:
   mutable mutex mu_;
@@ -192,8 +264,8 @@ class BatchStats {
 // Returns the global instance of BatchStats, to use used for all production
 // purposes (one should only instantiate individual classes from this file to
 // test them).
-inline BatchStats& GlobalBatchStats() {
-  static BatchStats* instance = new BatchStats();
+inline BatchStatsRegistry& GlobalBatchStatsRegistry() {
+  static BatchStatsRegistry* instance = new BatchStatsRegistry();
   return *instance;
 }
 

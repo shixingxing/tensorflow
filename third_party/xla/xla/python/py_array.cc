@@ -36,6 +36,7 @@ limitations under the License.
 #include "absl/algorithm/container.h"
 #include "absl/base/casts.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
@@ -43,12 +44,12 @@ limitations under the License.
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "llvm/Support/Casting.h"
-#include "third_party/nanobind/include/nanobind/nanobind.h"
-#include "third_party/nanobind/include/nanobind/stl/optional.h"  // IWYU pragma: keep
-#include "third_party/nanobind/include/nanobind/stl/string.h"  // IWYU pragma: keep
-#include "third_party/nanobind/include/nanobind/stl/string_view.h"  // IWYU pragma: keep
-#include "third_party/nanobind/include/nanobind/stl/unique_ptr.h"  // IWYU pragma: keep
-#include "third_party/nanobind/include/nanobind/stl/vector.h"  // IWYU pragma: keep
+#include "nanobind/nanobind.h"
+#include "nanobind/stl/optional.h"  // IWYU pragma: keep
+#include "nanobind/stl/string.h"  // IWYU pragma: keep
+#include "nanobind/stl/string_view.h"  // IWYU pragma: keep
+#include "nanobind/stl/unique_ptr.h"  // IWYU pragma: keep
+#include "nanobind/stl/vector.h"  // IWYU pragma: keep
 #include "xla/layout.h"
 #include "xla/layout_util.h"
 #include "xla/pjrt/exceptions.h"
@@ -73,7 +74,6 @@ limitations under the License.
 #include "xla/python/pjrt_ifrt/pjrt_array.h"
 #include "xla/python/pjrt_ifrt/pjrt_client.h"
 #include "xla/python/pjrt_ifrt/pjrt_device.h"
-#include "xla/python/pjrt_ifrt/xla_sharding.h"
 #include "xla/python/py_client.h"
 #include "xla/python/py_device.h"
 #include "xla/python/py_values.h"
@@ -87,11 +87,6 @@ limitations under the License.
 #include "xla/shape_util.h"
 #include "xla/status_macros.h"
 #include "xla/xla_data.pb.h"
-// TODO(b/324133505): remove this GOOGLE_CUDA block after JAX OSS migrates
-// to cuda plugin.
-#if GOOGLE_CUDA
-#include "xla/stream_executor/cuda/cuda_driver.h"
-#endif
 #include "xla/tsl/concurrency/ref_count.h"
 #include "xla/util.h"
 #include "tsl/platform/errors.h"
@@ -149,6 +144,8 @@ tsl::RCReference<ifrt::Array> CreateIfRtArrayFromSingleDeviceShardedPyArrays(
   ifrt_arrays.reserve(py_arrays.size());
   ifrt::DeviceList::Devices devices;
   devices.reserve(py_arrays.size());
+  absl::flat_hash_set<ifrt::Device*> device_set;
+  device_set.reserve(py_arrays.size());
   std::vector<ifrt::Shape> shapes;
   shapes.reserve(py_arrays.size());
 
@@ -170,19 +167,30 @@ tsl::RCReference<ifrt::Array> CreateIfRtArrayFromSingleDeviceShardedPyArrays(
               .c_str());
     }
     ifrt_arrays.push_back(tsl::FormRef(py_array.ifrt_array()));
-    devices.push_back(ifrt_arrays.back()->sharding().devices().front());
+    ifrt::Device* const device =
+        ifrt_arrays.back()->sharding().devices().front();
+    devices.push_back(device);
+    device_set.insert(device);
     shapes.push_back(ifrt_arrays.back()->shape());
     if (canonical_first_memory_kind !=
         ifrt::CanonicalizeMemoryKind(
-            ifrt_arrays.back()->sharding().memory_kind(), devices.back())) {
+            ifrt_arrays.back()->sharding().memory_kind(), device)) {
       throw nb::value_error(
           absl::StrFormat(
               "Memory kind mismatch between PjRtBuffers. Got one buffer with "
-              "memory kind '%s' and another with memory_kind '%s'",
-              first_memory_kind.DebugString(),
-              ifrt_arrays.back()->sharding().memory_kind().DebugString())
+              "memory kind '%v' and another with memory_kind '%v'",
+              first_memory_kind, ifrt_arrays.back()->sharding().memory_kind())
               .c_str());
     }
+  }
+  ifrt::DeviceList device_list(std::move(devices));
+  if (device_set.size() != device_list.size()) {
+    throw nb::value_error(
+        absl::StrFormat(
+            "When making an array from single-device arrays, the input arrays "
+            "must be from distinct devices, but got %s",
+            device_list.DebugString())
+            .c_str());
   }
   ifrt::Client* client = ifrt_arrays.front()->client();
 
@@ -193,8 +201,7 @@ tsl::RCReference<ifrt::Array> CreateIfRtArrayFromSingleDeviceShardedPyArrays(
   }
   auto ifrt_array = client->AssembleArrayFromSingleDeviceArrays(
       ifrt::Shape(shape),
-      ifrt::ConcreteSharding::Create(ifrt::DeviceList(std::move(devices)),
-                                     first_memory_kind,
+      ifrt::ConcreteSharding::Create(std::move(device_list), first_memory_kind,
                                      /*shape=*/ifrt::Shape(shape),
                                      /*shard_shapes=*/std::move(shapes)),
       absl::MakeSpan(ifrt_arrays), ifrt::ArrayCopySemantics::kReuseInput);
@@ -625,10 +632,8 @@ absl::Status PyArray::set_arrays(nb::object obj) {
       throw nb::value_error(
           absl::StrFormat(
               "Memory kind mismatch between single-device arrays. Got one "
-              "array "
-              "with memory kind '%s' and another with memory_kind '%s'",
-              first_memory_kind.DebugString(),
-              ifrt_array->sharding().memory_kind().DebugString())
+              "array with memory kind '%v' and another with memory_kind '%v'",
+              first_memory_kind, ifrt_array->sharding().memory_kind())
               .c_str());
     }
   }
@@ -852,19 +857,6 @@ absl::StatusOr<nb::object> CudaArrayInterfaceToBuffer(
       PrimitiveType element_type,
       DtypeToPrimitiveType(nb_dtype::from_args(cai["typestr"])));
 
-  // TODO(b/324133505): remove this GOOGLE_CUDA block after JAX OSS migrates
-  // to cuda plugin.
-#ifdef GOOGLE_CUDA
-  if (!device_id.has_value()) {
-    // cannot determine device_id/stream when device pointer is NULL.
-    device_id.emplace(
-        (data_value == 0
-             ? 0
-             : stream_executor::gpu::CreatedContexts::GetDeviceOrdinal(
-                   data_ptr)));
-  }
-#endif  // GOOGLE_CUDA
-
   if (!device_id.has_value()) {
     throw XlaRuntimeError(
         "This operation requires CUDA support from jaxlib or jax cuda plugin.");
@@ -952,7 +944,17 @@ absl::Status PyArray::Delete() {
   }
   py_arrays().clear();
   if (ifrt_array() != nullptr) {
-    TF_RETURN_IF_ERROR(ifrt_array()->Delete().Await());
+    // We do not wait for the deletion to complete here.
+    //
+    // (1) Skipping blocking does not affect the correctness of deletion as long
+    // as the runtime preserves dispatch ordering of deletion w.r.t. other
+    // operations.
+    //
+    // (2) Synchronously waiting for the deletion to complete is very expensive
+    // when the deletion can return a status only after the underlying physical
+    // buffer has been deleted or a request must be processed via RPC,
+    // especially as this deletion is done per array.
+    ifrt_array()->Delete();
     SetIfrtArray(tsl::RCReference<ifrt::Array>());
   }
   return absl::OkStatus();
@@ -1039,14 +1041,12 @@ absl::StatusOr<std::vector<PyArray>> PyArray::BatchedCopyToDeviceWithSharding(
     const ifrt::DeviceList& src_devices = ifrt_array_ptr->sharding().devices();
     const ifrt::DeviceList& dst_devices = dst_device_lists[i];
 
-    ifrt::MemoryKind src_memory_kind = ifrt_array_ptr->sharding().memory_kind();
-    ifrt::MemoryKind dst_memory_kind =
-        CreateIfRtMemoryKindFromSharding(dst_sharding);
+    ifrt::MemoryKind src_memory_kind = ifrt::CanonicalizeMemoryKind(
+        ifrt_array_ptr->sharding().memory_kind(), src_devices.front());
+    ifrt::MemoryKind dst_memory_kind = ifrt::CanonicalizeMemoryKind(
+        CreateIfRtMemoryKindFromSharding(dst_sharding), dst_devices.front());
 
-    if (src_devices == dst_devices &&
-        (!dst_memory_kind.memory_kind().has_value() ||
-         !src_memory_kind.memory_kind().has_value() ||
-         src_memory_kind == dst_memory_kind)) {
+    if (src_devices == dst_devices && src_memory_kind == dst_memory_kind) {
       results[i] = py_arrays[i];
       continue;
     }

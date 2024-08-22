@@ -13,41 +13,43 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <array>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "absl/strings/str_replace.h"
 #include "absl/types/span.h"
 #include "xla/literal.h"
+#include "xla/literal_util.h"
 #include "xla/primitive_util.h"
+#include "xla/service/computation_placer.h"
+#include "xla/service/executable.h"
+#include "xla/service/hlo_module_config.h"
 #include "xla/tests/hlo_test_base.h"
 #include "xla/tests/literal_test_util.h"
 #include "xla/tests/test_macros.h"
 #include "xla/tests/test_utils.h"
-#include "tsl/lib/core/status_test_util.h"
+#include "xla/tests/verified_hlo_module.h"
+#include "xla/tsl/lib/core/status_test_util.h"
 #include "tsl/platform/blocking_counter.h"
 #include "tsl/platform/env.h"
 #include "tsl/platform/threadpool.h"
+
+namespace xla {
+namespace {
 
 // Tests cross-GPU operations.
 //
 // Several tests requires at least four GPUs.  For instructions on running this
 // within Google, see go/multi-gpu-unit-test.
-
-#define SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(x)                     \
-  if (num_devices_ < x) {                                         \
-    GTEST_SKIP() << "Test requires at least " << x << " devices"; \
-  }
-
-namespace xla {
-namespace {
-
 class CollectiveOpsTest : public HloTestBase {
  public:
-  CollectiveOpsTest() : num_devices_(backend().device_count()) {
-    VLOG(1) << "Running with " << num_devices_ << " devices";
+  CollectiveOpsTest() {
+    VLOG(1) << "Running with " << num_devices() << " devices";
   }
 
  protected:
@@ -172,9 +174,6 @@ class CollectiveOpsTest : public HloTestBase {
           /*expected_value=*/to_literal({cast(-1), cast(-2), cast(-3)}));
     }
   }
-
- protected:
-  const int64_t num_devices_;
 };
 
 // Returns the non-empty subsets of {0, 1, ..., n}.  For example,
@@ -307,7 +306,7 @@ XLA_TEST_F(CollectiveOpsTest, AllReduceAnd_Pred) {
   auto module = ParseAndReturnVerifiedModule(hlo_module, config).value();
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {},
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
                         /*num_replicas=*/2,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   for (int replica_idx = 0; replica_idx < 2; replica_idx++) {
@@ -348,7 +347,7 @@ XLA_TEST_F(CollectiveOpsTest, AllReduceOr_Pred) {
   auto module = ParseAndReturnVerifiedModule(hlo_module, config).value();
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {},
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
                         /*num_replicas=*/2,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   for (int replica_idx = 0; replica_idx < 2; replica_idx++) {
@@ -362,7 +361,7 @@ XLA_TEST_F(CollectiveOpsTest, AllReduceOr_Pred) {
 XLA_TEST_F(CollectiveOpsTest, AllReduce_AllCombinations) {
   const int64_t kNumElems = 1024;
 
-  for (std::vector<int64_t> devices : PowerSetOfIota(num_devices_)) {
+  for (std::vector<int64_t> devices : PowerSetOfIota(num_devices())) {
     SCOPED_TRACE(absl::StrFormat("Running on devices {%s}",
                                  absl::StrJoin(devices, ", ")));
 
@@ -486,7 +485,7 @@ XLA_TEST_F(CollectiveOpsTest, AllReduce_ThreeReplicaGroups) {
   // Test a prime number so it's not all powers of 2.
   const int64_t kNumElems = 137;
   const int64_t kNumReplicas = 4;
-  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas)
+  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas);
 
   HloModuleConfig config =
       GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
@@ -533,7 +532,7 @@ XLA_TEST_F(CollectiveOpsTest, AllReduce_Degenerate) {
       }
     )";
   static constexpr int kNumReplicas = 4;
-  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas)
+  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas);
 
   HloModuleConfig config =
       GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
@@ -541,7 +540,8 @@ XLA_TEST_F(CollectiveOpsTest, AllReduce_Degenerate) {
                           ParseAndReturnVerifiedModule(kModuleStr, config));
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, /*num_replicas=*/kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        /*num_replicas=*/kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
 
   ASSERT_EQ(results.size(), kNumReplicas);
@@ -568,18 +568,19 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(AsyncAllReduce)) {
     )";
 
   HloModuleConfig config =
-      GetModuleConfigForTest(/*replica_count=*/num_devices_);
+      GetModuleConfigForTest(/*replica_count=*/num_devices());
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnVerifiedModule(kModuleStr, config));
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, num_devices_,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        num_devices(),
                         /*use_threads=*/true, /*run_hlo_passes=*/false));
 
-  ASSERT_EQ(results.size(), num_devices_);
+  ASSERT_EQ(results.size(), num_devices());
   // sum [0, num_devices)
-  uint32_t expected = num_devices_ * (num_devices_ - 1) / 2;
-  for (int i = 0; i < num_devices_; ++i) {
+  uint32_t expected = num_devices() * (num_devices() - 1) / 2;
+  for (int i = 0; i < num_devices(); ++i) {
     LiteralTestUtil::ExpectR0Equal<uint32_t>(expected, results[i]);
   }
 }
@@ -603,21 +604,22 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(AsyncAllReduceTwoOperands)) {
     )";
 
   HloModuleConfig config =
-      GetModuleConfigForTest(/*replica_count=*/num_devices_);
+      GetModuleConfigForTest(/*replica_count=*/num_devices());
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnVerifiedModule(kModuleStr, config));
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, num_devices_,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        num_devices(),
                         /*use_threads=*/true, /*run_hlo_passes=*/false));
 
-  ASSERT_EQ(results.size(), num_devices_);
+  ASSERT_EQ(results.size(), num_devices());
   // sum [0, num_devices)
-  uint32_t expected0 = num_devices_ * (num_devices_ - 1) / 2;
+  uint32_t expected0 = num_devices() * (num_devices() - 1) / 2;
   // sum squares [0, num_devices)
   uint32_t expected1 =
-      num_devices_ * (num_devices_ - 1) * (2 * num_devices_ - 1) / 6;
-  for (int i = 0; i < num_devices_; ++i) {
+      num_devices() * (num_devices() - 1) * (2 * num_devices() - 1) / 6;
+  for (int i = 0; i < num_devices(); ++i) {
     std::vector<Literal> replica_results = results[i].DecomposeTuple();
     LiteralTestUtil::ExpectR0Equal<uint32_t>(expected0, replica_results[0]);
     LiteralTestUtil::ExpectR0Equal<uint32_t>(expected1, replica_results[1]);
@@ -634,17 +636,18 @@ XLA_TEST_F(CollectiveOpsTest, ReplicaId) {
   )";
 
   HloModuleConfig config =
-      GetModuleConfigForTest(/*replica_count=*/num_devices_);
+      GetModuleConfigForTest(/*replica_count=*/num_devices());
   TF_ASSERT_OK_AND_ASSIGN(auto module,
                           ParseAndReturnVerifiedModule(kModuleStr));
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, num_devices_,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        num_devices(),
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
 
-  ASSERT_EQ(results.size(), num_devices_);
-  for (uint32_t i = 0; i < num_devices_; ++i) {
+  ASSERT_EQ(results.size(), num_devices());
+  for (uint32_t i = 0; i < num_devices(); ++i) {
     EXPECT_TRUE(LiteralTestUtil::Equal(LiteralUtil::CreateR0(i), results[i]));
   }
 }
@@ -668,16 +671,18 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(CollectiveBroadcast_Simple)) {
   }
   )";
   const int64_t kNumReplicas = 4;
-  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas)
+  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas);
 
   HloModuleConfig config =
       GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
   TF_ASSERT_OK_AND_ASSIGN(auto module,
                           ParseAndReturnVerifiedModule(kModuleStr, config));
 
-  TF_ASSERT_OK_AND_ASSIGN(std::vector<Literal> results,
-                          ExecuteReplicated(std::move(module), {}, kNumReplicas,
-                                            /*use_threads=*/true));
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::vector<Literal> results,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
+                        /*use_threads=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   EXPECT_TRUE(LiteralTestUtil::Equal(LiteralUtil::CreateR1<uint32_t>({11, 11}),
                                      results[0]));
@@ -702,7 +707,7 @@ XLA_TEST_F(CollectiveOpsTest, CollectivePermute_Simple) {
   }
   )";
   const int64_t kNumReplicas = 4;
-  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas)
+  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas);
 
   HloModuleConfig config =
       GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
@@ -711,7 +716,8 @@ XLA_TEST_F(CollectiveOpsTest, CollectivePermute_Simple) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   EXPECT_TRUE(LiteralTestUtil::Equal(LiteralUtil::CreateR1<uint32_t>({11, 11}),
@@ -738,7 +744,7 @@ XLA_TEST_F(CollectiveOpsTest, CollectivePermute_Degenerate) {
   }
   )";
   const int64_t kNumReplicas = 4;
-  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas)
+  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas);
 
   HloModuleConfig config =
       GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
@@ -747,7 +753,8 @@ XLA_TEST_F(CollectiveOpsTest, CollectivePermute_Degenerate) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   EXPECT_TRUE(LiteralTestUtil::Equal(LiteralUtil::CreateR1<uint32_t>({10, 10}),
@@ -773,7 +780,7 @@ XLA_TEST_F(CollectiveOpsTest, CollectivePermute_NotDegenerate) {
   }
   )";
   const int64_t kNumReplicas = 4;
-  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas)
+  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas);
 
   HloModuleConfig config =
       GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
@@ -782,7 +789,8 @@ XLA_TEST_F(CollectiveOpsTest, CollectivePermute_NotDegenerate) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   EXPECT_TRUE(LiteralTestUtil::Equal(LiteralUtil::CreateR1<uint32_t>({10, 10}),
@@ -809,7 +817,7 @@ XLA_TEST_F(CollectiveOpsTest, CollectivePermute_Rotate) {
   }
   )";
   const int64_t kNumReplicas = 4;
-  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas)
+  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas);
 
   HloModuleConfig config =
       GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
@@ -818,7 +826,8 @@ XLA_TEST_F(CollectiveOpsTest, CollectivePermute_Rotate) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   EXPECT_TRUE(LiteralTestUtil::Equal(LiteralUtil::CreateR1<uint32_t>({13, 13}),
@@ -846,7 +855,7 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(AsyncCollectivePermute)) {
     )";
 
   const int64_t kNumReplicas = 2;
-  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas)
+  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas);
 
   HloModuleConfig config =
       GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
@@ -855,7 +864,8 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(AsyncCollectivePermute)) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/false));
   ASSERT_EQ(results.size(), kNumReplicas);
   EXPECT_TRUE(LiteralTestUtil::Equal(LiteralUtil::CreateR1<uint32_t>({11, 11}),
@@ -887,7 +897,7 @@ XLA_TEST_F(CollectiveOpsTest, AllToAll_EmptyReplicaGroups) {
   }
   )";
   const int64_t kNumReplicas = 4;
-  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas)
+  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas);
 
   HloModuleConfig config =
       GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
@@ -896,7 +906,8 @@ XLA_TEST_F(CollectiveOpsTest, AllToAll_EmptyReplicaGroups) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   LiteralTestUtil::ExpectR1Equal<uint32_t>({10, 15, 11, 16, 12, 17, 13, 18},
@@ -932,7 +943,7 @@ XLA_TEST_F(CollectiveOpsTest, AllToAll_OrderedReplicaGroups) {
   }
   )";
   const int64_t kNumReplicas = 4;
-  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas)
+  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas);
 
   HloModuleConfig config =
       GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
@@ -941,7 +952,8 @@ XLA_TEST_F(CollectiveOpsTest, AllToAll_OrderedReplicaGroups) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   LiteralTestUtil::ExpectR1Equal<uint32_t>({43, 48, 42, 47, 41, 46, 40, 45},
@@ -971,7 +983,7 @@ XLA_TEST_F(CollectiveOpsTest, AllToAll_TwoReplicaGroups) {
   }
   )";
   const int64_t kNumReplicas = 4;
-  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas)
+  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas);
 
   HloModuleConfig config =
       GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
@@ -980,7 +992,8 @@ XLA_TEST_F(CollectiveOpsTest, AllToAll_TwoReplicaGroups) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   LiteralTestUtil::ExpectR1Equal<uint32_t>({23, 28, 20, 25}, results[0]);
@@ -1002,7 +1015,7 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(AllToAll_SplitDimension)) {
   }
   )";
   const int64_t kNumReplicas = 4;
-  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas)
+  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas);
 
   HloModuleConfig config =
       GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
@@ -1011,7 +1024,8 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(AllToAll_SplitDimension)) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   LiteralTestUtil::ExpectR1Equal<uint32_t>({10, 15, 11, 16, 12, 17, 13, 18},
@@ -1044,7 +1058,8 @@ XLA_TEST_F(CollectiveOpsTest, AllGather_Dim0) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   for (const Literal& result : results) {
@@ -1072,7 +1087,8 @@ XLA_TEST_F(CollectiveOpsTest, AllGather_Dim0_UseGlobalDevices) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   for (const Literal& result : results) {
@@ -1100,7 +1116,8 @@ XLA_TEST_F(CollectiveOpsTest, AllGather_Dim1) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   for (const Literal& result : results) {
@@ -1184,7 +1201,8 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(AllGatherMixedTypes)) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   for (int replica_idx = 0; replica_idx < kNumReplicas; replica_idx++) {
     auto rs = results[replica_idx].DecomposeTuple();
@@ -1225,7 +1243,8 @@ XLA_TEST_F(CollectiveOpsTest, ReduceScatter) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   LiteralTestUtil::ExpectR1Equal<uint32_t>({11, 13, 15, 17}, results[0]);
   LiteralTestUtil::ExpectR1Equal<uint32_t>({19, 21, 23, 25}, results[1]);
@@ -1298,7 +1317,8 @@ XLA_TEST_F(CollectiveOpsTest, ReduceScatter_Dim1) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   LiteralTestUtil::ExpectR1Equal<uint32_t>({11, 13, 19, 21}, results[0]);
   LiteralTestUtil::ExpectR1Equal<uint32_t>({15, 17, 23, 25}, results[1]);
@@ -1340,7 +1360,8 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(ReduceScatterReassociate)) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
 
   const ErrorSpec es{1e-5, 1e-5};
@@ -1390,7 +1411,8 @@ XLA_TEST_F(CollectiveOpsTest,
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
 
   const ErrorSpec es{1e-5, 1e-5};
@@ -1434,7 +1456,8 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(AllReduceReassociate)) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
 
   const ErrorSpec es{1e-5, 1e-5};
@@ -1470,7 +1493,8 @@ XLA_TEST_F(CollectiveOpsTest,
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
 
   EXPECT_TRUE(LiteralTestUtil::Equal(results[0], results[1]));
@@ -1512,7 +1536,8 @@ XLA_TEST_F(CollectiveOpsTest,
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   EXPECT_TRUE(LiteralTestUtil::Equal(results[0], results[1]));
   LiteralTestUtil::ExpectR3Equal<uint32_t>({{{1, 2, 3},
@@ -1555,7 +1580,8 @@ XLA_TEST_F(CollectiveOpsTest, AllGather_16BitInt) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   for (const Literal& result : results) {
@@ -1583,7 +1609,8 @@ XLA_TEST_F(CollectiveOpsTest, AllToAll_16BitInt) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   LiteralTestUtil::ExpectR1Equal<uint16_t>({10, 11}, results[0]);
@@ -1610,7 +1637,8 @@ XLA_TEST_F(CollectiveOpsTest, CollectivePermute_16BitInt) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   LiteralTestUtil::ExpectR1Equal<uint16_t>({11, 16}, results[0]);
@@ -1644,7 +1672,8 @@ XLA_TEST_F(CollectiveOpsTest, AllReduce_16BitInt) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   for (const Literal& result : results) {
@@ -1679,7 +1708,8 @@ XLA_TEST_F(CollectiveOpsTest, ReduceScatter_16BitInt) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   LiteralTestUtil::ExpectR1Equal<uint16_t>({21}, results[0]);
@@ -1713,7 +1743,8 @@ XLA_TEST_F(CollectiveOpsTest, AllReduceBFloat16Min) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   const bfloat16 one = static_cast<bfloat16>(1.0f);
@@ -1739,7 +1770,8 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(AllGather_8BitFloat)) {
                           ParseAndReturnVerifiedModule(kModuleStr, config));
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   for (const Literal& result : results) {
@@ -1763,7 +1795,8 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(AllToAll_8BitFloat)) {
                           ParseAndReturnVerifiedModule(kModuleStr, config));
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   LiteralTestUtil::ExpectR1Equal<float>({1, 1}, results[0]);
@@ -1786,7 +1819,8 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(CollectivePermute_8BitFloat)) {
                           ParseAndReturnVerifiedModule(kModuleStr, config));
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   LiteralTestUtil::ExpectR1Equal<float>({1, 2}, results[0]);
@@ -1814,7 +1848,8 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(AsyncAllGather)) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/false));
   ASSERT_EQ(results.size(), kNumReplicas);
   for (const Literal& result : results) {
@@ -1861,7 +1896,8 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(AsyncReduceScatter)) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/false));
   LiteralTestUtil::ExpectR1Equal<uint32_t>({11, 13, 15, 17}, results[0]);
   LiteralTestUtil::ExpectR1Equal<uint32_t>({19, 21, 23, 25}, results[1]);
@@ -1893,7 +1929,8 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(AsyncAllToAll)) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/false));
   ASSERT_EQ(results.size(), kNumReplicas);
   LiteralTestUtil::ExpectR1Equal<uint32_t>({10, 11}, results[0]);
@@ -1923,7 +1960,8 @@ XLA_TEST_F(CollectiveOpsTest, AllGather_Dim1UnitDimensions) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   for (const Literal& result : results) {
@@ -1956,16 +1994,18 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(SendRecv_Simple)) {
   )";
 
   const int64_t kNumReplicas = 2;
-  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas)
+  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas);
 
   HloModuleConfig config =
       GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
   TF_ASSERT_OK_AND_ASSIGN(auto module,
                           ParseAndReturnVerifiedModule(kModuleStr, config));
 
-  TF_ASSERT_OK_AND_ASSIGN(std::vector<Literal> results,
-                          ExecuteReplicated(std::move(module), {}, kNumReplicas,
-                                            /*use_threads=*/true));
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::vector<Literal> results,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
+                        /*use_threads=*/true));
   ASSERT_EQ(results.size(), kNumReplicas);
   EXPECT_TRUE(LiteralTestUtil::Equal(LiteralUtil::CreateR1<uint32_t>({11, 11}),
                                      results[0]));
@@ -2034,7 +2074,7 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(SendRecv_TwoConcurrentChains)) {
   })";
 
   const int64_t kNumReplicas = 2;
-  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas)
+  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas);
 
   HloModuleConfig config =
       GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
@@ -2043,7 +2083,8 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(SendRecv_TwoConcurrentChains)) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/false));
   ASSERT_EQ(results.size(), kNumReplicas);
   EXPECT_TRUE(LiteralTestUtil::Equal(LiteralUtil::CreateR1<uint32_t>({3, 3}),
@@ -2112,7 +2153,7 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(SendRecv_ValidationAttr1)) {
   })";
 
   const int64_t kNumReplicas = 2;
-  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas)
+  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas);
 
   HloModuleConfig config =
       GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
@@ -2121,7 +2162,8 @@ XLA_TEST_F(CollectiveOpsTest, DISABLED_ON_CPU(SendRecv_ValidationAttr1)) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/false));
   ASSERT_EQ(results.size(), kNumReplicas);
   // Skip checking the result for device 0 as it has garabage value as the
@@ -2212,7 +2254,7 @@ body {
   })";
 
   const int64_t kNumReplicas = 2;
-  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas)
+  SKIP_TEST_IF_NUM_DEVICES_LESS_THAN(kNumReplicas);
 
   HloModuleConfig config =
       GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
@@ -2221,7 +2263,8 @@ body {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      ExecuteReplicated(std::move(module), {}, kNumReplicas,
+      ExecuteReplicated(std::move(module), absl::Span<Literal* const>{},
+                        kNumReplicas,
                         /*use_threads=*/true, /*run_hlo_passes=*/false));
   ASSERT_EQ(results.size(), kNumReplicas);
   EXPECT_TRUE(LiteralTestUtil::Equal(LiteralUtil::CreateR1<uint32_t>({2, 2}),

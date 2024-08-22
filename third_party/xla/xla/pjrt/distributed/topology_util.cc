@@ -25,6 +25,7 @@ limitations under the License.
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
@@ -36,7 +37,6 @@ limitations under the License.
 #include "xla/pjrt/distributed/protocol.pb.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/utils.h"
-#include "xla/statusor.h"
 #include "xla/util.h"
 #include "tsl/platform/env.h"
 #include "tsl/platform/errors.h"
@@ -244,6 +244,9 @@ absl::StatusOr<GpuTopologyProto> BuildGpuTopology(
     for (const DeviceProto& device : local_topology.devices()) {
       if (gpu_topology.platform_version().empty()) {
         gpu_topology.set_platform_version(device.name());
+      }
+      if (gpu_topology.core_count_per_chip() == 0) {
+        gpu_topology.set_core_count_per_chip(device.core_count());
       }
       slice_id_to_node_ids[device.slice_index()].insert(
           local_topology.node_id());
