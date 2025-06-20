@@ -20,15 +20,10 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 
-# pylint: disable=g-import-not-at-top
-try:
-  from shutil import which
-except ImportError:
-  from distutils.spawn import find_executable as which
-# pylint: enable=g-import-not-at-top
 
 _DEFAULT_CUDA_COMPUTE_CAPABILITIES = '3.5,7.0'
 
@@ -163,9 +158,9 @@ def get_python_path(environ_cp, python_bin_path):
   except subprocess.CalledProcessError:
     library_paths = [
         run_shell([
-            python_bin_path, '-c',
-            'from distutils.sysconfig import get_python_lib;'
-            'print(get_python_lib())'
+            python_bin_path,
+            '-c',
+            'import sysconfig;print(sysconfig.get_path("purelib")',
         ])
     ]
 
@@ -425,9 +420,9 @@ def retrieve_bazel_version():
   Returns:
     The bazel version detected.
   """
-  bazel_executable = which('bazel')
+  bazel_executable = shutil.which('bazel')
   if bazel_executable is None:
-    bazel_executable = which('bazelisk')
+    bazel_executable = shutil.which('bazelisk')
     if bazel_executable is None:
       print('Cannot find bazel. Please install bazel/bazelisk.')
       sys.exit(1)
@@ -534,7 +529,9 @@ def get_from_env_or_user_or_default(environ_cp, var_name, ask_for_var,
     string value for var_name
   """
   var = environ_cp.get(var_name)
-  if not var:
+  # an intentionally empty value in the
+  # environment is not the same as no value
+  if var is None:
     var = get_input(ask_for_var)
     print('\n')
   if not var:
@@ -617,7 +614,7 @@ def set_clang_cuda_compiler_path(environ_cp):
     if not os.path.exists(default_clang_path):
       default_clang_path = '/usr/lib/llvm-16/bin/clang'
     if not os.path.exists(default_clang_path):
-      default_clang_path = which('clang') or ''
+      default_clang_path = shutil.which('clang') or ''
 
   clang_cuda_compiler_path = prompt_loop_or_load_from_env(
       environ_cp,
@@ -779,7 +776,7 @@ def get_ndk_api_level(environ_cp, android_ndk_home_path):
 
 def set_gcc_host_compiler_path(environ_cp):
   """Set GCC_HOST_COMPILER_PATH."""
-  default_gcc_host_compiler_path = which('gcc') or ''
+  default_gcc_host_compiler_path = shutil.which('gcc') or ''
 
   gcc_host_compiler_path = prompt_loop_or_load_from_env(
       environ_cp,
@@ -840,7 +837,7 @@ def set_clang_compiler_path(environ_cp):
     if not os.path.exists(default_clang_path):
       default_clang_path = '/usr/lib/llvm-16/bin/clang'
     if not os.path.exists(default_clang_path):
-      default_clang_path = which('clang') or ''
+      default_clang_path = shutil.which('clang') or ''
 
   clang_compiler_path = prompt_loop_or_load_from_env(
       environ_cp,
@@ -879,7 +876,7 @@ def set_clang_compiler_path_win(environ_cp):
   # Default path if clang-16 is installed by using apt-get install
   default_clang_path = 'C:/Program Files/LLVM/bin/clang.exe'
   if not os.path.exists(default_clang_path):
-    default_clang_path = which('clang') or ''
+    default_clang_path = shutil.which('clang') or ''
 
   clang_compiler_path = prompt_loop_or_load_from_env(
       environ_cp,
@@ -1130,7 +1127,7 @@ def set_system_libs_flag(environ_cp):
       syslibs = ','.join(sorted(syslibs.split()))
     write_action_env_to_bazelrc('TF_SYSTEM_LIBS', syslibs)
 
-  for varname in ('PREFIX', 'LIBDIR', 'INCLUDEDIR', 'PROTOBUF_INCLUDE_PATH'):
+  for varname in ('PREFIX', 'PROTOBUF_INCLUDE_PATH'):
     if varname in environ_cp:
       write_to_bazelrc('build --define=%s=%s' % (varname, environ_cp[varname]))
 
@@ -1181,7 +1178,7 @@ def configure_ios(environ_cp):
 
 
 def get_gcc_compiler(environ_cp):
-  gcc_env = environ_cp.get('CXX') or environ_cp.get('CC') or which('gcc')
+  gcc_env = environ_cp.get('CXX') or environ_cp.get('CC') or shutil.which('gcc')
   if gcc_env is not None:
     gcc_version = run_shell([gcc_env, '--version']).split()
     if gcc_version[0] in ('gcc', 'g++'):
@@ -1241,9 +1238,14 @@ def main():
       # Get the linker version
       ld_version = run_shell([gcc_env, '-Wl,-version']).split()
 
-      ld_version_int = convert_version_to_int(ld_version[3])
+      ld_version_int = 0
+      for i in range(len(ld_version)):
+        ld_version_int = convert_version_to_int(ld_version[i])
+        if ld_version_int is not None:
+          break
+
       if ld_version_int is None:
-        ld_version_int = convert_version_to_int(ld_version[4])
+        ld_version_int = 0
 
       # Enable if 'ld' version >= 2.35
       if ld_version_int >= 2035000:

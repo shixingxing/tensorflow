@@ -132,7 +132,10 @@ class AutoMixedPrecisionTest : public GrapplerTest {
 
       bool is_fp16_enabled_on_cpu = false;
 #if defined(INTEL_MKL) && defined(ENABLE_ONEDNN_V3)
-      is_fp16_enabled_on_cpu = IsAMXDataTypeSupportedByOneDNNOnThisCPU(DT_HALF);
+      // oneDNN supports FP16 on some platforms by converting to and from FP32
+      is_fp16_enabled_on_cpu =
+          IsAMXDataTypeSupportedByOneDNNOnThisCPU(DT_HALF) ||
+          IsAVXConvertSupportedByOneDNNOnThisCPU();
 #endif  // INTEL_MKL && ENABLE_ONEDNN_V3
       if (!IsMKLEnabled() || !is_fp16_enabled_on_cpu) {
         GTEST_SKIP() << "This device doesn't support FP16";
@@ -532,7 +535,7 @@ TEST_P(AutoMixedPrecisionParamTest, PreserveCPUNodes) {
   EXPECT_EQ(output_view.GetNode("input")->attr().at("dtype").type(), DT_FLOAT);
   EXPECT_EQ(output_view.GetNode("clr1")->attr().at("T").type(), DT_HALF);
   EXPECT_EQ(output_view.GetNode("allow1")->attr().at("T").type(), DT_HALF);
-  EXPECT_EQ(output_view.GetNode("infer1")->attr().at("T").type(), DT_FLOAT);
+  EXPECT_EQ(output_view.GetNode("infer1")->attr().at("T").type(), DT_HALF);
   EXPECT_EQ(output_view.GetNode("allow2")->attr().at("T").type(), DT_FLOAT);
   EXPECT_EQ(output_view.GetNode("clr2")->attr().at("T").type(), DT_FLOAT);
 
@@ -540,7 +543,7 @@ TEST_P(AutoMixedPrecisionParamTest, PreserveCPUNodes) {
   EXPECT_EQ(tensors.size(), tensors_expected.size());
   EXPECT_EQ(tensors.size(), item.fetch.size());
   for (int i = 0; i < item.fetch.size(); ++i) {
-    test::ExpectTensorNear<float>(tensors_expected[i], tensors[i], 1e-6);
+    test::ExpectTensorNear<float>(tensors_expected[i], tensors[i], 1e-4);
   }
 }
 

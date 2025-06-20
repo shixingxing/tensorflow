@@ -21,24 +21,25 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
+#include "xla/hlo/analysis/hlo_ordering.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/utils/hlo_query.h"
 #include "xla/service/backend.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/buffer_value.h"
+#include "xla/service/gpu/alias_info.h"
 #include "xla/service/gpu/gpu_constants.h"
 #include "xla/service/gpu/gpu_hlo_schedule.h"
 #include "xla/service/gpu/gpu_latency_hiding_scheduler.h"
-#include "xla/service/hlo_ordering.h"
 #include "xla/service/logical_buffer.h"
 #include "xla/stream_executor/device_description.h"
 #include "xla/tests/hlo_test_base.h"
 #include "xla/tsl/lib/core/status_test_util.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
 #include "xla/xla.pb.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/statusor.h"
 
 namespace xla {
 namespace gpu {
@@ -74,7 +75,7 @@ class NVPTXCompilerTest : public HloTestBase {
 
     auto buffer_size_bytes_function =
         [](const BufferValue& buffer_value) -> int64_t {
-      return GetSizeOfShape(buffer_value.shape(), pointer_size);
+      return ShapeSizeBytesFunction(pointer_size)(buffer_value.shape());
     };
 
     return BufferAssigner::Run(
@@ -87,7 +88,7 @@ class NVPTXCompilerTest : public HloTestBase {
 
 class NVPTXCompilerTestTriton : public NVPTXCompilerTest {
  public:
-  DebugOptions GetDebugOptionsForTest() override {
+  DebugOptions GetDebugOptionsForTest() const override {
     DebugOptions debug_options = HloTestBase::GetDebugOptionsForTest();
     debug_options.set_xla_gpu_cublas_fallback(false);
     return debug_options;
@@ -236,9 +237,12 @@ ENTRY main {
             HloOpcode::kCopy);
 
   NVPTXCompiler compiler;
+  const se::DeviceDescription& device_description =
+      backend().default_stream_executor()->GetDeviceDescription();
+  std::unique_ptr<GpuAliasInfo> alias_info =
+      compiler.GetAliasInfo(device_description);
   TF_EXPECT_OK(compiler.RunPostSchedulingPipelines(
-      module.get(), 100000,
-      backend().default_stream_executor()->GetDeviceDescription()));
+      module.get(), 100000, device_description, alias_info.get()));
   EXPECT_EQ(CountCopies(*module), 3);
   while_op = hlo_query::GetFirstInstructionWithOpcode(
       *module->entry_computation(), HloOpcode::kWhile);

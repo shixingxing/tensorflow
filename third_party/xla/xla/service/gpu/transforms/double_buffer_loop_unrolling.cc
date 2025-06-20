@@ -14,6 +14,8 @@ limitations under the License.
 ==============================================================================*/
 #include "xla/service/gpu/transforms/double_buffer_loop_unrolling.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <iterator>
 #include <optional>
@@ -36,12 +38,15 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/parser/hlo_parser.h"
+#include "xla/hlo/transforms/simplifiers/flatten_call_graph.h"
 #include "xla/hlo/utils/hlo_query.h"
 #include "xla/service/collective_ops_utils.h"
-#include "xla/service/flatten_call_graph.h"
+#include "xla/status_macros.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/errors.h"
+#include "tsl/platform/status.h"
 #include "tsl/platform/statusor.h"
 
 namespace xla {
@@ -75,8 +80,6 @@ void SetChannelIdForNewCollective(HloInstruction* new_instr,
     if (channel_id_comp_map.find(new_channel_id) == channel_id_comp_map.end()) {
       channel_id_comp_map[new_channel_id] =
           new_instr->async_wrapped_computation();
-    } else {
-      channel_id_comp_map[new_channel_id]->AddAsyncStart(new_instr);
     }
   } else if (hlo_query::IsCollectiveCommunicationOp(new_instr->opcode()) ||
              hlo_query::IsAsyncCollectiveStartOp(new_instr)) {
@@ -113,9 +116,9 @@ absl::Status SetSendRecvValidationForPeeledInstr(HloInstruction* new_instr,
   TF_RET_CHECK(
       new_instr->opcode() == old_instr->opcode() &&
       "cloned instruction and original instruction have different opcodes");
-  if (!HloPredicateIsOp<HloOpcode::kCollectivePermute,
-                        HloOpcode::kCollectivePermuteStart, HloOpcode::kSend,
-                        HloOpcode::kRecv>(old_instr)) {
+  if (HloPredicateIsNotOp<HloOpcode::kCollectivePermute,
+                          HloOpcode::kCollectivePermuteStart, HloOpcode::kSend,
+                          HloOpcode::kRecv>(old_instr)) {
     return absl::OkStatus();
   }
 
@@ -183,9 +186,9 @@ absl::Status SetSendRecvValidation(HloInstruction* cp1, HloInstruction* cp2,
   TF_RET_CHECK(
       cp2->opcode() == cp1->opcode() &&
       "cloned instruction and original instruction have different opcodes");
-  if (!HloPredicateIsOp<HloOpcode::kCollectivePermute,
-                        HloOpcode::kCollectivePermuteStart, HloOpcode::kSend,
-                        HloOpcode::kRecv>(cp1)) {
+  if (HloPredicateIsNotOp<HloOpcode::kCollectivePermute,
+                          HloOpcode::kCollectivePermuteStart, HloOpcode::kSend,
+                          HloOpcode::kRecv>(cp1)) {
     return absl::OkStatus();
   }
   const auto& attribute_map = cp2->frontend_attributes().map();
@@ -425,8 +428,8 @@ absl::Status PeelInstructionsForOddTripCount(HloModule* module,
       HloInstruction* new_instr = old_to_new_map[old_instr];
       VLOG(2) << "Processing control predecessors for peeled instruction "
               << new_instr->ToString();
-      std::vector<HloInstruction*> new_control_pred(
-          old_instr->control_predecessors().size());
+      std::vector<HloInstruction*> new_control_pred;
+      new_control_pred.reserve(old_instr->control_predecessors().size());
       for (HloInstruction* pred : old_instr->control_predecessors()) {
         new_control_pred.push_back(old_to_new_map[pred]);
       }
@@ -466,8 +469,8 @@ absl::StatusOr<bool> DoubleBufferingUnroll(HloInstruction* while_instr,
   absl::flat_hash_map<HloInstruction*, HloInstruction*> old_to_new_map;
   absl::flat_hash_set<HloInstruction*> skip_control_dep_injection;
 
-  bool is_peeled = exact_trip_count % 2;
-  if (is_peeled) {
+  bool peel_one_iteration = exact_trip_count % 2;
+  if (peel_one_iteration) {
     VLOG(2) << "Found loops with odd trip count, 1 iteration will be peeled "
                "outside of the main body.";
     TF_RETURN_IF_ERROR(PeelInstructionsForOddTripCount(module, while_instr));
@@ -496,7 +499,8 @@ absl::StatusOr<bool> DoubleBufferingUnroll(HloInstruction* while_instr,
       skip_control_dep_injection.insert(old_instr);
     }
     SetChannelIdForNewCollective(new_instr, module);
-    TF_CHECK_OK(SetSendRecvValidation(old_instr, new_instr, is_peeled));
+    TF_CHECK_OK(SetSendRecvValidation(old_instr, new_instr,
+                                      /*is_peeled=*/peel_one_iteration));
     old_to_new_map[old_instr] = new_instr;
     VLOG(2) << "Added instruction " << new_instr->ToString();
   }
@@ -513,8 +517,40 @@ absl::StatusOr<bool> DoubleBufferingUnroll(HloInstruction* while_instr,
 
   WhileLoopBackendConfig new_config;
   new_config.mutable_known_trip_count()->set_n(exact_trip_count / 2);
+
+  // Keep known induction variable metadata if it was present before.
+  if (config.has_known_induction_variable()) {
+    *new_config.mutable_known_induction_variable() =
+        config.known_induction_variable();
+  }
+
+  // Update the init/step metadata if it was present before.
+  if (config.has_known_init_step()) {
+    int64_t step = config.known_init_step().step();
+    new_config.mutable_known_init_step()->set_step(step * 2);
+    new_config.mutable_known_init_step()->set_init(
+        config.known_init_step().init() + (peel_one_iteration ? step : 0));
+  }
+
   TF_RETURN_IF_ERROR(while_instr->set_backend_config(new_config));
   return true;  // changed
+}
+
+// Function performs double buffering unrolling strategy iff there is any
+// collective operation within a body computation.
+absl::StatusOr<bool> AutoUnroll(HloInstruction* while_instr,
+                                HloModule* module) {
+  CHECK_EQ(while_instr->opcode(), HloOpcode::kWhile);
+
+  bool any_collective_present = absl::c_any_of(
+      while_instr->while_body()->MakeInstructionPostOrder(),
+      [](HloInstruction* instr) {
+        return hlo_query::IsCollectiveCommunicationOp(instr->opcode());
+      });
+  if (any_collective_present) {
+    return DoubleBufferingUnroll(while_instr, module);
+  }
+  return false;  // IR not changed.
 }
 
 }  // namespace
@@ -533,10 +569,15 @@ absl::StatusOr<bool> DoubleBufferLoopUnrolling::Run(
   for (HloInstruction* while_instr : while_instrs) {
     TF_ASSIGN_OR_RETURN(WhileLoopBackendConfig config,
                         while_instr->backend_config<WhileLoopBackendConfig>());
-    if (!config.has_known_trip_count() || config.known_trip_count().n() == 1) {
+    if (!config.has_known_trip_count()) {
       VLOG(2) << while_instr->ToString()
-              << " doesn't have exact trip count, skipping loop unrolling "
-                 "for now";
+              << " doesn't have exact trip count, skipping loop unrolling.";
+      continue;
+    }
+
+    if (config.known_trip_count().n() == 1) {
+      VLOG(2) << while_instr->ToString()
+              << " has an iteration count of one, skipping unrolling.";
       continue;
     }
 
@@ -544,6 +585,8 @@ absl::StatusOr<bool> DoubleBufferLoopUnrolling::Run(
       TF_ASSIGN_OR_RETURN(changed, FullyUnroll(while_instr, module));
     } else if (unroll_strategy_ == UnrollStrategy::kDoubleBuffer) {
       TF_ASSIGN_OR_RETURN(changed, DoubleBufferingUnroll(while_instr, module));
+    } else if (unroll_strategy_ == UnrollStrategy::kAuto) {
+      TF_ASSIGN_OR_RETURN(changed, AutoUnroll(while_instr, module));
     } else {
       LOG(FATAL) << absl::StrCat("Unhandled unrolling strategy: ",
                                  unroll_strategy_);

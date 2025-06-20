@@ -19,13 +19,15 @@ limitations under the License.
 #include <optional>
 #include <utility>
 
+#include <gtest/gtest.h>
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
+#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
+#include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/gpu_device_info_for_tests.h"
 #include "xla/service/gpu/kernels/custom_kernel_fusion_pattern.h"
 #include "xla/stream_executor/device_description.h"
-#include "xla/tests/hlo_test_base.h"
 #include "tsl/platform/test.h"
 
 namespace xla::gpu {
@@ -52,7 +54,7 @@ struct SimpleGemmPattern : public CustomKernelFusionPattern {
 
 //===----------------------------------------------------------------------===//
 
-class CustomKernelFusionRewriterTest : public HloTestBase {};
+class CustomKernelFusionRewriterTest : public HloHardwareIndependentTestBase {};
 
 TEST_F(CustomKernelFusionRewriterTest, SimpleGemm) {
   const char* hlo = R"(
@@ -88,8 +90,28 @@ TEST_F(CustomKernelFusionRewriterTest, SimpleGemm) {
   patterns.Emplace<SimpleGemmPattern>();
 
   auto device = TestGpuDeviceInfo::RTXA6000DeviceInfo();
-  CustomKernelFusionRewriter pass(&device, &patterns);
+  CustomKernelFusionRewriter pass(&device, /*kernel_index=*/0, &patterns);
   RunAndFilecheckHloRewrite(hlo, std::move(pass), expected);
+}
+
+TEST_F(CustomKernelFusionRewriterTest, SetsKernelIndex) {
+  const char* hlo = R"(
+    HloModule test
+
+    ENTRY %main (p0: f16[15,19], p1: f16[19,17]) -> f16[15,17] {
+      %p0 = f16[15,19]{1,0} parameter(0)
+      %p1 = f16[19,17]{1,0} parameter(1)
+      ROOT %r = f16[15,17]{1,0} dot(%p0, %p1),
+        lhs_contracting_dims={1}, rhs_contracting_dims={0}
+    }
+  )";
+
+  CustomKernelFusionPatternRegistry patterns;
+  patterns.Emplace<SimpleGemmPattern>();
+
+  auto device = TestGpuDeviceInfo::RTXA6000DeviceInfo();
+  CustomKernelFusionRewriter pass(&device, /*kernel_index=*/1, &patterns);
+  RunAndFilecheckHloRewrite(hlo, std::move(pass), "CHECK: \"kernel_index\":1");
 }
 
 TEST_F(CustomKernelFusionRewriterTest, SimpleGemmWithWorkspace) {
@@ -131,7 +153,7 @@ TEST_F(CustomKernelFusionRewriterTest, SimpleGemmWithWorkspace) {
   patterns.Emplace<SimpleGemmPattern>(1024);
 
   auto device = TestGpuDeviceInfo::RTXA6000DeviceInfo();
-  CustomKernelFusionRewriter pass(&device, &patterns);
+  CustomKernelFusionRewriter pass(&device, /*kernel_index=*/0, &patterns);
   RunAndFilecheckHloRewrite(hlo, std::move(pass), expected);
 }
 

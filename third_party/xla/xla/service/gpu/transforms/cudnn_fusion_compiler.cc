@@ -48,7 +48,7 @@ limitations under the License.
 #include "xla/service/gpu/cudnn_support_utils.h"
 #include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/service/gpu/kernel_reuse_cache.h"
-#include "xla/service/gpu/matmul_utils.h"
+#include "xla/service/gpu/matmul_indexing_utils.h"
 #include "xla/service/gpu/stream_executor_util.h"
 #include "xla/service/gpu/triton_fusion_analysis.h"
 #include "xla/shape_util.h"
@@ -176,13 +176,6 @@ inline std::optional<fe::DataType_t> GetComputeDataType(
   return compute_dtype;
 }
 
-int FusionLevel(const HloInstruction& hlo) {
-  return hlo.GetModule()
-      ->config()
-      .debug_options()
-      .xla_gpu_cudnn_gemm_fusion_level();
-};
-
 // Extracts dimensions and strides from HLO tensors in the format expected by
 // cuDNN.
 class GemmDimensionAdapter {
@@ -216,6 +209,7 @@ class GemmDimensionAdapter {
   struct Result {
     std::vector<int64_t> sizes;
     std::vector<int64_t> strides;
+    std::optional<std::vector<std::pair<int64_t, int64_t>>> slices;
   };
 
   std::optional<Result> DimensionsAndStrides(
@@ -249,9 +243,10 @@ class GemmDimensionAdapter {
                            .value()[0]};
         break;
       case TritonFusionAnalysis::Scope::OUTPUT:
-        lhs_noncontracting_index = dot_.shape().rank() - 2;
+        lhs_noncontracting_index = dot_.shape().dimensions().size() - 2;
         dim_indices = {dims.lhs_batch_dimensions().empty() ? -1 : 0,
-                       lhs_noncontracting_index, dot_.shape().rank() - 1};
+                       lhs_noncontracting_index,
+                       dot_.shape().dimensions_size() - 1};
         break;
       case TritonFusionAnalysis::Scope::META:
         LOG(FATAL) << "Unsupported scope.";
@@ -260,6 +255,9 @@ class GemmDimensionAdapter {
     Result result;
     result.sizes.reserve(dim_indices.size());
     result.strides.reserve(dim_indices.size());
+    result.slices = std::vector<std::pair<int64_t, int64_t>>{};
+    result.slices->reserve(dim_indices.size());
+    bool slicing_is_present = false;
 
     for (const int index : dim_indices) {
       const auto* spec = analysis_.IterSpec(scope, &hlo, index);
@@ -267,14 +265,12 @@ class GemmDimensionAdapter {
         result.sizes.push_back(1);
         result.strides.push_back(
             result.strides.empty() ? 1 : result.strides.back());
+        result.slices->push_back({0, 1});
         continue;
       } else {
         if (spec->size() == 1) {
           // The dimension is not split, nothing to do.
         } else if (spec->size() == 2) {
-          if (FusionLevel(hlo) < 3) {
-            return std::nullopt;
-          }
           if (!dims.lhs_batch_dimensions().empty()) {
             VLOG(8) << "Noncontracting dimension split is not compatible with "
                        "batch dimensions.";
@@ -310,6 +306,12 @@ class GemmDimensionAdapter {
         }
         result.sizes.push_back(spec->front().count);
         result.strides.push_back(spec->front().stride);
+        result.slices->push_back(
+            {spec->front().slice_start,
+             spec->front().slice_start + spec->front().sliced_count});
+        if (spec->front().count != spec->front().sliced_count) {
+          slicing_is_present = true;
+        }
       }
     }
     if (lhs_noncontracting_split_ > 1 &&
@@ -324,6 +326,23 @@ class GemmDimensionAdapter {
       result.strides[kBatchDimensionIndex] =
           result.strides[kOutputLHSNonContractingDimensionIndex] *
           result.sizes[kOutputLHSNonContractingDimensionIndex];
+    }
+
+    // 0 (kBatchDimensionIndex) is always the batch dimension;
+    // 1 and 2 are the non-batch ones. cuDNN relies on strides to determine
+    // layouts and gets confused when both strides of non-batch dimensions
+    // are equal to 1 - this is the case for tensors with 1-sized dimension
+    // like [A,1]. The stride of the 1-sized dimension does not matter for
+    // correctness because there is no iteration along this dimension, but
+    // setting it to A and representing the tensor as its equivalent [1,A]
+    // helps cuDNN.
+    if (result.strides[1] == 1 && result.strides[2] == 1) {
+      const int one_sized_dim_idx = (result.sizes[1] == 1) ? 1 : 2;
+      result.strides[one_sized_dim_idx] = result.sizes[1] * result.sizes[2];
+    }
+
+    if (!slicing_is_present) {
+      result.slices.reset();
     }
     return result;
   }
@@ -368,7 +387,7 @@ HandleClampToCudnnGraph(
     absl::flat_hash_map<const HloInstruction*,
                         std::shared_ptr<graph::Tensor_attributes>>
         hlo_to_cudnn,
-    fe::DataType_t data_type, fe::DataType_t compute_dtype) {
+    fe::DataType_t compute_dtype) {
   CHECK(hlo.opcode() == HloOpcode::kClamp)
       << "HLO is not a clamp: " << hlo.ToShortString();
   CHECK(hlo.operands().size() == 3)
@@ -379,7 +398,14 @@ HandleClampToCudnnGraph(
                              .set_compute_data_type(compute_dtype);
   std::shared_ptr<graph::Tensor_attributes> min_tensor = graph.pointwise(
       hlo_to_cudnn[hlo.operand(1)], hlo_to_cudnn[hlo.operand(2)], min_attrs);
-  min_tensor->set_data_type(data_type).set_name(std::string(hlo.name()));
+  const std::optional<fe::DataType_t> data_type =
+      ToCudnnDataType(hlo.shape().element_type());
+  if (!data_type.has_value()) {
+    VLOG(3) << "Unimplemented data type: "
+            << PrimitiveType_Name(hlo.shape().element_type());
+    return std::nullopt;
+  }
+  min_tensor->set_data_type(*data_type).set_name(std::string(hlo.name()));
   const auto max_attrs = graph::Pointwise_attributes()
                              .set_mode(fe::PointwiseMode_t::MAX)
                              .set_compute_data_type(compute_dtype);
@@ -418,6 +444,11 @@ absl::StatusOr<std::optional<se::gpu::CudnnGraph>> HloFusionToCuDnnGraph(
             .set_data_type(*data_type)
             .set_name(std::string(parameter.name()))
             .set_uid(se::gpu::CuDnnTensorUID(parameter.parameter_number())));
+    if (dims.slices.has_value()) {
+      hlo_to_cudnn[&parameter] = graph.slice(
+          hlo_to_cudnn[&parameter],
+          graph::Slice_attributes().set_slices(dims.slices.value()));
+    }
     return true;
   };
   for (const TritonFusionAnalysis::Scope scope :
@@ -442,15 +473,10 @@ absl::StatusOr<std::optional<se::gpu::CudnnGraph>> HloFusionToCuDnnGraph(
     auto operand = [&hlo_to_cudnn, &hlo](int i) {
       return hlo_to_cudnn[hlo->operand(i)];
     };
-    const auto data_type = ToCudnnDataType(hlo->shape().element_type());
-    if (!data_type.has_value()) {
-      VLOG(3) << "Unimplemented data type: " << hlo->shape().element_type();
-      return std::nullopt;
-    }
-    if (hlo->opcode() == HloOpcode::kParameter) {
+    if (HloPredicateIsOp<HloOpcode::kParameter>(hlo)) {
       CHECK(hlo_to_cudnn.contains(hlo));
       continue;
-    } else if (hlo->opcode() == HloOpcode::kCustomCall) {
+    } else if (HloPredicateIsOp<HloOpcode::kCustomCall>(hlo)) {
       if (hlo->user_count() != 1 ||
           !IsWorkspaceAllocationRoot(*hlo->users()[0])) {
         VLOG(3) << "Custom calls are only expected to be used for workspace "
@@ -458,27 +484,24 @@ absl::StatusOr<std::optional<se::gpu::CudnnGraph>> HloFusionToCuDnnGraph(
         return std::nullopt;
       }
       continue;
-    } else if (hlo->opcode() == HloOpcode::kTuple) {
+    } else if (HloPredicateIsOp<HloOpcode::kTuple>(hlo)) {
       if (!IsWorkspaceAllocationRoot(*hlo)) {
         VLOG(3) << "Tuples are only expected at outputs for workspace "
                    "allocation.";
         return std::nullopt;
       }
       continue;
-    } else if (FusionLevel(fusion) >= 2 &&
-               hlo->opcode() == HloOpcode::kConstant) {
+    } else if (HloPredicateIsOp<HloOpcode::kConstant>(hlo)) {
       if (const auto const_tensor = HandleConstantHloToCudnnGraph(*hlo, graph);
           const_tensor.has_value()) {
         hlo_to_cudnn[hlo] = const_tensor.value();
       } else {
         return std::nullopt;
       }
-    } else if (hlo->opcode() == HloOpcode::kReshape ||
-               hlo->opcode() == HloOpcode::kBitcast ||
-               hlo->opcode() == HloOpcode::kTranspose ||
-               hlo->opcode() == HloOpcode::kCopy ||
-               (FusionLevel(fusion) >= 2 &&
-                hlo->opcode() == HloOpcode::kBroadcast)) {
+    } else if (HloPredicateIsOp<HloOpcode::kReshape, HloOpcode::kBitcast,
+                                HloOpcode::kTranspose, HloOpcode::kCopy,
+                                HloOpcode::kBroadcast, HloOpcode::kSlice>(
+                   hlo)) {
       // All these are accounted for separately as transformations of strides.
       hlo_to_cudnn[hlo] = operand(0);
     } else if (hlo->IsElementwise()) {
@@ -487,10 +510,9 @@ absl::StatusOr<std::optional<se::gpu::CudnnGraph>> HloFusionToCuDnnGraph(
       if (!compute_dtype.has_value()) {
         return std::nullopt;
       }
-      if (hlo->opcode() == HloOpcode::kClamp) {
-        const auto clamp =
-            HandleClampToCudnnGraph(*hlo, graph, hlo_to_cudnn,
-                                    data_type.value(), compute_dtype.value());
+      if (HloPredicateIsOp<HloOpcode::kClamp>(hlo)) {
+        const auto clamp = HandleClampToCudnnGraph(*hlo, graph, hlo_to_cudnn,
+                                                   compute_dtype.value());
         if (!clamp.has_value()) {
           return std::nullopt;
         }
@@ -530,7 +552,7 @@ absl::StatusOr<std::optional<se::gpu::CudnnGraph>> HloFusionToCuDnnGraph(
         } else if (hlo->operand_count() == 2) {
           hlo_to_cudnn[hlo] = graph.pointwise(operand(0), operand(1), attrs);
         } else if (hlo->operand_count() == 3) {
-          if (hlo->opcode() != HloOpcode::kSelect) {
+          if (HloPredicateIsNotOp<HloOpcode::kSelect>(hlo)) {
             VLOG(3) << "Unexpected ternary operation: " << hlo->ToString();
             return std::nullopt;
           }
@@ -542,7 +564,7 @@ absl::StatusOr<std::optional<se::gpu::CudnnGraph>> HloFusionToCuDnnGraph(
           return std::nullopt;
         }
       }
-    } else if (hlo->opcode() == HloOpcode::kDot) {
+    } else if (HloPredicateIsOp<HloOpcode::kDot>(hlo)) {
       const auto compute_dtype =
           GetComputeDataType(hlo->shape().element_type());
       if (!compute_dtype.has_value()) {
@@ -558,6 +580,13 @@ absl::StatusOr<std::optional<se::gpu::CudnnGraph>> HloFusionToCuDnnGraph(
     }
     if (hlo_to_cudnn[hlo] == nullptr) {
       VLOG(3) << "Creation of the operation failed.";
+      return std::nullopt;
+    }
+    const std::optional<fe::DataType_t> data_type =
+        ToCudnnDataType(hlo->shape().element_type());
+    if (!data_type.has_value()) {
+      VLOG(3) << "Unimplemented data type: "
+              << PrimitiveType_Name(hlo->shape().element_type());
       return std::nullopt;
     }
     hlo_to_cudnn[hlo]
@@ -622,6 +651,8 @@ absl::StatusOr<HloInstruction*> AddWorkspace(HloInstruction& fusion,
   computation->set_root_instruction(output_tuple, true);
   HloInstruction* new_fusion = fusion.parent()->AddInstruction(
       fusion.CloneWithNewShape(output_tuple->shape()));
+  TF_RETURN_IF_ERROR(new_fusion->CopyAllControlDepsFrom(&fusion));
+  TF_RETURN_IF_ERROR(fusion.DropAllControlDeps());
   TF_RETURN_IF_ERROR(fusion.ReplaceAllUsesWith(fusion.parent()->AddInstruction(
       HloInstruction::CreateGetTupleElement(new_fusion, 0))));
   TF_RETURN_IF_ERROR(fusion.parent()->RemoveInstruction(&fusion));
@@ -637,35 +668,23 @@ class CuDnnFusionVisitor : public DfsHloRewriteVisitor {
   absl::Status HandleFusion(HloInstruction* hlo) override {
     TF_ASSIGN_OR_RETURN(auto gpu_config,
                         hlo->backend_config<GpuBackendConfig>());
-    const auto& fusion_backend_config = gpu_config.fusion_backend_config();
+    const FusionBackendConfig& fusion_backend_config =
+        gpu_config.fusion_backend_config();
     if (fusion_backend_config.kind() != kCuDnnFusionKind) {
       return absl::OkStatus();
     }
-    int64_t plan_id = -1;
-    if (fusion_backend_config.has_cudnn_fusion_config()) {
-      plan_id = fusion_backend_config.cudnn_fusion_config().plan_id();
-    }
-
     VLOG(4) << "Processing " << hlo->ToString();
-    VLOG(4) << "Plan ID: " << plan_id;
 
-    auto add_workspace = [&](const int64_t workspace_size) {
-      if (workspace_size > 0) {
-        TF_ASSIGN_OR_RETURN(hlo, AddWorkspace(*hlo, workspace_size));
-        SetVisited(*hlo);
-      }
-      return absl::OkStatus();
-    };
-    const std::string fingerprint_without_workspace =
-        GetComputationFingerprint(hlo->fused_instructions_computation(), {});
-    auto workspace_size_it =
-        workspace_sizes_.find(fingerprint_without_workspace);
-    if (workspace_size_it == workspace_sizes_.cend()) {
+    auto compile_graph = [&]() -> absl::StatusOr<se::gpu::CudnnGraph> {
       TF_ASSIGN_OR_RETURN(
           se::gpu::CudnnGraph graph,
           PrepareGraph(dnn_support_, *DynCast<HloFusionInstruction>(hlo)));
 
-      if (plan_id >= 0) {
+      if (fusion_backend_config.has_cudnn_fusion_config() &&
+          fusion_backend_config.cudnn_fusion_config().plan_id() >= 0) {
+        const int64_t plan_id =
+            fusion_backend_config.cudnn_fusion_config().plan_id();
+        VLOG(4) << "Plan ID: " << plan_id;
         // Build single plan with given ID.
         if (plan_id >= graph.Graph().get_execution_plan_count()) {
           return absl::InternalError("cuDNN graph plan does not exist.");
@@ -674,8 +693,8 @@ class CuDnnFusionVisitor : public DfsHloRewriteVisitor {
       } else {
         // Build plans one by one till first successful when no plan_id was
         // provided.
-        for (plan_id = 0; plan_id < graph.Graph().get_execution_plan_count();
-             ++plan_id) {
+        int64_t plan_id = 0;
+        for (; plan_id < graph.Graph().get_execution_plan_count(); ++plan_id) {
           VLOG(7) << "Trying plan ID " << plan_id;
           if (graph.Build(dnn_support_, plan_id).ok()) {
             VLOG(7) << "Successfully built plan ID " << plan_id;
@@ -685,28 +704,63 @@ class CuDnnFusionVisitor : public DfsHloRewriteVisitor {
         if (plan_id == graph.Graph().get_execution_plan_count()) {
           return absl::InternalError("No cuDNN plans can be built.");
         }
+        CuDnnFusionConfig* cudnn_config =
+            gpu_config.mutable_fusion_backend_config()
+                ->mutable_cudnn_fusion_config();
+        cudnn_config->set_plan_id(plan_id);
+        TF_RETURN_IF_ERROR(hlo->set_backend_config(gpu_config));
       }
+      return graph;
+    };
+
+    auto serialize_graph =
+        [](const se::gpu::CudnnGraph& graph) -> absl::StatusOr<std::string> {
+      std::vector<uint8_t> serialized_graph;
+      RETURN_IF_CUDNN_FRONTEND_ERROR(graph.Graph().serialize(serialized_graph));
+      return std::string(reinterpret_cast<char*>(serialized_graph.data()),
+                         serialized_graph.size());
+    };
+
+    if (IsWorkspaceAllocationRoot(*hlo->fused_expression_root())) {
+      // The graph already has a workspace.
+      const std::string fingerprint =
+          GetComputationFingerprint(hlo->fused_instructions_computation(), {});
+      if (auto it = compilation_results_.find(fingerprint);
+          it == compilation_results_.cend()) {
+        TF_ASSIGN_OR_RETURN(const se::gpu::CudnnGraph graph, compile_graph());
+        TF_ASSIGN_OR_RETURN(const std::string serialized,
+                            serialize_graph(graph));
+        compilation_results_.insert(it, {fingerprint, serialized});
+      }
+      return absl::OkStatus();
+    }
+
+    auto add_workspace = [&](const int64_t workspace_size) {
+      if (workspace_size > 0) {
+        TF_ASSIGN_OR_RETURN(hlo, AddWorkspace(*hlo, workspace_size));
+        SetVisited(*hlo);
+      }
+      return absl::OkStatus();
+    };
+
+    const std::string fingerprint_without_workspace =
+        GetComputationFingerprint(hlo->fused_instructions_computation(), {});
+
+    auto workspace_size_it =
+        workspace_sizes_.find(fingerprint_without_workspace);
+    if (workspace_size_it == workspace_sizes_.cend()) {
+      TF_ASSIGN_OR_RETURN(const se::gpu::CudnnGraph graph, compile_graph());
       const int64_t workspace_size = graph.Graph().get_workspace_size();
       workspace_sizes_.insert(workspace_size_it,
                               {fingerprint_without_workspace, workspace_size});
       TF_RETURN_IF_ERROR(add_workspace(workspace_size));
-
-      std::vector<uint8_t> serialized_graph;
-      RETURN_IF_CUDNN_FRONTEND_ERROR(graph.Graph().serialize(serialized_graph));
-      // Compute a new fingerprint with a potential workspace for the
-      // compilation results to match a fingerprint computed by the emitter.
+      TF_ASSIGN_OR_RETURN(const std::string serialized, serialize_graph(graph));
       compilation_results_[GetComputationFingerprint(
-          hlo->fused_instructions_computation(), {})] =
-          std::string(reinterpret_cast<char*>(serialized_graph.data()),
-                      serialized_graph.size());
+          hlo->fused_instructions_computation(), {})] = serialized;
     } else {
       VLOG(4) << "Cache hit.";
       TF_RETURN_IF_ERROR(add_workspace(workspace_size_it->second));
     }
-    auto cudnn_config = gpu_config.mutable_fusion_backend_config()
-                            ->mutable_cudnn_fusion_config();
-    cudnn_config->set_plan_id(plan_id);
-    TF_RETURN_IF_ERROR(hlo->set_backend_config(gpu_config));
 
     MarkAsChanged();
     return absl::OkStatus();

@@ -17,12 +17,9 @@ limitations under the License.
 #include <stdlib.h>
 
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <utility>
-#include <vector>
 
-#include "tensorflow/lite/c/common_internal.h"
 #include "tensorflow/lite/core/api/profiler.h"
 #include "tensorflow/lite/core/async/async_signature_runner.h"
 #include "tensorflow/lite/core/c/c_api_types.h"

@@ -14,6 +14,8 @@ package(
         "//tensorflow/core/tpu:__subpackages__",
         # For proto_serialization library
         "//tensorflow/cc/experimental/tf2:__subpackages__",
+        #For ordered_code library
+        "//tensorflow/python/profiler/internal:__pkg__",
     ],
     licenses = ["notice"],
 )
@@ -60,12 +62,8 @@ cc_library(
     srcs = ["proto_text_util.cc"],
     hdrs = ["proto_text_util.h"],
     deps = [
-        "//tensorflow/core/lib/strings:scanner",
-        "//tensorflow/core/platform:macros",
         "//tensorflow/core/platform:numbers",
-        "//tensorflow/core/platform:protobuf",
-        "//tensorflow/core/platform:str_util",
-        "//tensorflow/core/platform:strcat",
+        "//tensorflow/core/platform:scanner",
         "@com_google_absl//absl/strings",
     ],
 )

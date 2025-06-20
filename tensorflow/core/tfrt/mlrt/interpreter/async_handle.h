@@ -15,7 +15,9 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_TFRT_MLRT_INTERPRETER_ASYNC_HANDLE_H_
 #define TENSORFLOW_CORE_TFRT_MLRT_INTERPRETER_ASYNC_HANDLE_H_
 
+#include <cstdint>
 #include <memory>
+#include <type_traits>
 #include <utility>
 
 #include "absl/log/check.h"
@@ -94,7 +96,7 @@ class AsyncHandle {
   AsyncHandle& operator=(AsyncHandle&&) = default;
 
   ~AsyncHandle() {
-    DCHECK(!shared_state_ || shared_state_.IsAvailable())
+    CHECK(!shared_state_ || shared_state_.IsAvailable())  // Crash OK
         << "A non-empty AsyncHandle must be awaited.";
   }
 
@@ -114,7 +116,7 @@ class AsyncHandle {
             typename Arg = std::decay_t<future_internal::ArgumentType<F>>>
   typename std::enable_if<std::is_same_v<Arg, absl::Status>, void>::type Then(
       F then) && {
-    DCHECK(shared_state_);
+    CHECK(shared_state_);  // Crash OK
     auto* shared_state_ptr = shared_state_.GetAsyncValue();
     shared_state_ptr->AndThen([shared_state = std::move(shared_state_),
                                execution_context =
@@ -128,7 +130,7 @@ class AsyncHandle {
   template <typename F,
             typename Arg = std::decay_t<future_internal::ArgumentType<F>>>
   typename std::enable_if<std::is_void_v<Arg>, void>::type Then(F then) && {
-    DCHECK(shared_state_);
+    CHECK(shared_state_);  // Crash OK
     auto* shared_state_ptr = shared_state_.GetAsyncValue();
     shared_state_ptr->AndThen(
         [shared_state = std::move(shared_state_),

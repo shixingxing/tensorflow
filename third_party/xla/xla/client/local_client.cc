@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "xla/client/local_client.h"
 
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <utility>
@@ -27,9 +28,9 @@ limitations under the License.
 #include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
 #include "xla/client/executable_build_options.h"
-#include "xla/client/xla_computation.h"
 #include "xla/debug_options_flags.h"
 #include "xla/executable_run_options.h"
+#include "xla/hlo/builder/xla_computation.h"
 #include "xla/literal.h"
 #include "xla/service/backend.h"
 #include "xla/service/compiler.h"
@@ -47,10 +48,10 @@ limitations under the License.
 #include "xla/stream_executor/device_memory_allocator.h"
 #include "xla/stream_executor/platform.h"
 #include "xla/stream_executor/stream.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/statusor.h"
 
 using xla::source_map_util::InvalidParameterArgument;
 
@@ -126,22 +127,7 @@ absl::Status LocalExecutable::ValidateExecutionOptions(
                              ? run_options.stream()->parent()->device_ordinal()
                              : backend_->default_device_ordinal();
   }
-  TF_ASSIGN_OR_RETURN(bool devices_equivalent,
-                      backend_->devices_equivalent(
-                          run_device_ordinal, build_options_.device_ordinal()));
-  if (!devices_equivalent) {
-    TF_ASSIGN_OR_RETURN(se::StreamExecutor * run_executor,
-                        backend_->stream_executor(run_device_ordinal));
-    TF_ASSIGN_OR_RETURN(se::StreamExecutor * build_executor,
-                        backend_->stream_executor(build_device_ordinal()));
-    return InvalidArgument(
-        "executable is built for device %s of type \"%s\"; cannot run it on "
-        "device %s of type \"%s\"",
-        backend_->device_name(build_device_ordinal()),
-        build_executor->GetDeviceDescription().name(),
-        backend_->device_name(run_device_ordinal),
-        run_executor->GetDeviceDescription().name());
-  }
+  TF_RETURN_IF_ERROR(VerifyRunDeviceCompatible(run_device_ordinal));
 
   if (!run_options.allocator()) {
     return InvalidArgument("an allocator must be provided to ExecuteLocally");
@@ -155,6 +141,25 @@ absl::Status LocalExecutable::ValidateExecutionOptions(
   }
 
   return absl::OkStatus();
+}
+
+absl::Status LocalExecutable::VerifyRunDeviceCompatible(
+    int run_device_ordinal) const {
+  TF_ASSIGN_OR_RETURN(bool devices_equivalent,
+                      backend_->devices_equivalent(
+                          run_device_ordinal, build_options_.device_ordinal()));
+  if (devices_equivalent) return absl::OkStatus();
+  TF_ASSIGN_OR_RETURN(se::StreamExecutor * run_executor,
+                      backend_->stream_executor(run_device_ordinal));
+  TF_ASSIGN_OR_RETURN(se::StreamExecutor * build_executor,
+                      backend_->stream_executor(build_device_ordinal()));
+  return InvalidArgument(
+      "executable is built for device %s of type \"%s\"; cannot run it on "
+      "device %s of type \"%s\"",
+      backend_->device_name(build_device_ordinal()),
+      build_executor->GetDeviceDescription().name(),
+      backend_->device_name(run_device_ordinal),
+      run_executor->GetDeviceDescription().name());
 }
 
 absl::StatusOr<std::pair<ServiceExecutableRunOptions, StreamPool::Ptr>>
@@ -468,20 +473,34 @@ LocalClient::CompileAheadOfTime(
 absl::StatusOr<std::unique_ptr<LocalExecutable>> LocalClient::Load(
     const std::string& serialized_aot_result,
     const ExecutableBuildOptions& options) {
+  TF_ASSIGN_OR_RETURN(std::unique_ptr<Compiler> compiler,
+                      Compiler::GetForPlatform(platform()));
+  TF_ASSIGN_OR_RETURN(
+      std::unique_ptr<xla::AotCompilationResult> aot_result,
+      compiler->LoadAotCompilationResult(serialized_aot_result));
+  return LoadInternal(std::move(aot_result), compiler.get(), options);
+}
+
+absl::StatusOr<std::unique_ptr<LocalExecutable>> LocalClient::Load(
+    std::unique_ptr<xla::AotCompilationResult> aot_result,
+    const ExecutableBuildOptions& options) {
+  TF_ASSIGN_OR_RETURN(std::unique_ptr<Compiler> compiler,
+                      Compiler::GetForPlatform(platform()));
+  return LoadInternal(std::move(aot_result), compiler.get(), options);
+}
+
+absl::StatusOr<std::unique_ptr<LocalExecutable>> LocalClient::LoadInternal(
+    std::unique_ptr<xla::AotCompilationResult> aot_result, Compiler* compiler,
+    const ExecutableBuildOptions& options) {
   TF_ASSIGN_OR_RETURN(ExecutableBuildOptions updated_options,
                       UpdateBuildOptions(options, default_device_ordinal()));
   TF_ASSIGN_OR_RETURN(
       se::StreamExecutor * executor,
       backend().stream_executor(updated_options.device_ordinal()));
 
-  TF_ASSIGN_OR_RETURN(Compiler * compiler,
-                      Compiler::GetForPlatform(platform()));
   TF_ASSIGN_OR_RETURN(
-      std::unique_ptr<xla::AotCompilationResult> aot_result,
-      compiler->LoadAotCompilationResult(serialized_aot_result));
-
-  TF_ASSIGN_OR_RETURN(std::unique_ptr<Executable> executable,
-                      aot_result->LoadExecutable(compiler, executor));
+      std::unique_ptr<Executable> executable,
+      std::move(*aot_result).LoadExecutable(compiler, executor));
   return std::make_unique<LocalExecutable>(std::move(executable),
                                            local_service_->mutable_backend(),
                                            updated_options);

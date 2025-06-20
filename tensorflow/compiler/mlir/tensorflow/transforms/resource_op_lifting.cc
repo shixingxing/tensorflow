@@ -15,8 +15,10 @@ limitations under the License.
 
 // This pass lifts resource variable operations outside of device computation.
 
-#include <cstddef>
+#include <cassert>
 #include <cstdint>
+#include <memory>
+#include <utility>
 
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
@@ -30,11 +32,11 @@ limitations under the License.
 #include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/IR/Attributes.h"  // from @llvm-project
 #include "mlir/IR/Block.h"  // from @llvm-project
-#include "mlir/IR/IRMapping.h"  // from @llvm-project
 #include "mlir/IR/Builders.h"  // from @llvm-project
 #include "mlir/IR/BuiltinOps.h"  // from @llvm-project
 #include "mlir/IR/BuiltinTypes.h"  // from @llvm-project
 #include "mlir/IR/Diagnostics.h"  // from @llvm-project
+#include "mlir/IR/IRMapping.h"  // from @llvm-project
 #include "mlir/IR/Operation.h"  // from @llvm-project
 #include "mlir/IR/Region.h"  // from @llvm-project
 #include "mlir/IR/SymbolTable.h"  // from @llvm-project
@@ -679,7 +681,7 @@ llvm::SmallDenseMap<int64_t, ResourceArgUseInfo> MergeArgResourceUseInfo(
 // removed). If remaining_resource_data_types is provided, it will store the
 // data types of the remaining resource arguments, where the indices are after
 // removing unused ones.
-void RemoveUnusedResourceArgumentsAndForwardedRetvals(
+LogicalResult RemoveUnusedResourceArgumentsAndForwardedRetvals(
     const llvm::SmallDenseMap<int64_t, ResourceArgUseInfo>& infos,
     func::FuncOp func_op,
     llvm::SmallVector<int64_t, 4>* old_to_new_arg_indices = nullptr,
@@ -720,10 +722,13 @@ void RemoveUnusedResourceArgumentsAndForwardedRetvals(
       }
     }
   }
-  func_op.eraseArguments(indices_to_erase);
+  if (failed(func_op.eraseArguments(indices_to_erase))) {
+    return failure();
+  }
   func_op.setType(
       FunctionType::get(func_op.getContext(), new_types,
                         llvm::to_vector<4>(return_op->getOperandTypes())));
+  return success();
 }
 
 // Lifts reads/writes of resource arguments from func_op and changes its
@@ -846,10 +851,15 @@ LogicalResult HandleWhileLoop(TF::WhileOp while_op, func::FuncOp body,
   // Remove unused resources in functions.
   llvm::SmallVector<int64_t, 4> old_to_new_indices;
   llvm::SmallDenseMap<int64_t, Type> remaining_resource_data_types;
-  RemoveUnusedResourceArgumentsAndForwardedRetvals(
-      resource_arg_uses, body, &old_to_new_indices,
-      &remaining_resource_data_types);
-  RemoveUnusedResourceArgumentsAndForwardedRetvals(resource_arg_uses, cond);
+  if (failed(RemoveUnusedResourceArgumentsAndForwardedRetvals(
+          resource_arg_uses, body, &old_to_new_indices,
+          &remaining_resource_data_types))) {
+    return failure();
+  }
+  if (failed(RemoveUnusedResourceArgumentsAndForwardedRetvals(resource_arg_uses,
+                                                              cond))) {
+    return failure();
+  }
   (void)LiftArgRetResourcesForFunction(
       body, remaining_resource_data_types,
       [&](int64_t index, Value value) { return_op->setOperand(index, value); });
@@ -914,11 +924,18 @@ LogicalResult HandleCaseOrIfOp(CaseOrIfOp op, ArrayRef<func::FuncOp> branches) {
   if (resource_arg_uses.empty()) return success();
   // Remove unused resources in functions.
   llvm::SmallDenseMap<int64_t, Type> remaining_resource_data_types;
-  RemoveUnusedResourceArgumentsAndForwardedRetvals(
-      resource_arg_uses, branches.front(), /*old_to_new_arg_indices=*/nullptr,
-      &remaining_resource_data_types);
-  for (auto func : branches.drop_front())
-    RemoveUnusedResourceArgumentsAndForwardedRetvals(resource_arg_uses, func);
+  if (failed(RemoveUnusedResourceArgumentsAndForwardedRetvals(
+          resource_arg_uses, branches.front(),
+          /*old_to_new_arg_indices=*/nullptr,
+          &remaining_resource_data_types))) {
+    return failure();
+  }
+  for (auto func : branches.drop_front()) {
+    if (failed(RemoveUnusedResourceArgumentsAndForwardedRetvals(
+            resource_arg_uses, func))) {
+      return failure();
+    }
+  }
 
   // Forward resource inputs updated in any branch to the outputs of both
   // branches. First prepare the mapping from arg to new update output.
@@ -1053,9 +1070,11 @@ LogicalResult HandlePartitionedCallOpCallee(
 
   // Remove unused resources in functions.
   llvm::SmallDenseMap<int64_t, Type> remaining_resource_data_types;
-  RemoveUnusedResourceArgumentsAndForwardedRetvals(
-      result->use_info, callee, /*old_to_new_arg_indices=*/nullptr,
-      &remaining_resource_data_types);
+  if (failed(RemoveUnusedResourceArgumentsAndForwardedRetvals(
+          result->use_info, callee, /*old_to_new_arg_indices=*/nullptr,
+          &remaining_resource_data_types))) {
+    return failure();
+  }
   for (const auto& entry : remaining_resource_data_types) {
     result->arg_data_type_and_updated_output_index[entry.getFirst()] = {
         entry.getSecond(), -1};

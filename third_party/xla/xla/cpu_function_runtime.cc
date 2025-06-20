@@ -19,7 +19,7 @@ limitations under the License.
 
 namespace xla {
 namespace {
-// Inline memory allocation routines here, because depending on '//base' brings
+// Inline memory allocation routines here, because depending on 'base' brings
 // in libraries which use c++ streams, which adds considerable code size on
 // android.
 void* aligned_malloc(size_t size, int minimum_alignment) {
@@ -61,7 +61,8 @@ size_t AlignedBufferBytes(const BufferInfo* buffer_infos, size_t n,
   for (size_t i = 0; i < n; ++i) {
     bool should_allocate =
         buffer_infos[i].is_temp_buffer() ||
-        (buffer_infos[i].is_entry_parameter() && allocate_entry_params);
+        (buffer_infos[i].is_entry_parameter() && allocate_entry_params) ||
+        buffer_infos[i].is_constant();
 
     if (should_allocate) {
       total += align_to(buffer_infos[i].size(), Align());
@@ -86,9 +87,12 @@ void* MallocContiguousBuffers(const BufferInfo* buffer_infos, size_t n,
   }
   uintptr_t pos = reinterpret_cast<uintptr_t>(contiguous);
   for (size_t i = 0; i < n; ++i) {
+    // Non thunk execution doesn't need constants, but that will soon be
+    // deprecated.
     bool should_allocate =
         buffer_infos[i].is_temp_buffer() ||
-        (buffer_infos[i].is_entry_parameter() && allocate_entry_params);
+        (buffer_infos[i].is_entry_parameter() && allocate_entry_params) ||
+        buffer_infos[i].is_constant();
     if (should_allocate) {
       bufs[i] = reinterpret_cast<void*>(pos);
       pos += align_to(buffer_infos[i].size(), Align());

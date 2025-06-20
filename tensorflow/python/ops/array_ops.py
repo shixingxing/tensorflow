@@ -130,7 +130,7 @@ def reshape(tensor, shape, name=None):  # pylint: disable=redefined-outer-name
 
   `tf.reshape(t, [])` reshapes a tensor `t` with one element to a scalar.
 
-  >>> tf.reshape([7], []).numpy()
+  >>> tf.reshape([7], []).numpy().item()
   7
 
   More examples:
@@ -275,9 +275,9 @@ def identity(input, name=None):  # pylint: disable=redefined-builtin
   >>> a_identity = tf.identity(a)
   >>> a.assign_add(1)
   <tf.Variable ... shape=() dtype=int32, numpy=6>
-  >>> a.numpy()
+  >>> print(a.numpy())
   6
-  >>> a_identity.numpy()
+  >>> print(a_identity.numpy())
   5
 
   This function can also be used to explicitly transfer tensors between devices.
@@ -1076,9 +1076,9 @@ def strided_slice(input_,
 
   Args:
     input_: A `Tensor`.
-    begin: An `int32` or `int64` `Tensor`.
-    end: An `int32` or `int64` `Tensor`.
-    strides: An `int32` or `int64` `Tensor`.
+    begin: An `int16`, `int32` or `int64` `Tensor`.
+    end: An `int16`, `int32` or `int64` `Tensor`.
+    strides: An `int16`, `int32` or `int64` `Tensor`.
     begin_mask: An `int32` mask.
     end_mask: An `int32` mask.
     ellipsis_mask: An `int32` mask.
@@ -4883,7 +4883,7 @@ def gather(params,
   ...     result[:, :, a, b, :] ==
   ...     # is equal to the slice of `params` along `axis` at the index.
   ...     params[:, :, indices[a, b], :]
-  ... ).numpy()
+  ... ).numpy().item()
   True
 
   ### Batching:

@@ -16,6 +16,8 @@ limitations under the License.
 #include "xla/backends/cpu/runtime/thunk_executor.h"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -31,20 +33,23 @@ limitations under the License.
 #include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
 #include "xla/backends/cpu/runtime/buffer_allocations.h"
-#include "xla/backends/cpu/runtime/resource_use.h"
+#include "xla/backends/cpu/runtime/thread_pool_task_runner.h"
 #include "xla/backends/cpu/runtime/thunk.h"
+#include "xla/backends/cpu/runtime/thunk_testlib.h"
+#include "xla/literal.h"
+#include "xla/literal_util.h"
 #include "xla/runtime/buffer_use.h"
+#include "xla/runtime/resource_use.h"
 #include "xla/service/buffer_assignment.h"
-#include "xla/service/maybe_owning_device_memory.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/tsl/concurrency/async_value_ref.h"
-#include "tsl/platform/env.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/logging.h"
-#include "tsl/platform/statusor.h"
-#include "tsl/platform/test.h"
-#include "tsl/platform/test_benchmark.h"
-#include "tsl/platform/threadpool.h"
+#include "xla/tsl/platform/env.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/logging.h"
+#include "xla/tsl/platform/statusor.h"
+#include "xla/tsl/platform/test.h"
+#include "xla/tsl/platform/test_benchmark.h"
+#include "xla/tsl/platform/threadpool.h"
 
 #define EIGEN_USE_THREADS
 
@@ -60,6 +65,37 @@ using ::testing::ElementsAre;
 // with a thread sanitizer and checking that there are no data races.
 static int64_t shared_resource;
 
+// An adaptor from a lambda that runs tasks and a TaskRunner API.
+template <typename Runner, typename WorkerId>
+class TaskRunnerAdaptor : public Thunk::TaskRunner {
+ public:
+  TaskRunnerAdaptor(Runner runner, WorkerId worker_id)
+      : runner_(std::move(runner)), worker_id_(std::move(worker_id)) {}
+
+  void operator()(Thunk::Task task) final { runner_(std::move(task)); }
+
+  std::optional<int64_t> current_worker_id() const final {
+    return worker_id_();
+  }
+
+ private:
+  Runner runner_;
+  WorkerId worker_id_;
+};
+
+template <typename Runner>
+auto MakeTaskRunnerFrom(Runner&& runner) {
+  auto no_id = []() { return std::nullopt; };
+  return TaskRunnerAdaptor<Runner, decltype(no_id)>(
+      std::forward<Runner>(runner), no_id);
+}
+
+template <typename Runner, typename WorkerId>
+auto MakeTaskRunnerFrom(Runner&& runner, WorkerId&& worker_id) {
+  return TaskRunnerAdaptor<Runner, WorkerId>(std::forward<Runner>(runner),
+                                             std::forward<WorkerId>(worker_id));
+}
+
 // A test-only thunk for verifying thunk executor implementation:
 //
 //   dst += src (for all srcs and dsts slices)
@@ -67,21 +103,22 @@ static int64_t shared_resource;
 // We generate random thunk sequences reading and writing different slices of
 // the same buffer, and check that at run time it does not lead to any data
 // races and produces expected result.
+//
+// We also emulate shared resource access by writing to the global static
+// `shared_resource` variable and detecting data races with thread sanitizer.
 class AddI32Thunk final : public Thunk {
  public:
   AddI32Thunk(std::string name, std::vector<BufferAllocation::Slice> srcs,
               std::vector<BufferAllocation::Slice> dsts,
-              std::vector<std::string>* trace, bool use_shared_resource,
-              bool inject_error);
+              std::vector<std::string>* trace,
+              std::optional<Resource::Kind> shared_resource, bool inject_error);
 
   static std::unique_ptr<Thunk> Create(
       std::string name, std::vector<BufferAllocation::Slice> srcs,
       std::vector<BufferAllocation::Slice> dsts,
       std::vector<std::string>* trace = nullptr,
-      bool use_shared_resource = false, bool inject_error = false);
-
-  static std::vector<MaybeOwningDeviceMemory> AsDeviceMemory(
-      absl::Span<std::vector<int32_t>* const> data);
+      std::optional<Resource::Kind> shared_resource = std::nullopt,
+      bool inject_error = false);
 
   // Executes `dst += src` for a single src/dst pair.
   static absl::Status Execute(const BufferAllocations* allocations,
@@ -97,39 +134,30 @@ class AddI32Thunk final : public Thunk {
   std::vector<BufferAllocation::Slice> srcs_;
   std::vector<BufferAllocation::Slice> dsts_;
   std::vector<std::string>* trace_;
-  bool use_shared_resource_;
+  std::optional<Resource::Kind> shared_resource_;
   bool inject_error_;
 };
 
 std::unique_ptr<Thunk> AddI32Thunk::Create(
     std::string name, std::vector<BufferAllocation::Slice> srcs,
     std::vector<BufferAllocation::Slice> dsts, std::vector<std::string>* trace,
-    bool use_shared_resource, bool inject_error) {
+    std::optional<Resource::Kind> shared_resource, bool inject_error) {
   return std::make_unique<AddI32Thunk>(std::move(name), std::move(srcs),
-                                       std::move(dsts), trace,
-                                       use_shared_resource, inject_error);
-}
-
-std::vector<MaybeOwningDeviceMemory> AddI32Thunk::AsDeviceMemory(
-    absl::Span<std::vector<int32_t>* const> data) {
-  std::vector<MaybeOwningDeviceMemory> buffers;
-  for (auto& vec : data) {
-    buffers.emplace_back(
-        se::DeviceMemoryBase(vec->data(), vec->size() * sizeof(int32_t)));
-  }
-  return buffers;
+                                       std::move(dsts), trace, shared_resource,
+                                       inject_error);
 }
 
 AddI32Thunk::AddI32Thunk(std::string name,
                          std::vector<BufferAllocation::Slice> srcs,
                          std::vector<BufferAllocation::Slice> dsts,
                          std::vector<std::string>* trace,
-                         bool use_shared_resource, bool inject_error)
+                         std::optional<Resource::Kind> shared_resource,
+                         bool inject_error)
     : Thunk(Kind::kKernel, Info{name}),
       srcs_(std::move(srcs)),
       dsts_(std::move(dsts)),
       trace_(trace),
-      use_shared_resource_(use_shared_resource),
+      shared_resource_(shared_resource),
       inject_error_(inject_error) {}
 
 absl::Status AddI32Thunk::Execute(const BufferAllocations* allocations,
@@ -148,14 +176,18 @@ absl::Status AddI32Thunk::Execute(const BufferAllocations* allocations,
   int32_t* dst_ptr = static_cast<int32_t*>(dst.opaque());
   size_t len = std::min(src.size(), dst.size()) / sizeof(int32_t);
 
-  for (int j = 0; j < len; ++j) dst_ptr[j] += src_ptr[j];
+  for (int j = 0; j < len; ++j) {
+    dst_ptr[j] += src_ptr[j];
+  }
 
   return absl::OkStatus();
 }
 
 tsl::AsyncValueRef<Thunk::ExecuteEvent> AddI32Thunk::Execute(
     const ExecuteParams& params) {
-  if (trace_) trace_->push_back(info().op_name);
+  if (trace_) {
+    trace_->push_back(info().op_name);
+  }
 
   auto execute = [&]() -> absl::Status {
     CHECK_EQ(srcs_.size(), dsts_.size());
@@ -169,8 +201,22 @@ tsl::AsyncValueRef<Thunk::ExecuteEvent> AddI32Thunk::Execute(
   // Offload the execution to the intra-op thread pool.
   if (params.intra_op_threadpool) {
     auto event = tsl::MakeConstructedAsyncValueRef<ExecuteEvent>();
+
+    // Collective communicator resource creates only a scheduling edge,
+    // incrementing the shared resource value from the intra-op thread pool
+    // might lead to data races. ThunkExecutor will only guarantee that calls
+    // to Execute() are properly synchronized.
+    if (shared_resource_ &&
+        *shared_resource_ == Resource::kCollectiveCommunicator) {
+      shared_resource++;
+    }
+
     params.intra_op_threadpool->getPool()->Schedule([&, event, execute] {
-      if (use_shared_resource_) {
+      // Token creates an execution edge, and it means that dependent thunks
+      // will wait for the completion of execution of all dependencies, and we
+      // verify that we don't have data races by mutating shared resource from a
+      // task that runs on a thread pool.
+      if (shared_resource_ && *shared_resource_ == Resource::kToken) {
         shared_resource++;
       }
 
@@ -184,7 +230,7 @@ tsl::AsyncValueRef<Thunk::ExecuteEvent> AddI32Thunk::Execute(
     return event;
   }
 
-  if (use_shared_resource_) {
+  if (shared_resource_) {
     shared_resource++;
   }
 
@@ -198,25 +244,38 @@ tsl::AsyncValueRef<Thunk::ExecuteEvent> AddI32Thunk::Execute(
 
 AddI32Thunk::BufferUses AddI32Thunk::buffer_uses() const {
   BufferUses buffer_uses;
-  for (const auto& src : srcs_) buffer_uses.push_back(BufferUse::Read(src));
-  for (const auto& dst : dsts_) buffer_uses.push_back(BufferUse::Write(dst));
+  for (const auto& src : srcs_) {
+    buffer_uses.push_back(BufferUse::Read(src));
+  }
+  for (const auto& dst : dsts_) {
+    buffer_uses.push_back(BufferUse::Write(dst));
+  }
   return buffer_uses;
 }
 
 AddI32Thunk::ResourceUses AddI32Thunk::resource_uses() const {
-  static std::shared_ptr<Resource>* shared_resource =
+  static std::shared_ptr<Resource>* token_resource =
       new std::shared_ptr<Resource>(Resource::Create(Resource::kToken));
 
-  return use_shared_resource_
-             ? ResourceUses{ResourceUse::Write(*shared_resource)}
-             : ResourceUses{};
+  static std::shared_ptr<Resource>* comm_resource =
+      new std::shared_ptr<Resource>(
+          Resource::Create(Resource::kCollectiveCommunicator));
+
+  if (!shared_resource_) {
+    return ResourceUses{};
+  }
+
+  switch (*shared_resource_) {
+    case Resource::kToken:
+      return ResourceUses{ResourceUse::Write(*token_resource)};
+    case Resource::kCollectiveCommunicator:
+      return ResourceUses{ResourceUse::Write(*comm_resource)};
+  }
 }
 
 static ThunkExecutor::Options OptionsForTest() {
-  // Override small buffers threshold to make sure that we test all execution
-  // paths, because in test we always use small buffers below the default
-  // threshold of `512`.
-  return ThunkExecutor::Options{/*execute_sequential_buffer_threshold=*/0};
+  return ThunkExecutor::Options{/*execute_sequential_buffer_threshold=*/0,
+                                /*execute_sequential_num_thunks_threshold=*/0};
 }
 
 TEST(ThunkExecutorTest, FifoReadyQueueTest) {
@@ -230,14 +289,14 @@ TEST(ThunkExecutorTest, FifoReadyQueueTest) {
   queue.Push(2);
   queue.Push(3);
 
-  EXPECT_EQ(queue.Size(), 3);
+  ASSERT_EQ(queue.Size(), 3);
 
   EXPECT_EQ(queue.Pop(), 1);
   EXPECT_EQ(queue.Pop(), 2);
   EXPECT_EQ(queue.Pop(), 3);
 
   EXPECT_TRUE(queue.Empty());
-  EXPECT_EQ(queue.Size(), 0);
+  ASSERT_EQ(queue.Size(), 0);
 
   // Prepare queue for PopHalf test case.
   queue.Push(1);
@@ -246,16 +305,16 @@ TEST(ThunkExecutorTest, FifoReadyQueueTest) {
 
   // Pop half of the queue.
   ThunkExecutor::FifoReadyQueue half0 = queue.PopHalf();
-  EXPECT_EQ(half0.Size(), 2);
+  ASSERT_EQ(half0.Size(), 2);
   EXPECT_EQ(half0.Pop(), 2);
   EXPECT_EQ(half0.Pop(), 3);
 
   // Check that the rest is still in the queue.
-  EXPECT_EQ(queue.Size(), 1);
+  ASSERT_EQ(queue.Size(), 1);
 
   // Pop the rest of the queue.
   ThunkExecutor::FifoReadyQueue half1 = queue.PopHalf();
-  EXPECT_EQ(half1.Size(), 1);
+  ASSERT_EQ(half1.Size(), 1);
 
   // Check that all nodes were returned from PopHalf.
   EXPECT_EQ(queue.Size(), 0);
@@ -271,9 +330,67 @@ TEST(ThunkExecutorTest, FifoReadyQueueTest) {
 
   // Check that PopHalf returns 2 last nodes.
   ThunkExecutor::FifoReadyQueue half2 = queue.PopHalf();
-  EXPECT_EQ(half2.Size(), 2);
+  ASSERT_EQ(half2.Size(), 2);
   EXPECT_EQ(half2.Pop(), 4);
   EXPECT_EQ(half2.Pop(), 5);
+}
+
+TEST(ThunkExecutorTest, LifoReadyQueueTest) {
+  ThunkExecutor::LifoReadyQueue queue({});
+
+  // Check basic queue properties.
+  EXPECT_TRUE(queue.Empty());
+  EXPECT_EQ(queue.Size(), 0);
+
+  queue.Push(1);
+  queue.Push(2);
+  queue.Push(3);
+
+  ASSERT_EQ(queue.Size(), 3);
+
+  EXPECT_EQ(queue.Pop(), 3);
+  EXPECT_EQ(queue.Pop(), 2);
+  EXPECT_EQ(queue.Pop(), 1);
+
+  EXPECT_TRUE(queue.Empty());
+  EXPECT_EQ(queue.Size(), 0);
+
+  // Prepare queue for PopHalf test case.
+  queue.Push(1);
+  queue.Push(2);
+  queue.Push(3);
+
+  // Pop half of the queue.
+  ThunkExecutor::LifoReadyQueue half0 = queue.PopHalf();
+  ASSERT_EQ(half0.Size(), 2);
+  EXPECT_EQ(half0.Pop(), 2);
+  EXPECT_EQ(half0.Pop(), 1);
+
+  // Check that the rest is still in the queue.
+  ASSERT_EQ(queue.Size(), 1);
+
+  // Pop the rest of the queue.
+  ThunkExecutor::LifoReadyQueue half1 = queue.PopHalf();
+  ASSERT_EQ(half1.Size(), 1);
+
+  // ASSERT_EQ that all nodes were returned from PopHalf.
+  EXPECT_EQ(queue.Size(), 0);
+
+  // Add 5 elements to test Pop followed by PopHalf.
+  queue.Push(1);
+  queue.Push(2);
+  queue.Push(3);
+  queue.Push(4);
+  queue.Push(5);
+
+  EXPECT_EQ(queue.Pop(), 5);
+
+  // Check that PopHalf returns first 2 nodes.
+  ThunkExecutor::LifoReadyQueue half2 = queue.PopHalf();
+  ASSERT_EQ(half2.Size(), 3);
+  EXPECT_EQ(half2.Pop(), 3);
+  EXPECT_EQ(half2.Pop(), 2);
+  EXPECT_EQ(half2.Pop(), 1);
 }
 
 TEST(ThunkExecutorTest, PriorityReadyQueueTest) {
@@ -305,20 +422,20 @@ TEST(ThunkExecutorTest, PriorityReadyQueueTest) {
 
   // Pop half of the queue.
   ThunkExecutor::PriorityReadyQueue half0 = queue.PopHalf();
-  EXPECT_EQ(half0.Size(), 2);
+  ASSERT_EQ(half0.Size(), 2);
   EXPECT_EQ(half0.Pop(), 2);
   EXPECT_EQ(half0.Pop(), 1);
 
   // Check that the rest is still in the queue.
-  EXPECT_EQ(queue.Size(), 1);
+  ASSERT_EQ(queue.Size(), 1);
 
   // Pop the rest of the queue.
   ThunkExecutor::PriorityReadyQueue half1 = queue.PopHalf();
-  EXPECT_EQ(half1.Size(), 1);
+  ASSERT_EQ(half1.Size(), 1);
   EXPECT_EQ(half1.Pop(), 3);
 
   // Check that all nodes were returned from PopHalf.
-  EXPECT_EQ(queue.Size(), 0);
+  ASSERT_EQ(queue.Size(), 0);
 
   // Add 5 elements to test Pop followed by PopHalf.
   queue.Push(4);
@@ -331,108 +448,9 @@ TEST(ThunkExecutorTest, PriorityReadyQueueTest) {
 
   // Check that PopHalf returns 2 last nodes.
   ThunkExecutor::PriorityReadyQueue half2 = queue.PopHalf();
-  EXPECT_EQ(half2.Size(), 2);
+  ASSERT_EQ(half2.Size(), 2);
   EXPECT_EQ(half2.Pop(), 2);
   EXPECT_EQ(half2.Pop(), 1);
-}
-
-TEST(ThunkExecutorTest, DependencyOrdering) {
-  BufferAllocation alloc(/*index=*/0, /*size=*/80, /*color=*/0);
-
-  BufferAllocation::Slice slice0(&alloc, /*offset=*/0, /*size=*/40);
-  BufferAllocation::Slice slice1(&alloc, /*offset=*/40, /*size=*/40);
-  BufferAllocation::Slice slice2(&alloc, /*offset=*/20, /*size=*/40);
-
-  ThunkSequence sequence;
-  sequence.push_back(AddI32Thunk::Create("a", {slice0}, {slice0}));
-  sequence.push_back(AddI32Thunk::Create("b", {slice1}, {slice1}));
-  sequence.push_back(AddI32Thunk::Create("c", {slice2}, {slice2}));
-
-  TF_ASSERT_OK_AND_ASSIGN(
-      ThunkExecutor executor,
-      ThunkExecutor::Create(std::move(sequence), OptionsForTest()));
-
-  EXPECT_FALSE(executor.is_sequential());
-  EXPECT_THAT(executor.source(), ElementsAre(0, 1));
-  EXPECT_THAT(executor.sink(), ElementsAre(2));
-
-  EXPECT_EQ(executor.node_def(0).priority, 1);
-  EXPECT_EQ(executor.node_def(1).priority, 1);
-  EXPECT_EQ(executor.node_def(2).priority, 0);
-}
-
-TEST(ThunkExecutorTest, SequentialOrdering) {
-  BufferAllocation alloc(/*index=*/0, /*size=*/80, /*color=*/0);
-  BufferAllocation::Slice slice(&alloc, /*offset=*/0, /*size=*/40);
-
-  ThunkSequence sequence;
-  sequence.push_back(AddI32Thunk::Create("a", {slice}, {slice}));
-  sequence.push_back(AddI32Thunk::Create("b", {slice}, {slice}));
-  sequence.push_back(AddI32Thunk::Create("c", {slice}, {slice}));
-
-  TF_ASSERT_OK_AND_ASSIGN(
-      ThunkExecutor executor,
-      ThunkExecutor::Create(std::move(sequence), OptionsForTest()));
-
-  EXPECT_TRUE(executor.is_sequential());
-  EXPECT_THAT(executor.source(), ElementsAre(0));
-  EXPECT_THAT(executor.sink(), ElementsAre(2));
-
-  EXPECT_EQ(executor.node_def(0).priority, 2);
-  EXPECT_EQ(executor.node_def(1).priority, 1);
-  EXPECT_EQ(executor.node_def(2).priority, 0);
-}
-
-TEST(ThunkExecutorTest, ResourceOrdering) {
-  BufferAllocation alloc(/*index=*/0, /*size=*/80, /*color=*/0);
-
-  BufferAllocation::Slice slice0(&alloc, /*offset=*/0, /*size=*/40);
-  BufferAllocation::Slice slice1(&alloc, /*offset=*/40, /*size=*/40);
-
-  ThunkSequence sequence;
-  sequence.push_back(AddI32Thunk::Create("a", {slice0}, {slice0},
-                                         /*trace=*/nullptr,
-                                         /*use_shared_resource=*/true));
-  sequence.push_back(AddI32Thunk::Create("b", {slice1}, {slice1},
-                                         /*trace=*/nullptr,
-                                         /*use_shared_resource=*/true));
-
-  TF_ASSERT_OK_AND_ASSIGN(
-      ThunkExecutor executor,
-      ThunkExecutor::Create(std::move(sequence), OptionsForTest()));
-
-  EXPECT_TRUE(executor.is_sequential());
-  EXPECT_THAT(executor.source(), ElementsAre(0));
-  EXPECT_THAT(executor.sink(), ElementsAre(1));
-
-  EXPECT_EQ(executor.node_def(0).priority, 1);
-  EXPECT_EQ(executor.node_def(1).priority, 0);
-}
-
-TEST(ThunkExecutorTest, TransitiveReduction) {
-  BufferAllocation alloc(/*index=*/0, /*size=*/80, /*color=*/0);
-  BufferAllocation::Slice slice(&alloc, /*offset=*/0, /*size=*/40);
-
-  ThunkSequence sequence;
-  sequence.push_back(AddI32Thunk::Create("a", {slice}, {slice}));
-  sequence.push_back(AddI32Thunk::Create("b", {slice}, {slice}));
-  sequence.push_back(AddI32Thunk::Create("c", {slice}, {slice}));
-
-  TF_ASSERT_OK_AND_ASSIGN(
-      ThunkExecutor executor,
-      ThunkExecutor::Create(std::move(sequence), OptionsForTest()));
-
-  EXPECT_THAT(executor.source(), ElementsAre(0));
-  EXPECT_THAT(executor.sink(), ElementsAre(2));
-
-  EXPECT_THAT(executor.node_def(0).out_edges, ElementsAre(1));
-  EXPECT_THAT(executor.node_def(1).in_edges, ElementsAre(0));
-  EXPECT_THAT(executor.node_def(1).out_edges, ElementsAre(2));
-  EXPECT_THAT(executor.node_def(2).in_edges, ElementsAre(1));
-
-  EXPECT_EQ(executor.node_def(0).priority, 2);
-  EXPECT_EQ(executor.node_def(1).priority, 1);
-  EXPECT_EQ(executor.node_def(2).priority, 0);
 }
 
 TEST(ThunkExecutorTest, Execute) {
@@ -453,15 +471,17 @@ TEST(ThunkExecutorTest, Execute) {
       ThunkExecutor executor,
       ThunkExecutor::Create(std::move(sequence), OptionsForTest()));
 
-  std::vector<int32_t> data(20, 1);  // shared src and dst allocation
+  // Shared src and dst allocation.
+  auto data = LiteralUtil::CreateFull({20}, int32_t{1});
+  BufferAllocations allocations = CreateBufferAllocations(data);
 
-  auto buffers = AddI32Thunk::AsDeviceMemory({&data});
-  BufferAllocations allocations(buffers);
-
-  Thunk::TaskRunner task_runner = [&](Thunk::Task task) {
-    trace.push_back("<TaskRunner>");
-    task();
-  };
+  auto task_runner = MakeTaskRunnerFrom(
+      [&](Thunk::Task task) {
+        trace.push_back("<TaskRunner>");
+        task();
+      },
+      // Always return current worker id as 0.
+      [] { return 0; });
 
   Thunk::ExecuteParams params = {nullptr, &allocations};
   params.task_runner = &task_runner;
@@ -474,9 +494,97 @@ TEST(ThunkExecutorTest, Execute) {
   ASSERT_TRUE(execute_event.IsConcrete());
 
   EXPECT_THAT(trace, ElementsAre("<TaskRunner>", "b", "a", "c"));
-  EXPECT_THAT(data, ElementsAre(2, 2, 2, 2, 2,                 // slice0
-                                4, 4, 4, 4, 4, 4, 4, 4, 4, 4,  // slice2
-                                2, 2, 2, 2, 2));               // slice1
+  EXPECT_EQ(data, LiteralUtil::CreateR1<int32_t>({2, 2, 2, 2, 2,     // slice0
+                                                  4, 4, 4, 4, 4,     // slice2
+                                                  4, 4, 4, 4, 4,     // ...
+                                                  2, 2, 2, 2, 2}));  // slice1
+}
+
+//===----------------------------------------------------------------------===//
+// ThunkExecutor resource isolation testing
+//===----------------------------------------------------------------------===//
+
+// No-op thunk that completes execution on a separate thread pool. We use this
+// thunk to test that ThunkExecutor can jump out of a separate thread pool to
+// continue execution in the intra-op thread pool. This is important for
+// resource isolation as we don't want to accidentally continue with expensive
+// execution on a non blocking IO callbacks thread pool.
+class NoOpAsyncThunk : public Thunk {
+ public:
+  NoOpAsyncThunk(std::string name, BufferAllocation::Slice slice)
+      : Thunk(Kind::kKernel, Info{std::move(name)}), slice_(slice) {}
+
+  static std::unique_ptr<NoOpAsyncThunk> Create(std::string name,
+                                                BufferAllocation::Slice slice) {
+    return std::make_unique<NoOpAsyncThunk>(std::move(name), slice);
+  }
+
+  tsl::AsyncValueRef<ExecuteEvent> Execute(const ExecuteParams&) final {
+    auto ret = tsl::MakeConstructedAsyncValueRef<ExecuteEvent>();
+    ThreadPool()->Schedule([ret] {
+      tsl::Env::Default()->SleepForMicroseconds(10 * 1000);
+      ret.SetStateConcrete();
+    });
+    return ret;
+  }
+
+  BufferUses buffer_uses() const override {
+    return BufferUses{BufferUse::Write(slice_)};
+  }
+
+ private:
+  static tsl::thread::ThreadPool* ThreadPool() {
+    static auto* thread_pool =
+        new tsl::thread::ThreadPool(tsl::Env::Default(), "no-op-thunk", 8);
+    return thread_pool;
+  }
+
+  BufferAllocation::Slice slice_;
+};
+
+TEST(ThunkExecutorTest, ExecuteOnCorrectThreadPool) {
+  BufferAllocation alloc(/*index=*/0, /*size=*/60, /*color=*/0);
+
+  BufferAllocation::Slice slice0(&alloc, /*offset=*/0, /*size=*/20);
+  BufferAllocation::Slice slice1(&alloc, /*offset=*/20, /*size=*/20);
+  BufferAllocation::Slice slice2(&alloc, /*offset=*/40, /*size=*/20);
+
+  std::array<BufferAllocation::Slice, 3> slices = {slice0, slice1, slice2};
+
+  ThunkSequence sequence;
+  for (int i = 0; i < 100; ++i) {
+    sequence.push_back(NoOpAsyncThunk::Create(absl::StrCat(i), slices[i % 3]));
+  }
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      ThunkExecutor executor,
+      ThunkExecutor::Create(std::move(sequence), OptionsForTest()));
+
+  auto data = LiteralUtil::CreateFull({60}, uint8_t{1});
+  BufferAllocations allocations = CreateBufferAllocations(data);
+
+  // Task runner must be used only when ThunkExecutor detects that it runs on a
+  // wrong thread and has to jump into the task runner.
+  std::atomic<int32_t> num_tasks = 0;
+  auto task_runner = MakeTaskRunnerFrom([&](Thunk::Task task) {
+    ++num_tasks;
+    task();
+  });
+
+  Thunk::ExecuteParams params = {nullptr, &allocations};
+  params.task_runner = &task_runner;
+  params.session =
+      Thunk::ExecuteSession(/*max_workers=*/1, /*split_threshold=*/1000);
+
+  auto execute_event = executor.Execute(params);
+
+  tsl::BlockUntilReady(execute_event);
+  ASSERT_TRUE(execute_event.IsConcrete());
+
+  // We compare using GE because thread scheduling introduces small
+  // non-determinism and ThunkExecutor might resume after NoOpAsyncThunk already
+  // completes its execution event.
+  EXPECT_GE(num_tasks, 90);
 }
 
 //===----------------------------------------------------------------------===//
@@ -484,20 +592,35 @@ TEST(ThunkExecutorTest, Execute) {
 //===----------------------------------------------------------------------===//
 
 // We generate random thunk sequences that may or may not use a shared resource.
-enum class SharedResourceUse { kNo, kAll, kRandom };
+struct SharedResourceUse {
+  enum class Kind { kNo, kAll, kRandom };
+
+  Kind kind;
+  std::optional<Resource::Kind> resource_kind;
+};
 
 struct GeneratedThunkSequence {
+  explicit GeneratedThunkSequence(int64_t num_elements)
+      : src(LiteralUtil::CreateFull({num_elements}, int32_t{1})),
+        dst(LiteralUtil::CreateFull({num_elements}, int32_t{0})),
+        expected(LiteralUtil::CreateFull({num_elements}, int32_t{0})),
+        src_alloc(CreateBufferAllocation(0, src)),
+        dst_alloc(CreateBufferAllocation(1, dst)),
+        expected_shared_resource_value(0),
+        expected_literals({&src, &expected}),
+        literals({&src, &dst}) {}
+
+  Literal src;
+  Literal dst;
+  Literal expected;
+
   BufferAllocation src_alloc;
   BufferAllocation dst_alloc;
 
-  std::vector<int32_t> src;
-  std::vector<int32_t> dst;
-  std::vector<int32_t> expected;
-
   int32_t expected_shared_resource_value;
 
-  std::vector<MaybeOwningDeviceMemory> expected_buffers;
-  std::vector<MaybeOwningDeviceMemory> buffers;
+  std::vector<Literal*> expected_literals;
+  std::vector<Literal*> literals;
 
   ThunkSequence sequence;
 };
@@ -506,17 +629,8 @@ static absl::StatusOr<std::unique_ptr<GeneratedThunkSequence>>
 GenerateThunkSequence(size_t num_elements, size_t num_thunks,
                       SharedResourceUse shared_resource_use,
                       bool inject_errors) {
-  auto g = std::make_unique<GeneratedThunkSequence>(GeneratedThunkSequence{
-      BufferAllocation(/*index=*/0, num_elements * sizeof(int32_t), 0),
-      BufferAllocation(/*index=*/1, num_elements * sizeof(int32_t), 0),
-      /*src=*/std::vector<int32_t>(num_elements, 1),
-      /*dst=*/std::vector<int32_t>(num_elements, 0),
-      /*expected=*/std::vector<int32_t>(num_elements, 0),
-      /*expected_shared_resource_value=*/0,
-  });
-
-  g->expected_buffers = AddI32Thunk::AsDeviceMemory({&g->src, &g->expected});
-  g->buffers = AddI32Thunk::AsDeviceMemory({&g->src, &g->dst});
+  auto g = std::make_unique<GeneratedThunkSequence>(num_elements);
+  g->sequence.reserve(num_thunks);
 
   std::minstd_rand0 engine;
 
@@ -538,20 +652,27 @@ GenerateThunkSequence(size_t num_elements, size_t num_thunks,
     BufferAllocation::Slice dst = random_slice(&g->dst_alloc);
 
     // Pre-compute expected result while building the thunk sequence.
-    BufferAllocations allocations(g->expected_buffers);
+    BufferAllocations allocations =
+        CreateBufferAllocations(absl::MakeSpan(g->expected_literals));
     TF_RETURN_IF_ERROR(AddI32Thunk::Execute(&allocations, src, dst));
 
-    bool use_resource = [&] {
-      switch (shared_resource_use) {
-        case SharedResourceUse::kNo:
-          return false;
-        case SharedResourceUse::kAll:
-          return true;
-        case SharedResourceUse::kRandom:
-          return use_resource_dist(engine) == 0;
+    auto use_resource = [&]() -> std::optional<Resource::Kind> {
+      switch (shared_resource_use.kind) {
+        case SharedResourceUse::Kind::kNo:
+          return std::nullopt;
+        case SharedResourceUse::Kind::kAll:
+          return shared_resource_use.resource_kind;
+        case SharedResourceUse::Kind::kRandom:
+          if (use_resource_dist(engine) == 0) {
+            return shared_resource_use.resource_kind;
+          }
+          return std::nullopt;
       }
     }();
-    if (use_resource) g->expected_shared_resource_value++;
+
+    if (use_resource) {
+      g->expected_shared_resource_value++;
+    }
 
     bool inject_error = inject_errors && inject_error_dist(engine) == 0;
     g->sequence.push_back(AddI32Thunk::Create(absl::StrCat(i), {src}, {dst},
@@ -584,20 +705,16 @@ class ThunkExecutorStressTest
       thread_pool_.emplace(tsl::Env::Default(), "thunk-executor", 8);
       device_.emplace(thread_pool_->AsEigenThreadPool(),
                       thread_pool_->NumThreads());
-      task_runner_.emplace([this](Thunk::Task task) {
-        thread_pool_->Schedule(std::move(task));
-      });
+      task_runner_.emplace(thread_pool_->AsEigenThreadPool());
     }
   }
 
   Thunk::TaskRunner* task_runner() {
-    if (!use_task_runner_) return nullptr;
-    return &*task_runner_;
+    return use_task_runner_ ? &*task_runner_ : nullptr;
   }
 
   Eigen::ThreadPoolDevice* device() {
-    if (!use_device_) return nullptr;
-    return &*device_;
+    return use_device_ ? &*device_ : nullptr;
   }
 
  private:
@@ -605,7 +722,7 @@ class ThunkExecutorStressTest
   bool use_device_;
   std::optional<tsl::thread::ThreadPool> thread_pool_;
   std::optional<Eigen::ThreadPoolDevice> device_;
-  std::optional<Thunk::TaskRunner> task_runner_;
+  std::optional<ThreadPoolTaskRunner> task_runner_;
 };
 
 TEST_P(ThunkExecutorStressTest, Execute) {
@@ -626,7 +743,8 @@ TEST_P(ThunkExecutorStressTest, Execute) {
       ThunkExecutor executor,
       ThunkExecutor::Create(std::move(g->sequence), executor_options));
 
-  BufferAllocations allocations(g->buffers);
+  BufferAllocations allocations =
+      CreateBufferAllocations(absl::MakeSpan(g->literals));
   Thunk::ExecuteParams params = {nullptr, &allocations, nullptr, device(),
                                  task_runner()};
 
@@ -645,17 +763,39 @@ TEST_P(ThunkExecutorStressTest, Execute) {
   }
 }
 
+// We keep the number of thunks smaller in debug builds as otherwise it takes
+// too long to run the tests. In optimized builds we can afford to run longer
+// thunk sequences to get more coverage.
+auto NumTestThunks() {
+#ifdef NDEBUG
+  return testing::ValuesIn({10, 50, 100});
+#else
+  return testing::ValuesIn({10, 100, 500});
+#endif
+}
+
+// Create aliases for all possible combinations of shared resource use.
+static constexpr auto kToken = Resource::Kind::kToken;
+static constexpr auto kComm = Resource::Kind::kCollectiveCommunicator;
+static constexpr auto kNoResource = SharedResourceUse::Kind::kNo;
+static constexpr auto kAllResource = SharedResourceUse::Kind::kAll;
+static constexpr auto kRandomResource = SharedResourceUse::Kind::kRandom;
+
 INSTANTIATE_TEST_SUITE_P(
     ThunkExecutor, ThunkExecutorStressTest,
-    testing::Combine(/*num_thunks=*/testing::ValuesIn({10, 100, 1000}),
-                     /*use_task_runner=*/testing::Bool(),
-                     /*use_device=*/testing::Bool(),
-                     /*shared_resource_use=*/
-                     testing::Values(SharedResourceUse::kNo,
-                                     SharedResourceUse::kAll,
-                                     SharedResourceUse::kRandom),
-                     /*inject_errors=*/testing::Bool(),
-                     /*use_priority_ready_queue=*/testing::Bool()));
+    testing::Combine(
+        /*num_thunks=*/NumTestThunks(),
+        /*use_task_runner=*/testing::Bool(),
+        /*use_device=*/testing::Bool(),
+        /*shared_resource_use=*/
+        testing::Values(SharedResourceUse{kNoResource, kToken},
+                        SharedResourceUse{kAllResource, kToken},
+                        SharedResourceUse{kRandomResource, kToken},
+                        SharedResourceUse{kNoResource, kComm},
+                        SharedResourceUse{kAllResource, kComm},
+                        SharedResourceUse{kRandomResource, kComm}),
+        /*inject_errors=*/testing::Bool(),
+        /*use_priority_ready_queue=*/testing::Bool()));
 
 //===----------------------------------------------------------------------===//
 // Performance benchmarks below
@@ -743,18 +883,29 @@ BENCHMARK_READY_QUEUE(BM_FifoReadyQueuePushPopHalf);
 BENCHMARK_READY_QUEUE(BM_PriorityReadyQueuePushPop);
 BENCHMARK_READY_QUEUE(BM_PriorityReadyQueuePushPopHalf);
 
+static void BM_CreateThunkExecutor(benchmark::State& state) {
+  const size_t num_thunks = state.range(0);
+
+  for (auto _ : state) {
+    auto g = GenerateThunkSequence(/*num_elements=*/1024, num_thunks,
+                                   {kNoResource}, false);
+    CHECK_OK(ThunkExecutor::Create(std::move((*g)->sequence), OptionsForTest())
+                 .status());
+  }
+}
+
 static void BM_SequentialThunkExecutor(benchmark::State& state) {
   const size_t num_thunks = state.range(0);
 
-  auto g =
-      GenerateThunkSequence(/*num_elements=*/1024, num_thunks,
-                            /*shared_resource_use=*/SharedResourceUse::kAll,
-                            /*inject_errors=*/false)
-          .value();
+  auto g = GenerateThunkSequence(/*num_elements=*/1024, num_thunks,
+                                 /*shared_resource_use=*/{kAllResource, kToken},
+                                 /*inject_errors=*/false)
+               .value();
   auto e =
       ThunkExecutor::Create(std::move(g->sequence), OptionsForTest()).value();
 
-  BufferAllocations allocations(g->buffers);
+  BufferAllocations allocations =
+      CreateBufferAllocations(absl::MakeSpan(g->literals));
   Thunk::ExecuteParams params = {nullptr, &allocations};
 
   for (auto _ : state) {
@@ -768,17 +919,16 @@ static void BM_SyncThunkExecutor(benchmark::State& state) {
   const size_t num_thunks = state.range(0);
 
   auto g = GenerateThunkSequence(/*num_elements=*/1024, num_thunks,
-                                 /*shared_resource_use=*/SharedResourceUse::kNo,
-                                 /*inject_errors=*/false)
-               .value();
-  auto e =
-      ThunkExecutor::Create(std::move(g->sequence), OptionsForTest()).value();
+                                 /*shared_resource_use=*/{kNoResource},
+                                 /*inject_errors=*/false);
+  auto e = ThunkExecutor::Create(std::move((*g)->sequence), OptionsForTest());
 
-  BufferAllocations allocations(g->buffers);
+  BufferAllocations allocations =
+      CreateBufferAllocations(absl::MakeSpan((*g)->literals));
   Thunk::ExecuteParams params = {nullptr, &allocations};
 
   for (auto _ : state) {
-    auto execute_event = e.Execute(params);
+    auto execute_event = e->Execute(params);
     tsl::BlockUntilReady(execute_event);
     CHECK(execute_event.IsConcrete());
   }
@@ -792,23 +942,19 @@ static void BM_AsyncThunkExecutor(benchmark::State& state) {
                                  thread_pool.NumThreads());
 
   auto g = GenerateThunkSequence(/*num_elements=*/1024, num_thunks,
-                                 /*shared_resource_use=*/SharedResourceUse::kNo,
-                                 /*inject_errors=*/false)
-               .value();
-  auto e =
-      ThunkExecutor::Create(std::move(g->sequence), OptionsForTest()).value();
+                                 /*shared_resource_use=*/{kNoResource},
+                                 /*inject_errors=*/false);
+  auto e = ThunkExecutor::Create(std::move((*g)->sequence), OptionsForTest());
 
-  BufferAllocations allocations(g->buffers);
-
-  Thunk::TaskRunner task_runner = [&](Thunk::Task task) {
-    thread_pool.Schedule(std::move(task));
-  };
+  BufferAllocations allocations =
+      CreateBufferAllocations(absl::MakeSpan((*g)->literals));
+  ThreadPoolTaskRunner task_runner(thread_pool.AsEigenThreadPool());
 
   Thunk::ExecuteParams params = {nullptr, &allocations, nullptr, &device,
                                  &task_runner};
 
   for (auto _ : state) {
-    auto execute_event = e.Execute(params);
+    auto execute_event = e->Execute(params);
     tsl::BlockUntilReady(execute_event);
     CHECK(execute_event.IsConcrete());
   }
@@ -828,6 +974,7 @@ static void BM_AsyncThunkExecutor(benchmark::State& state) {
       ->Arg(256)                       \
       ->Arg(512)
 
+BENCHMARK_THUNK_EXECUTOR(BM_CreateThunkExecutor);
 BENCHMARK_THUNK_EXECUTOR(BM_SequentialThunkExecutor);
 BENCHMARK_THUNK_EXECUTOR(BM_SyncThunkExecutor);
 BENCHMARK_THUNK_EXECUTOR(BM_AsyncThunkExecutor);

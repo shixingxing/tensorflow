@@ -96,6 +96,7 @@ cc_library(
     ],
     deps = [
         "//tensorflow/compiler/mlir/lite:tensorflow_lite",
+        "@llvm-project//mlir:AsmParser",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:TransformUtils",
@@ -310,6 +311,38 @@ cc_library(
     deps = [
         ":util",
         "//tensorflow/compiler/mlir/lite:tensorflow_lite",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@local_xla//xla/mlir_hlo",
+    ],
+)
+
+cc_library(
+    name = "if",
+    srcs = ["if.cc"],
+    hdrs = ["if.h"],
+    deps = [
+        ":util",
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@local_xla//xla/mlir_hlo",
+    ],
+)
+
+cc_library(
+    name = "fft",
+    srcs = ["fft.cc"],
+    hdrs = ["fft.h"],
+    deps = [
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite",
+        "//tensorflow/compiler/mlir/tensorflow:dynamic_shape_utils",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:ArithDialect",
         "@llvm-project//mlir:IR",

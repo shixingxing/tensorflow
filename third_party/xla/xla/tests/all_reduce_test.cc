@@ -16,22 +16,19 @@ limitations under the License.
 #include <cstdint>
 #include <utility>
 
-#include "xla/literal.h"
+#include "xla/hlo/testlib/test.h"
 #include "xla/literal_util.h"
-#include "xla/shape_util.h"
-#include "xla/test.h"
-#include "xla/tests/hlo_test_base.h"
-#include "xla/tests/test_macros.h"
+#include "xla/tests/hlo_pjrt_test_base.h"
 
 namespace xla {
 namespace {
 
-class TrivialAllReduceTest : public HloTestBase {};
+using TrivialAllReduceTest = HloPjRtTestBase;
 
 // Currently the CPU and GPU backends only support AllReduce with one
 // replica.  But we can at least check this.
 
-XLA_TEST_F(TrivialAllReduceTest, OneOperand) {
+TEST_F(TrivialAllReduceTest, OneOperand) {
   const char* module_str = R"(
   HloModule test
 
@@ -52,7 +49,7 @@ XLA_TEST_F(TrivialAllReduceTest, OneOperand) {
   EXPECT_EQ(literal, ExecuteAndTransfer(std::move(module), {&literal}));
 }
 
-XLA_TEST_F(TrivialAllReduceTest, MultipleOperands) {
+TEST_F(TrivialAllReduceTest, MultipleOperands) {
   const char* module_str = R"(
   HloModule test
 
@@ -79,7 +76,7 @@ XLA_TEST_F(TrivialAllReduceTest, MultipleOperands) {
 // On the GPU backend, constants get special handling.  Someone might pass a
 // constant to CRS to e.g. count the number of replicas -- we need to make sure
 // it works.
-XLA_TEST_F(TrivialAllReduceTest, ConstantOperand) {
+TEST_F(TrivialAllReduceTest, ConstantOperand) {
   const char* module_str = R"(
   HloModule test
 
@@ -103,7 +100,7 @@ XLA_TEST_F(TrivialAllReduceTest, ConstantOperand) {
             ExecuteAndTransfer(std::move(module), {&literal0}));
 }
 
-XLA_TEST_F(TrivialAllReduceTest, AllReduceU8) {
+TEST_F(TrivialAllReduceTest, AllReduceU8) {
   const char* module_str = R"(
 HloModule test
 
@@ -144,7 +141,7 @@ ENTRY %test_computation {
             ExecuteAndTransfer(std::move(module), {&literal_in}));
 }
 
-XLA_TEST_F(TrivialAllReduceTest, AllReduceS32) {
+TEST_F(TrivialAllReduceTest, AllReduceS32) {
   const char* module_str = R"(
 
 HloModule test

@@ -16,15 +16,14 @@ limitations under the License.
 #ifndef XLA_SERVICE_GPU_TRANSFORMS_CUDNN_FUSED_CONV_REWRITER_H_
 #define XLA_SERVICE_GPU_TRANSFORMS_CUDNN_FUSED_CONV_REWRITER_H_
 
-#include <cstdint>
-
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "xla/hlo/ir/hlo_module.h"
-#include "xla/service/hlo_pass_interface.h"
+#include "xla/hlo/pass/hlo_pass_interface.h"
 #include "xla/stream_executor/device_description.h"
 #include "xla/stream_executor/dnn.h"
+#include "xla/stream_executor/semantic_version.h"
 
 namespace xla {
 namespace gpu {
@@ -97,19 +96,24 @@ namespace gpu {
 // In the `result_s8` case where there's no bias, side-input, or alpha1, you can
 // skip the convert_f32 on conv.
 //
+// In the `result_s8` case, you can skip the clamp as long as the convert_f32
+// is not skipped. The reason is XLA implicitly clamps when converting from
+// float to int (although this is an implementation detail and not guaranteed by
+// the spec.)
+//
 // If you have an integer convolution that doesn't fit one of these idioms, this
 // pass returns an error -- cudnn will not be able to run it.
 class CudnnFusedConvRewriter : public HloModulePass {
  public:
   CudnnFusedConvRewriter(se::CudaComputeCapability cc,
                          se::dnn::VersionInfo dnn_version,
-                         int32_t toolkit_version)
+                         se::SemanticVersion toolkit_version)
       : compute_capability_(cc),
         dnn_version_(dnn_version),
         toolkit_version_(toolkit_version) {}
   CudnnFusedConvRewriter(se::RocmComputeCapability cc,
                          se::dnn::VersionInfo dnn_version,
-                         int32_t toolkit_version)
+                         se::SemanticVersion toolkit_version)
       : compute_capability_(cc),
         dnn_version_(dnn_version),
         toolkit_version_(toolkit_version) {}
@@ -124,9 +128,9 @@ class CudnnFusedConvRewriter : public HloModulePass {
       const absl::flat_hash_set<absl::string_view>& execution_threads) override;
 
  private:
-  const se::GpuComputeCapability compute_capability_;
-  const se::dnn::VersionInfo dnn_version_;
-  const int32_t toolkit_version_;
+  se::GpuComputeCapability compute_capability_;
+  se::dnn::VersionInfo dnn_version_;
+  se::SemanticVersion toolkit_version_;
 };
 
 }  // namespace gpu

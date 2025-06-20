@@ -30,8 +30,8 @@ limitations under the License.
 #include "absl/types/span.h"
 #include "xla/tsl/concurrency/async_value.h"
 #include "xla/tsl/concurrency/ref_count.h"
-#include "tsl/platform/test.h"
-#include "tsl/platform/test_benchmark.h"
+#include "xla/tsl/platform/test.h"
+#include "xla/tsl/platform/test_benchmark.h"
 
 namespace tsl {
 
@@ -434,6 +434,17 @@ TEST(AsyncValueRefTest, MakeAsyncValueRef) {
     EXPECT_EQ(ref.get(), 42.0f);
   }
 
+  {  // Make AsyncValueRef with automatic type inference.
+    AsyncValueRef<float> ref =
+        MakeAsyncValueRef(executor, []() -> float { return 42.0f; });
+
+    EXPECT_FALSE(ref.IsAvailable());
+    EXPECT_EQ(executor.Quiesce(), 1);
+
+    EXPECT_TRUE(ref.IsAvailable());
+    EXPECT_EQ(ref.get(), 42.0f);
+  }
+
   {  // Make AsyncValueRef from a function that returns a StatusOr value.
     AsyncValueRef<float> ref = TryMakeAsyncValueRef<float>(
         executor, []() -> absl::StatusOr<float> { return 42.0f; });
@@ -445,8 +456,33 @@ TEST(AsyncValueRefTest, MakeAsyncValueRef) {
     EXPECT_EQ(ref.get(), 42.0f);
   }
 
+  {  // Make AsyncValueRef from a function that returns a StatusOr value with
+     // automatic type inference.
+    AsyncValueRef<float> ref = TryMakeAsyncValueRef(
+        executor, []() -> absl::StatusOr<float> { return 42.0f; });
+
+    EXPECT_FALSE(ref.IsAvailable());
+    EXPECT_EQ(executor.Quiesce(), 1);
+
+    EXPECT_TRUE(ref.IsAvailable());
+    EXPECT_EQ(ref.get(), 42.0f);
+  }
+
   {  // Make AsyncValueRef from a function that returns a StatusOr error.
     AsyncValueRef<float> ref = TryMakeAsyncValueRef<float>(
+        executor,
+        []() -> absl::StatusOr<float> { return absl::InternalError("test"); });
+
+    EXPECT_FALSE(ref.IsAvailable());
+    EXPECT_EQ(executor.Quiesce(), 1);
+
+    EXPECT_TRUE(ref.IsError());
+    EXPECT_EQ(ref.GetError(), absl::InternalError("test"));
+  }
+
+  {  // Make AsyncValueRef from a function that returns a StatusOr error with
+     // automatic type inference.
+    AsyncValueRef<float> ref = TryMakeAsyncValueRef(
         executor,
         []() -> absl::StatusOr<float> { return absl::InternalError("test"); });
 
@@ -873,6 +909,48 @@ TEST(AsyncValueRefTest, RecursiveOwnership) {
   EXPECT_EQ(counter, 1 + 2 + 3);
 }
 
+TEST(AsyncValueRefTest, CountDownZero) {
+  CountDownAsyncValueRef<int32_t> count_down_ref(0, 42);
+  AsyncValueRef<int32_t> ref = count_down_ref.AsRef();
+
+  EXPECT_TRUE(ref.IsAvailable());
+  EXPECT_EQ(*ref, 42);
+}
+
+TEST(AsyncValueRefTest, CountDownSuccess) {
+  AsyncValueRef<int32_t> ref = MakeConstructedAsyncValueRef<int32_t>(42);
+
+  CountDownAsyncValueRef<int32_t> count_down_ref(ref, 2);
+  CountDownAsyncValueRef<int32_t> count_down_ref_copy = count_down_ref;
+
+  EXPECT_FALSE(ref.IsAvailable());
+
+  EXPECT_FALSE(count_down_ref.CountDown(1));
+  EXPECT_FALSE(count_down_ref.CountDown(0));
+  EXPECT_FALSE(ref.IsAvailable());
+
+  EXPECT_TRUE(count_down_ref_copy.CountDown(1));
+  EXPECT_TRUE(count_down_ref_copy.CountDown(0));
+  EXPECT_TRUE(ref.IsAvailable());
+  EXPECT_EQ(*ref, 42);
+}
+
+TEST(AsyncValueRefTest, CountDownError) {
+  CountDownAsyncValueRef<int32_t> count_down_ref(2);
+  AsyncValueRef<int32_t> ref = count_down_ref.AsRef();
+
+  CountDownAsyncValueRef<int32_t> count_down_ref_copy = count_down_ref;
+
+  EXPECT_FALSE(ref.IsAvailable());
+
+  EXPECT_FALSE(count_down_ref.CountDown(absl::InternalError("error")));
+  EXPECT_FALSE(ref.IsAvailable());
+
+  EXPECT_TRUE(count_down_ref_copy.CountDown(1));
+  EXPECT_TRUE(ref.IsError());
+  EXPECT_EQ(ref.GetError(), absl::InternalError("error"));
+}
+
 //===----------------------------------------------------------------------===//
 // Performance benchmarks below
 //===----------------------------------------------------------------------===//
@@ -893,5 +971,35 @@ BENCHMARK(BM_MakeConstructed<32>);
 BENCHMARK(BM_MakeConstructed<64>);
 BENCHMARK(BM_MakeConstructed<128>);
 BENCHMARK(BM_MakeConstructed<256>);
+
+static void BM_CountDownSuccess(benchmark::State& state) {
+  size_t n = state.range(0);
+
+  for (auto _ : state) {
+    auto ref = MakeConstructedAsyncValueRef<int32_t>(42);
+    CountDownAsyncValueRef<int32_t> count_down_ref(ref, n);
+    for (size_t i = 0; i < n; ++i) {
+      count_down_ref.CountDown(1);
+    }
+  }
+}
+
+BENCHMARK(BM_CountDownSuccess)->Arg(4)->Arg(8)->Arg(16)->Arg(32);
+
+static void BM_CountDownError(benchmark::State& state) {
+  size_t n = state.range(0);
+
+  absl::Status error = absl::InternalError("error");
+
+  for (auto _ : state) {
+    auto ref = MakeConstructedAsyncValueRef<int32_t>(42);
+    CountDownAsyncValueRef<int32_t> count_down_ref(ref, n);
+    for (size_t i = 0; i < n; ++i) {
+      count_down_ref.CountDown(error);
+    }
+  }
+}
+
+BENCHMARK(BM_CountDownError)->Arg(4)->Arg(8)->Arg(16)->Arg(32);
 
 }  // namespace tsl

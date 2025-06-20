@@ -24,6 +24,7 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -31,17 +32,16 @@ limitations under the License.
 #include "absl/base/dynamic_annotations.h"
 #include "absl/base/optimization.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "unsupported/Eigen/CXX11/Tensor"
-#include "llvm/ADT/SmallVector.h"
-#include "llvm/ExecutionEngine/Orc/Shared/ExecutorSymbolDef.h"
-#include "llvm/IR/Mangler.h"
-#include "llvm/Support/Error.h"
 #include "xla/backends/cpu/runtime/buffer_allocations.h"
+#include "xla/backends/cpu/runtime/function_library.h"
+#include "xla/backends/cpu/runtime/thread_pool_task_runner.h"
 #include "xla/backends/cpu/runtime/thunk.h"
 #include "xla/backends/cpu/runtime/thunk_executor.h"
 #include "xla/executable_run_options.h"
@@ -51,11 +51,11 @@ limitations under the License.
 #include "xla/literal.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/cpu/cpu_runtime.h"
-#include "xla/service/cpu/simple_orc_jit.h"
 #include "xla/service/custom_call_status.h"
 #include "xla/service/custom_call_status_internal.h"
 #include "xla/service/executable.h"
 #include "xla/service/hlo_execution_profile.h"
+#include "xla/service/hlo_profile_printer_data.pb.h"
 #include "xla/service/hlo_value.h"
 #include "xla/service/maybe_owning_device_memory.h"
 #include "xla/service/service_executable_run_options.h"
@@ -70,70 +70,12 @@ limitations under the License.
 #include "xla/tsl/concurrency/async_value_ref.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/platform/env.h"
-#include "tsl/platform/logging.h"
-#include "tsl/platform/statusor.h"
 
 namespace xla {
 namespace cpu {
 
-using ConstantAllocation = CpuExecutable::ConstantAllocation;
-using FunctionRegistry = CpuExecutable::FunctionRegistry;
-
-FunctionRegistry::FunctionRegistry(SimpleOrcJIT* jit) : jit_(jit) {}
-
-std::string FunctionRegistry::Mangle(std::string_view name) {
-  llvm::SmallVector<char, 40> mangled;
-  llvm::Mangler::getNameWithPrefix(mangled, name, jit_->data_layout());
-  return std::string(mangled.begin(), mangled.end());
-}
-
-absl::StatusOr<FunctionRegistry::Kernel> FunctionRegistry::FindKernel(
-    std::string_view name) {
-  VLOG(3) << "Find host kernel with a name " << name;
-
-  llvm::Expected<llvm::orc::ExecutorSymbolDef> sym =
-      jit_->FindCompiledSymbol(Mangle(name));
-  if (!sym) {
-    return absl::InvalidArgumentError(
-        absl::StrCat("Can't resolve host kernel with a name ", name,
-                     " in the jit compiled module."));
-  }
-  return reinterpret_cast<Kernel>(sym->getAddress().getValue());
-}
-
-absl::StatusOr<FunctionRegistry::Comparator> FunctionRegistry::FindComparator(
-    std::string_view name) {
-  VLOG(3) << "Find comparator with a name " << name;
-
-  llvm::Expected<llvm::orc::ExecutorSymbolDef> sym =
-      jit_->FindCompiledSymbol(Mangle(name));
-  if (!sym) {
-    return absl::InvalidArgumentError(
-        absl::StrCat("Can't resolve comparator with a name ", name,
-                     " in the jit compiled module."));
-  }
-  return reinterpret_cast<Comparator>(sym->getAddress().getValue());
-}
-
-se::DeviceMemoryBase ConstantAllocation::AsDeviceMemoryBase() const {
-  if (auto* empty = std::get_if<std::monostate>(&data)) {
-    return se::DeviceMemoryBase();
-  }
-
-  if (auto* owned = std::get_if<std::unique_ptr<Literal>>(&data)) {
-    return se::DeviceMemoryBase((*owned)->untyped_data(),
-                                (*owned)->size_bytes());
-  }
-
-  auto* view = std::get_if<absl::Span<const uint8_t>>(&data);
-  return se::DeviceMemoryBase(
-      const_cast<void*>(reinterpret_cast<const void*>(view->data())),
-      view->size());
-}
-
 absl::StatusOr<std::unique_ptr<CpuExecutable>> CpuExecutable::Create(
-    std::unique_ptr<SimpleOrcJIT> jit,
+    std::unique_ptr<FunctionLibrary> function_library,
     std::unique_ptr<const BufferAssignment> assignment,
     std::unique_ptr<HloModule> hlo_module,
     const std::string& entry_function_name,
@@ -145,31 +87,23 @@ absl::StatusOr<std::unique_ptr<CpuExecutable>> CpuExecutable::Create(
   std::unique_ptr<CpuExecutable> executable(new CpuExecutable(
       std::move(hlo_module), std::move(hlo_profile_printer_data),
       std::move(hlo_profile_index_map), std::move(assignment)));
-  executable->jit_ = std::move(jit);
+  executable->function_library_ = std::move(function_library);
   executable->module_name_ = entry_function_name;
 
-  // Resolve symbols in the constructor rather than at execution time to avoid
-  // races because FindSymbol is not thread safe.
-  llvm::Expected<llvm::orc::ExecutorSymbolDef> sym =
-      executable->jit_->FindCompiledSymbol(entry_function_name);
-  // We expect to find the symbol provided with entry_function_name; otherwise
-  // this is an internal error.
-  if (!sym) {
-    return absl::NotFoundError(
-        absl::StrCat("Symbol ", entry_function_name, " not found."));
-  }
-  // getAddress can do work under the hood in the jit, so it needs to be
-  // guarded by the mutex.
-  executable->compute_function_ =
-      reinterpret_cast<ComputeFunctionType>(sym->getAddress().getValue());
+  TF_ASSIGN_OR_RETURN(
+      executable->compute_function_,
+      executable->function_library_
+          ->ResolveFunction<std::remove_pointer_t<ComputeFunctionType>>(
+              entry_function_name));
+
   VLOG(1) << "compute_function_ at address "
           << reinterpret_cast<void*>(executable->compute_function_);
-  executable->jit_->DoneCompiling();
+
   return executable;
 }
 
 absl::StatusOr<std::unique_ptr<CpuExecutable>> CpuExecutable::Create(
-    std::unique_ptr<SimpleOrcJIT> jit,
+    std::unique_ptr<FunctionLibrary> function_library,
     std::unique_ptr<const BufferAssignment> assignment,
     std::unique_ptr<HloModule> hlo_module, ThunkSequence thunks,
     std::vector<ConstantAllocation> constants,
@@ -181,13 +115,13 @@ absl::StatusOr<std::unique_ptr<CpuExecutable>> CpuExecutable::Create(
   std::unique_ptr<CpuExecutable> executable(new CpuExecutable(
       std::move(hlo_module), std::move(hlo_profile_printer_data),
       std::move(hlo_profile_index_map), std::move(assignment)));
+  executable->function_library_ = std::move(function_library);
 
-  executable->jit_ = std::move(jit);
-  executable->jit_->DoneCompiling();
-  executable->function_registry_ = FunctionRegistry(executable->jit_.get());
-
-  TF_ASSIGN_OR_RETURN(executable->thunks_,
-                      ThunkExecutor::Create(std::move(thunks)));
+  ThunkExecutor::Options thunk_executor_options;
+  thunk_executor_options.is_nested_executor = false;
+  TF_ASSIGN_OR_RETURN(
+      executable->thunks_,
+      ThunkExecutor::Create(std::move(thunks), thunk_executor_options));
 
   // Re-index constants by their allocation index to allow efficient lookup.
   for (auto& constant : constants) {
@@ -287,17 +221,11 @@ CpuExecutable::CreateBufferTable(se::DeviceMemoryAllocator* memory_allocator,
 
 absl::Status CpuExecutable::ExecuteComputeFunction(
     const ExecutableRunOptions* run_options,
-    absl::Span<MaybeOwningDeviceMemory const> buffers,
-    HloExecutionProfile* hlo_execution_profile) {
+    absl::Span<MaybeOwningDeviceMemory const> buffers) {
   uint64_t start_micros = tsl::Env::Default()->NowMicros();
 
-  size_t profile_counters_size =
-      hlo_execution_profile ? hlo_execution_profile->profile_counters().size()
-                            : 0;
-  int64_t* profile_counters =
-      hlo_execution_profile
-          ? hlo_execution_profile->mutable_profile_counters()->data()
-          : nullptr;
+  size_t profile_counters_size = 0;
+  int64_t* profile_counters = nullptr;
 
   // Call the computation function following the calling convention. See the
   // definition of 'ComputeFunctionType' for the details of the calling
@@ -326,12 +254,6 @@ absl::Status CpuExecutable::ExecuteComputeFunction(
       const double nanoseconds = (end_micros - start_micros) * 1000.0;
       run_options->execution_profile()->set_compute_time_ns(
           std::max(nanoseconds, 1.0));
-      // If hlo profiling was disabled then the cycle count is left empty.
-      if (hlo_execution_profile) {
-        run_options->execution_profile()->set_compute_cycle_count(
-            hlo_execution_profile->total_cycles_executed(
-                *module().entry_computation()));
-      }
     }
   };
 
@@ -353,17 +275,11 @@ absl::Status CpuExecutable::ExecuteComputeFunction(
 
 absl::Status CpuExecutable::ExecuteThunks(
     const ExecutableRunOptions* run_options,
-    absl::Span<MaybeOwningDeviceMemory const> buffers,
-    HloExecutionProfile* hlo_execution_profile) {
+    absl::Span<MaybeOwningDeviceMemory const> buffers) {
   uint64_t start_ns = tsl::Env::Default()->NowNanos();
 
-  size_t profile_counters_size =
-      hlo_execution_profile ? hlo_execution_profile->profile_counters().size()
-                            : 0;
-  int64_t* profile_counters =
-      hlo_execution_profile
-          ? hlo_execution_profile->mutable_profile_counters()->data()
-          : nullptr;
+  size_t profile_counters_size = 0;
+  int64_t* profile_counters = nullptr;
 
   BufferAllocations allocations(buffers);
 
@@ -389,15 +305,15 @@ absl::Status CpuExecutable::ExecuteThunks(
                       Thunk::CustomCallExecuteParams::Create(run_options));
 
   // Use the intra-op thread pool to offload thunk executor tasks.
-  Thunk::TaskRunner task_runner = [run_options](Thunk::Task task) {
-    run_options->intra_op_thread_pool()->getPool()->Schedule(std::move(task));
-  };
+  auto* intra_op_thread_pool = run_options->intra_op_thread_pool();
+  ThreadPoolTaskRunner task_runner(
+      intra_op_thread_pool ? intra_op_thread_pool->getPool() : nullptr);
 
   Thunk::ExecuteParams execute_params = {
-      &*function_registry_,
+      &*function_library_,
       &allocations,
       runtime::GetXfeedManager(runtime::GetDeviceOrdinal(run_options)),
-      run_options->intra_op_thread_pool(),
+      intra_op_thread_pool,
       &task_runner,
       &collective_execute_params,
       &custom_call_execute_params};
@@ -409,12 +325,6 @@ absl::Status CpuExecutable::ExecuteThunks(
     uint64_t end_ns = tsl::Env::Default()->NowNanos();
     run_options->execution_profile()->set_compute_time_ns(
         std::max<int64_t>(end_ns - start_ns, 1));
-    // If hlo profiling was disabled then the cycle count is left empty.
-    if (hlo_execution_profile) {
-      run_options->execution_profile()->set_compute_cycle_count(
-          hlo_execution_profile->total_cycles_executed(
-              *module().entry_computation()));
-    }
   }
 
   return ABSL_PREDICT_FALSE(executed_event.IsError())
@@ -524,8 +434,7 @@ absl::StatusOr<ExecutionOutput> CpuExecutable::CreateResultShapedBuffer(
 
 absl::StatusOr<ExecutionOutput> CpuExecutable::ExecuteAsyncOnStream(
     const ServiceExecutableRunOptions* run_options,
-    std::vector<ExecutionInput> arguments,
-    HloExecutionProfile* hlo_execution_profile) {
+    std::vector<ExecutionInput> arguments) {
   if (GetRootValueSet().IsAmbiguous()) {
     return Unimplemented("Points-to set of root instruction is ambiguous");
   }
@@ -560,38 +469,29 @@ absl::StatusOr<ExecutionOutput> CpuExecutable::ExecuteAsyncOnStream(
       CreateResultShapedBuffer(run_options, absl::MakeSpan(buffers),
                                absl::MakeSpan(arguments)));
 
-  // Logically we want this lambda to capture `buffers` by move, ultimately our
-  // functor needs to be wrapped in an std::function, and that requires its
-  // functor to be copyable.  Thus we perpetrate the hack of capturing buffers
-  // "by shared pointer".
-  //
-  // We also need to change the types of some of the variables we capture:
-  // run_options needs to change from a pointer to a value type, and arguments
-  // needs to change from a Span into a vector.  We use a struct instead
-  // of a lambda to make this explicit.
+  // We need to change the types of some of the variables we capture:
+  // - store run_options by value instead of pointer; and
+  // - take ownership of buffers.
+  //  We use a struct instead of a lambda to make this explicit.
   struct AsyncRunTask {
     CpuExecutable* executable;
     ServiceExecutableRunOptions run_options;
-    std::shared_ptr<std::vector<MaybeOwningDeviceMemory>> task_buffers;
-    HloExecutionProfile* hlo_execution_profile;
+    std::vector<MaybeOwningDeviceMemory> task_buffers;
 
     absl::Status operator()() {
       if (executable->has_compute_function()) {
-        return executable->ExecuteComputeFunction(
-            &run_options.run_options(), *task_buffers, hlo_execution_profile);
+        return executable->ExecuteComputeFunction(&run_options.run_options(),
+                                                  task_buffers);
       } else if (executable->has_thunks()) {
         return executable->ExecuteThunks(&run_options.run_options(),
-                                         *task_buffers, hlo_execution_profile);
+                                         task_buffers);
       } else {
         return Internal("No compute function or thunks found.");
       }
     }
   };
   host_stream->EnqueueTaskWithStatus(
-      AsyncRunTask{this, *run_options,
-                   std::make_shared<std::vector<MaybeOwningDeviceMemory>>(
-                       std::move(buffers)),
-                   hlo_execution_profile});
+      AsyncRunTask{this, *run_options, std::move(buffers)});
 
   MarkToBeReleasedArguments(absl::MakeSpan(arguments), result);
   return std::move(result);
@@ -606,7 +506,7 @@ absl::StatusOr<ExecutionOutput> CpuExecutable::ExecuteAsyncOnStream(
     return ShapeUtil::ByteSizeOf(shape, sizeof(void*));
   }
   // Each dynamic dimension size is represented as a S32.
-  int64_t metadata_size = sizeof(int32_t) * shape.dimensions_size();
+  int64_t metadata_size = sizeof(int32_t) * shape.dimensions().size();
   return ShapeUtil::ByteSizeOf(shape, sizeof(void*)) + metadata_size;
 }
 
@@ -616,7 +516,8 @@ const InstructionValueSet& CpuExecutable::GetRootValueSet() const {
 }
 
 int64_t CpuExecutable::SizeOfGeneratedCodeInBytes() const {
-  return jit_ ? jit_->SizeOfGeneratedCodeInBytes() : 0;
+  // TODO(ezhulenev): Delete this function, it's not really used anywhere.
+  return 0;
 }
 
 }  // namespace cpu

@@ -21,6 +21,7 @@ limitations under the License.
 #include <optional>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "absl/algorithm/container.h"
@@ -34,7 +35,6 @@ limitations under the License.
 #include "absl/strings/str_join.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
-#include "xla/array.h"
 #include "xla/hlo/experimental/auto_sharding/auto_sharding.h"
 #include "xla/hlo/experimental/auto_sharding/auto_sharding_device_mesh.h"
 #include "xla/hlo/experimental/auto_sharding/auto_sharding_option.h"
@@ -51,14 +51,12 @@ limitations under the License.
 #include "xla/service/dot_as_convolution_util.h"
 #include "xla/service/hlo_cost_analysis.h"
 #include "xla/service/sharding_propagation.h"
+#include "xla/shape.h"
 #include "tsl/platform/errors.h"
 
 namespace xla {
 namespace spmd {
 namespace {
-
-using MeshDimSet = StableSet<int>;
-using DimMap = StableMap</*tensor dim*/ int, /*mesh dims*/ MeshDimSet>;
 
 // Contains base functionality common to both DotHandler and ConvHandler.
 class HandlerBase {
@@ -69,7 +67,6 @@ class HandlerBase {
               const HloInstructionSequence& instruction_sequence,
               const HloCostAnalysis& hlo_cost_analysis,
               const ClusterEnvironment& cluster_env,
-              const InstructionBatchDimMap& batch_map,
               const AutoShardingOption& option, const CallGraph& call_graph)
       : strategy_group_(strategy_group),
         strategy_map_(strategy_map),
@@ -78,7 +75,6 @@ class HandlerBase {
         instruction_sequence_(instruction_sequence),
         hlo_cost_analysis_(hlo_cost_analysis),
         cluster_env_(cluster_env),
-        batch_map_(batch_map),
         option_(option),
         call_graph_(call_graph),
         device_mesh_(cluster_env.device_mesh_),
@@ -146,33 +142,6 @@ class HandlerBase {
   std::optional<HloSharding> GetShardingFromUser(const HloSharding& lhs_spec,
                                                  const HloSharding& rhs_spec);
 
-  // Given a set of tensor dims, and a set of mesh dims, enumerates all mappings
-  // where a subset of all tensor dims is mapped to a subset of mesh dims, such
-  // that each tensor dim is mapped to at most mesh dim, and no two tensor dims
-  // are mapped to the same mesh dim.
-  void Enumerate(std::function<void(const DimMap&)> split_func, int tensor_rank,
-                 int current_mesh_dim_idx,
-                 const std::vector<int>& unassigned_mesh_dims,
-                 const DimMap& current_dim_map) {
-    if (current_mesh_dim_idx == unassigned_mesh_dims.size()) {
-      split_func(current_dim_map);
-      return;
-    }
-    // Current mesh dim is not assigned to any tensor dim
-    Enumerate(split_func, tensor_rank, current_mesh_dim_idx + 1,
-              unassigned_mesh_dims, current_dim_map);
-
-    for (int i = 0; i < tensor_rank; ++i) {
-      DimMap updated_dim_map = current_dim_map;
-      if (!updated_dim_map[i].empty() && !option_.allow_mixed_mesh_shape) {
-        continue;
-      }
-      updated_dim_map[i].insert(unassigned_mesh_dims[current_mesh_dim_idx]);
-      Enumerate(split_func, tensor_rank, current_mesh_dim_idx + 1,
-                unassigned_mesh_dims, updated_dim_map);
-    }
-  }
-
   bool IsMeshDimSetNonTrivial(const MeshDimSet& mesh_dim_set) {
     return absl::c_any_of(mesh_dim_set, [&](int mesh_dim) {
       return device_mesh_.dim(mesh_dim) > 1;
@@ -220,7 +189,6 @@ class HandlerBase {
   const HloInstructionSequence& instruction_sequence_;
   const HloCostAnalysis& hlo_cost_analysis_;
   const ClusterEnvironment& cluster_env_;
-  const InstructionBatchDimMap& batch_map_;
   const AutoShardingOption& option_;
   const CallGraph& call_graph_;
 
@@ -237,7 +205,6 @@ class DotHandler : public HandlerBase {
              const HloInstructionSequence& instruction_sequence,
              const HloCostAnalysis& hlo_cost_analysis,
              const ClusterEnvironment& cluster_env,
-             const InstructionBatchDimMap& batch_map,
              const AutoShardingOption& option, const CallGraph& call_graph);
 
   DotHandler(
@@ -246,8 +213,7 @@ class DotHandler : public HandlerBase {
       const HloInstructionSequence& instruction_sequence,
       const HloCostAnalysis& hlo_cost_analysis,
       const dot_as_convolution_util::DotConvolutionDimsInfo& conv_as_dot_dims,
-      const ClusterEnvironment& cluster_env,
-      const InstructionBatchDimMap& batch_map, const AutoShardingOption& option,
+      const ClusterEnvironment& cluster_env, const AutoShardingOption& option,
       const CallGraph& call_graph);
 
   ~DotHandler() override = default;
@@ -292,7 +258,6 @@ class ConvHandler : public HandlerBase {
               const HloInstructionSequence& instruction_sequence,
               const HloCostAnalysis& hlo_cost_analysis,
               const ClusterEnvironment& cluster_env,
-              const InstructionBatchDimMap& batch_map,
               const AutoShardingOption& option, const CallGraph& call_graph);
 
   ~ConvHandler() override = default;
@@ -331,25 +296,21 @@ void HandlerBase::AppendNewStrategy(const std::string& name,
 
   for (int i = 0; i < ins_->operand_count(); ++i) {
     const HloInstruction* operand = ins_->operand(i);
+    const Shape& operand_shape = operand->shape();
+    const StrategyGroup& operand_strategy_group = *strategy_map_.at(operand);
     communication_resharding_costs.push_back(CommunicationReshardingCostVector(
-        strategy_map_.at(operand).get(), operand->shape(), input_specs[i],
-        cluster_env_));
+        operand_strategy_group, operand_shape, input_specs[i], cluster_env_));
     memory_resharding_costs.push_back(MemoryReshardingCostVector(
-        strategy_map_.at(operand).get(), operand->shape(), input_specs[i],
-        cluster_env_));
+        operand_strategy_group, operand_shape, input_specs[i], cluster_env_));
   }
 
-  strategy_group_->strategies.push_back(ShardingStrategy({
-      name,
-      output_spec,
-      compute_cost,
-      communication_cost,
-      static_cast<double>(
-          ByteSizeOfShapeWithSharding(ins_->shape(), output_spec)),
-      communication_resharding_costs,
-      memory_resharding_costs,
-      {input_specs.begin(), input_specs.end()},
-  }));
+  strategy_group_->AddStrategy(
+      ShardingStrategy({output_spec, compute_cost, communication_cost,
+                        static_cast<double>(ByteSizeOfShapeWithSharding(
+                            ins_->shape(), output_spec)),
+                        communication_resharding_costs,
+                        memory_resharding_costs}),
+      {name, {input_specs.begin(), input_specs.end()}});
 }
 
 // Given lhs and rhs dim maps, infers a sharding for the output by relying
@@ -447,7 +408,7 @@ std::optional<HloSharding> HandlerBase::GetShardingFromUser(
   CHECK_OK(ins_clone->ReplaceOperandWith(1, rhs_clone.get()));
   if (ins_->opcode() == HloOpcode::kConvolution) {
     xla::InferConvolutionShardingFromOperands(
-        ins_clone.get(), call_graph_, 10,
+        ins_clone.get(), call_graph_,
         /* may_combine_partial_sharding */ true, /* is_spmd */ true);
   } else {
     xla::InferDotShardingFromOperands(
@@ -462,15 +423,29 @@ std::optional<HloSharding> HandlerBase::GetShardingFromUser(
 }
 
 void HandlerBase::SortStrategies() {
+  std::vector<std::pair<ShardingStrategy, InputShardings>> strategy_shardings;
+  const auto strategy_input_shardings =
+      strategy_group_->GetStrategyInputShardings();
+  for (size_t iid = 0; iid < strategy_input_shardings.size(); ++iid) {
+    const InputShardings& input_shardings = strategy_input_shardings[iid];
+    const ShardingStrategy& strategy =
+        strategy_group_->GetStrategyForInputShardings(iid);
+    strategy_shardings.push_back({strategy, input_shardings});
+  }
   absl::c_stable_sort(
-      strategy_group_->strategies,
-      [](const ShardingStrategy& s1, const ShardingStrategy& s2) {
-        if (s1.memory_cost == s2.memory_cost) {
-          return s1.name < s2.name;
+      strategy_shardings,
+      [](const std::pair<ShardingStrategy, InputShardings>& s1,
+         const std::pair<ShardingStrategy, InputShardings>& s2) {
+        if (s1.first.memory_cost == s2.first.memory_cost) {
+          return s1.second.name < s2.second.name;
         } else {
-          return s1.memory_cost < s2.memory_cost;
+          return s1.first.memory_cost < s2.first.memory_cost;
         }
       });
+  strategy_group_->ClearStrategies();
+  for (const auto& [strategy, input_shardings] : strategy_shardings) {
+    strategy_group_->AddStrategy(strategy, input_shardings);
+  }
 }
 
 /************** DotHandler function definitions **************/
@@ -481,12 +456,11 @@ DotHandler::DotHandler(std::unique_ptr<StrategyGroup>& strategy_group,
                        const HloInstructionSequence& instruction_sequence,
                        const HloCostAnalysis& hlo_cost_analysis,
                        const ClusterEnvironment& cluster_env,
-                       const InstructionBatchDimMap& batch_map,
                        const AutoShardingOption& option,
                        const CallGraph& call_graph)
     : HandlerBase(strategy_group, strategy_map, ins, instruction_id,
-                  instruction_sequence, hlo_cost_analysis, cluster_env,
-                  batch_map, option, call_graph),
+                  instruction_sequence, hlo_cost_analysis, cluster_env, option,
+                  call_graph),
       is_dot_(true),
       space_base_dim_(ins->dot_dimension_numbers().lhs_batch_dimensions_size()),
       lhs_con_dims_(ins->dot_dimension_numbers().lhs_contracting_dimensions()),
@@ -514,12 +488,11 @@ DotHandler::DotHandler(
     const HloInstructionSequence& instruction_sequence,
     const HloCostAnalysis& hlo_cost_analysis,
     const dot_as_convolution_util::DotConvolutionDimsInfo& conv_as_dot_dims,
-    const ClusterEnvironment& cluster_env,
-    const InstructionBatchDimMap& batch_map, const AutoShardingOption& option,
+    const ClusterEnvironment& cluster_env, const AutoShardingOption& option,
     const CallGraph& call_graph)
     : HandlerBase(strategy_group, strategy_map, ins, instruction_id,
-                  instruction_sequence, hlo_cost_analysis, cluster_env,
-                  batch_map, option, call_graph),
+                  instruction_sequence, hlo_cost_analysis, cluster_env, option,
+                  call_graph),
       is_dot_(false),
       space_base_dim_(-1) {
   CHECK(conv_as_dot_dims.conv_spatial_dims.empty());
@@ -729,9 +702,8 @@ void DotHandler::GenerateDotShardingStrategiesFromOutputSharding(
                 /*compute_cost=*/0, communication_cost_fn);
   };
 
-  Enumerate(split_func, reduction_dims.size(),
-            /*current_mesh_dim_idx=*/0, unused_mesh_dims,
-            /*current_dim_map=*/{});
+  Enumerate(split_func, reduction_dims.size(), unused_mesh_dims,
+            option_.allow_mixed_mesh_shape);
 }
 
 void DotHandler::AppendAllGatherWindowedEinsumStrategyForOperand(
@@ -745,12 +717,12 @@ void DotHandler::AppendAllGatherWindowedEinsumStrategyForOperand(
     used_mesh_dims.insert(mesh_dim_set.begin(), mesh_dim_set.end());
   }
   if (used_mesh_dims.size() == device_mesh_.num_dimensions() ||
-      used_mesh_dims.size() == operand->shape().rank()) {
+      used_mesh_dims.size() == operand->shape().dimensions().size()) {
     return;
   }
 
-  for (int64_t tensor_dim = 0; tensor_dim < operand->shape().rank();
-       ++tensor_dim) {
+  for (int64_t tensor_dim = 0;
+       tensor_dim < operand->shape().dimensions().size(); ++tensor_dim) {
     if (auto it = operand_dim_map.find(tensor_dim);
         it != operand_dim_map.end() && IsMeshDimSetNonTrivial(it->second)) {
       continue;
@@ -791,11 +763,11 @@ void DotHandler::AppendReduceScatterWindowedEinsumStrategy(
   }
 
   if (used_mesh_dims.size() == device_mesh_.num_dimensions() ||
-      used_mesh_dims.size() == ins_->shape().rank()) {
+      used_mesh_dims.size() == ins_->shape().dimensions().size()) {
     return;
   }
 
-  for (int64_t tensor_dim = 0; tensor_dim < ins_->shape().rank();
+  for (int64_t tensor_dim = 0; tensor_dim < ins_->shape().dimensions().size();
        ++tensor_dim) {
     if (auto it = output_dim_map.find(tensor_dim);
         it != output_dim_map.end() && IsMeshDimSetNonTrivial(it->second)) {
@@ -833,8 +805,8 @@ absl::Status DotHandler::RegisterStrategies() {
       [&](const DimMap& output_dim_map) {
         GenerateDotShardingStrategiesFromOutputSharding(output_dim_map);
       },
-      ins_->shape().rank(), /*current_mesh_dim_idx=*/0, all_mesh_dims,
-      /*current_dim_map=*/{});
+      ins_->shape().dimensions().size(), all_mesh_dims,
+      option_.allow_mixed_mesh_shape);
   SortStrategies();
   return absl::OkStatus();
 }
@@ -847,12 +819,11 @@ ConvHandler::ConvHandler(std::unique_ptr<StrategyGroup>& strategy_group,
                          const HloInstructionSequence& instruction_sequence,
                          const HloCostAnalysis& hlo_cost_analysis,
                          const ClusterEnvironment& cluster_env,
-                         const InstructionBatchDimMap& batch_map,
                          const AutoShardingOption& option,
                          const CallGraph& call_graph)
     : HandlerBase(strategy_group, strategy_map, ins, instruction_id,
-                  instruction_sequence, hlo_cost_analysis, cluster_env,
-                  batch_map, option, call_graph),
+                  instruction_sequence, hlo_cost_analysis, cluster_env, option,
+                  call_graph),
       conv_dnums_(ins->convolution_dimension_numbers()) {
   lhs_batch_dim_ = conv_dnums_.input_batch_dimension();
   lhs_in_channel_dim_ = conv_dnums_.input_feature_dimension();
@@ -955,16 +926,7 @@ absl::Status ConvHandler::RegisterStrategies() {
       [&](const DimMap& output_dim_map) {
         GenerateConvolutionShardingStrategiesFromOutputSharding(output_dim_map);
       },
-      2, /*current_mesh_dim_idx=*/0, all_mesh_dims,
-      /*current_dim_map=*/{});
-
-  // If force_batch_dim_to_mesh_dim is set, filter out invalid strategies
-  // and only keep the data parallel strategies.
-  if (option_.force_batch_dim_to_mesh_dim >= 0 &&
-      batch_map_.contains(GetBatchDimMapKey(ins_))) {
-    TF_RETURN_IF_ERROR(FilterStrategy(ins_, ins_->shape(), strategy_group_,
-                                      cluster_env_, batch_map_, option_));
-  }
+      2, all_mesh_dims, option_.allow_mixed_mesh_shape);
 
   SortStrategies();
   return absl::OkStatus();
@@ -1002,8 +964,9 @@ void ConvHandler::SplitDepthwise(bool forward) {
             lhs_dim_map, rhs_dim_map, output_dim_map);
       };
   std::vector<int> all_mesh_dims(device_mesh_.num_dimensions());
-  Enumerate(split_func, 2, /*current_mesh_dim_idx=*/0, all_mesh_dims,
-            /*current_dim_map=*/{});
+  std::iota(all_mesh_dims.begin(), all_mesh_dims.end(), 0);
+  Enumerate(split_func, ins_->shape().dimensions().size(), all_mesh_dims,
+            option_.allow_mixed_mesh_shape);
 }
 
 }  // namespace
@@ -1016,7 +979,6 @@ absl::Status HandleDot(std::unique_ptr<StrategyGroup>& strategy_group,
                        const HloInstructionSequence& instruction_sequence,
                        const HloCostAnalysis& hlo_cost_analysis,
                        const ClusterEnvironment& cluster_env,
-                       const InstructionBatchDimMap& batch_map,
                        const AutoShardingOption& option,
                        const CallGraph& call_graph) {
   strategy_group = CreateLeafStrategyGroup(instruction_id, ins, strategy_map,
@@ -1024,7 +986,7 @@ absl::Status HandleDot(std::unique_ptr<StrategyGroup>& strategy_group,
 
   DotHandler handler(strategy_group, strategy_map, Cast<HloDotInstruction>(ins),
                      instruction_id, instruction_sequence, hlo_cost_analysis,
-                     cluster_env, batch_map, option, call_graph);
+                     cluster_env, option, call_graph);
   TF_RETURN_IF_ERROR(handler.RegisterStrategies());
   return absl::OkStatus();
 }
@@ -1037,7 +999,6 @@ absl::Status HandleConv(std::unique_ptr<StrategyGroup>& strategy_group,
                         const HloInstructionSequence& instruction_sequence,
                         const HloCostAnalysis& hlo_cost_analysis,
                         const ClusterEnvironment& cluster_env,
-                        const InstructionBatchDimMap& batch_map,
                         const AutoShardingOption& option,
                         const CallGraph& call_graph) {
   strategy_group = CreateLeafStrategyGroup(instruction_id, ins, strategy_map,
@@ -1046,16 +1007,16 @@ absl::Status HandleConv(std::unique_ptr<StrategyGroup>& strategy_group,
   const dot_as_convolution_util::DotConvolutionDimsInfo& conv_as_dot_dims =
       dot_as_convolution_util::ParseConvolutionDimsInfo(ins);
   if (conv_as_dot_dims.conv_spatial_dims.empty()) {
-    DotHandler handler(
-        strategy_group, strategy_map, Cast<HloConvolutionInstruction>(ins),
-        instruction_id, instruction_sequence, hlo_cost_analysis,
-        conv_as_dot_dims, cluster_env, batch_map, option, call_graph);
+    DotHandler handler(strategy_group, strategy_map,
+                       Cast<HloConvolutionInstruction>(ins), instruction_id,
+                       instruction_sequence, hlo_cost_analysis,
+                       conv_as_dot_dims, cluster_env, option, call_graph);
     TF_RETURN_IF_ERROR(handler.RegisterStrategies());
 
   } else {
     ConvHandler handler(strategy_group, strategy_map, ins, instruction_id,
                         instruction_sequence, hlo_cost_analysis, cluster_env,
-                        batch_map, option, call_graph);
+                        option, call_graph);
     TF_RETURN_IF_ERROR(handler.RegisterStrategies());
   }
   return absl::OkStatus();

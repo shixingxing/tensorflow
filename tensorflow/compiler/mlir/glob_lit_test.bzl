@@ -11,6 +11,7 @@ load(
     "@local_xla//xla:lit.bzl",
     "lit_script_with_xla_gpu_cuda_data_dir",
 )
+load("@rules_python//python:py_test.bzl", "py_test")
 
 # Default values used by the test runner.
 _default_test_file_exts = ["mlir", ".pbtxt", ".td"]
@@ -49,7 +50,7 @@ def _run_lit_test(name, data, size, tags, driver, features, exec_properties):
     """
 
     # Disable tests on windows for now, to enable testing rest of all xla and mlir.
-    native.py_test(
+    py_test(
         name = name,
         srcs = ["@llvm-project//llvm:lit"],
         tags = tags + ["no_pip", "no_windows"],
@@ -81,6 +82,7 @@ def glob_lit_tests(
         driver = _default_driver,
         features = [],
         exec_properties = {},
+        use_lit_test_suite = None,  # @unused
         hermetic_cuda_data_dir = None):
     """Creates all plausible Lit tests (and their inputs) under this directory.
 
@@ -101,6 +103,7 @@ def glob_lit_tests(
       exec_properties: a dictionary of properties to pass on.
       hermetic_cuda_data_dir: string. If set, the tests will be run with a
         `--xla_gpu_cuda_data_dir` flag set to the hermetic CUDA data directory.
+      use_lit_test_suite: unused. For compatibility.
     """
 
     # Ignore some patterns by default for tests and input data.

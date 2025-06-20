@@ -115,11 +115,13 @@ class ClusterEnvironment {
     int64_t n_dim = NumTileDimensions(spec);
     std::vector<int64_t> tensor_dim_to_mesh_dim;
     if (crash_at_error) {
-      tensor_dim_to_mesh_dim = GetTensorDimToMeshDim(
-          shape.rank(), spec, device_mesh_, consider_reverse_device_meshes);
+      tensor_dim_to_mesh_dim =
+          GetTensorDimToMeshDim(shape.dimensions().size(), spec, device_mesh_,
+                                consider_reverse_device_meshes);
     } else {
       auto tensor_dim_to_mesh_dim_status = GetTensorDimToMeshDimNoCrash(
-          shape.rank(), spec, device_mesh_, consider_reverse_device_meshes);
+          shape.dimensions().size(), spec, device_mesh_,
+          consider_reverse_device_meshes);
       if (tensor_dim_to_mesh_dim_status.ok()) {
         tensor_dim_to_mesh_dim = tensor_dim_to_mesh_dim_status.value();
       }
@@ -145,9 +147,9 @@ class ClusterEnvironment {
 
   double AllToAllCost(double num_bytes, int mesh_dim) const;
 
-  double ReshardingCostMixedMeshShape(
-      const Shape& shape, absl::Span<const int64_t> src_tensor_dim_to_mesh_dim,
-      absl::Span<const int64_t> dst_tensor_dim_to_mesh_dim) const;
+  double ReshardingCostMixedMeshShape(const Shape& shape,
+                                      const HloSharding& src_sharding,
+                                      const HloSharding& dst_sharding) const;
 
   double CollectivePermuteCost(
       double num_bytes,

@@ -27,11 +27,11 @@ cc_library(
         "//tensorflow/lite/tools/optimize:quantize_model",
         "//tensorflow/lite/tools/optimize/calibration:calibration_reader",
         "//tensorflow/lite/tools/optimize/calibration:calibrator_lib",
-        "//third_party/python_runtime:headers",  # buildcleaner: keep
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/types:optional",
+        "@local_xla//third_party/python_runtime:headers",  # buildcleaner: keep
     ],
 )
 
@@ -54,7 +54,7 @@ pybind_extension(
         "//tensorflow/lite:framework",
         "//tensorflow/lite/core:framework_stable",
         "//tensorflow/python/lib/core:pybind11_lib",
-        "//third_party/python_runtime:headers",
+        "@local_xla//third_party/python_runtime:headers",
         "@pybind11",
     ],
 )
@@ -64,7 +64,6 @@ py_strict_library(
     srcs = [
         "calibrator.py",
     ],
-    srcs_version = "PY3",
     visibility = ["//visibility:public"],
     deps = [
         ":_pywrap_tensorflow_lite_calibration_wrapper",  # buildcleaner: keep
@@ -83,8 +82,6 @@ py_strict_test(
         ":test_data",
         "//tensorflow/lite:testdata/multi_add.bin",
     ],
-    python_version = "PY3",
-    srcs_version = "PY3",
     tags = ["no_oss"],
     deps = [
         ":calibrator",

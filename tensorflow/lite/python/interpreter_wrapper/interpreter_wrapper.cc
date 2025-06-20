@@ -26,6 +26,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/memory/memory.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_format.h"
 #include "tensorflow/lite/core/api/error_reporter.h"
 #include "tensorflow/lite/core/api/op_resolver.h"
@@ -192,12 +193,39 @@ bool RegisterCustomOpByName(const char* registerer_name,
   RegistererFunctionType registerer = reinterpret_cast<RegistererFunctionType>(
       SharedLibrary::GetSymbol(registerer_name));
 
-  // Fail in an informative way if the function was not found.
+  // Try to load the pywrap_genai_ops library if the function was not found.
   if (registerer == nullptr) {
-    *error_msg =
-        absl::StrFormat("Looking up symbol '%s' failed with error '%s'.",
-                        registerer_name, SharedLibrary::GetError());
-    return false;
+    const std::string kPywrapGenaiOpsPrefix = "pywrap_genai_ops.";
+    if (absl::StartsWith(registerer_name, kPywrapGenaiOpsPrefix)) {
+      const std::string kPywrapGenaiOpsFileName =
+          absl::StrFormat("%sso", kPywrapGenaiOpsPrefix);
+#if defined(_WIN32)
+      void* lib_genai_ops = SharedLibrary::LoadLibrary(L"pywrap_genai_ops.pyd");
+#else
+      void* lib_genai_ops =
+          SharedLibrary::LoadLibrary(kPywrapGenaiOpsFileName.c_str());
+#endif
+      if (lib_genai_ops == nullptr) {
+        *error_msg =
+            absl::StrFormat("Loading library '%s' failed with error '%s'.",
+                            kPywrapGenaiOpsFileName, SharedLibrary::GetError());
+        return false;
+      }
+      const std::string registerer_name_str(registerer_name);
+      registerer = reinterpret_cast<RegistererFunctionType>(
+          SharedLibrary::GetLibrarySymbol(
+              lib_genai_ops,
+              registerer_name_str.substr(kPywrapGenaiOpsPrefix.size())
+                  .c_str()));
+    }
+
+    // Fail in an informative way if the function was not found.
+    if (registerer == nullptr) {
+      *error_msg =
+          absl::StrFormat("Looking up symbol '%s' failed with error '%s'.",
+                          registerer_name, SharedLibrary::GetError());
+      return false;
+    }
   }
 
   // Call the registerer with the resolver.
@@ -290,6 +318,9 @@ PyObject* InterpreterWrapper::AllocateTensors(int subgraph_index) {
   if (subgraph_index == kUndeterminedSubgraphIndex) {
     TFLITE_PY_CHECK(interpreter_->AllocateTensors());
   } else {
+    // We don't check the return of this call. Failing is a real possiblity as
+    // the default XNNPack delegate may fail to apply on certain graphs.
+    interpreter_->ApplyLazyDelegateProviders();
     TFLITE_PY_SUBGRAPH_BOUNDS_CHECK(subgraph_index);
     TFLITE_PY_CHECK(interpreter_->subgraph(subgraph_index)->AllocateTensors());
   }
@@ -396,6 +427,13 @@ int InterpreterWrapper::NumTensors(int subgraph_index) const {
   return interpreter_->subgraph(subgraph_index)->tensors_size();
 }
 
+int InterpreterWrapper::NumSubgraphs() const {
+  if (interpreter_ == nullptr) {
+    return 0;
+  }
+  return interpreter_->subgraphs_size();
+}
+
 std::string InterpreterWrapper::TensorName(int tensor_index,
                                            int subgraph_index) const {
   const Subgraph* subgraph = interpreter_->subgraph(subgraph_index);
@@ -452,17 +490,9 @@ PyObject* InterpreterWrapper::TensorSizeSignature(int tensor_index,
 
   const Subgraph* subgraph = interpreter_->subgraph(subgraph_index);
   const TfLiteTensor* tensor = subgraph->tensor(tensor_index);
-  const int32_t* size_signature_data = nullptr;
-  int32_t size_signature_size = 0;
-  if (tensor->dims_signature != nullptr && tensor->dims_signature->size != 0) {
-    size_signature_data = tensor->dims_signature->data;
-    size_signature_size = tensor->dims_signature->size;
-  } else {
-    size_signature_data = tensor->dims->data;
-    size_signature_size = tensor->dims->size;
-  }
+  const TfLiteIntArray* dims_signature = TfLiteTensorGetDimsSignature(tensor);
   PyObject* np_array =
-      PyArrayFromIntVector(size_signature_data, size_signature_size);
+      PyArrayFromIntVector(dims_signature->data, dims_signature->size);
 
   return PyArray_Return(reinterpret_cast<PyArrayObject*>(np_array));
 }

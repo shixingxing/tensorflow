@@ -21,6 +21,7 @@ limitations under the License.
 #include <unordered_set>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
@@ -32,10 +33,11 @@ limitations under the License.
 #include "mlir/Pass/PassManager.h"  // from @llvm-project
 #include "tensorflow/cc/saved_model/loader.h"
 #include "tensorflow/compiler/mlir/lite/common/tfl_pass_config.h"
+#include "tensorflow/compiler/mlir/lite/converter_flags.pb.h"
+#include "tensorflow/compiler/mlir/lite/quantization/common/quantization_lib/quantization_config.h"
 #include "tensorflow/compiler/mlir/quantization/tensorflow/python/py_function_lib.h"
 #include "tensorflow/compiler/mlir/tensorflow/translate/mlir_roundtrip_flags.h"
 #include "tensorflow/core/platform/status.h"
-#include "tensorflow/lite/toco/toco_flags.pb.h"
 
 namespace tensorflow {
 
@@ -75,13 +77,13 @@ absl::StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> ImportSavedModel(
 // * `session` pointer may provided, it will be used to freeze resource
 // variables. If the `saved_model_dir` directory path is provided, then the
 // `tf_saved_model.asset` ops will be freezed.
-Status ConvertTFExecutorToTFLOrFlatbuffer(
+absl::Status ConvertTFExecutorToTFLOrFlatbuffer(
     std::unique_ptr<mlir::MLIRContext>&& context,
-    mlir::OwningOpRef<mlir::ModuleOp> module, toco::TocoFlags& toco_flags,
+    mlir::OwningOpRef<mlir::ModuleOp> module,
+    tflite::ConverterFlags& converter_flags,
     const mlir::TFL::PassConfig& pass_config,
     const std::unordered_set<std::string>& saved_model_tags,
-    llvm::StringRef saved_model_dir, std::string* result,
-    bool serialize_stablehlo_ops, bool export_to_mlir,
+    llvm::StringRef saved_model_dir, std::string* result, bool export_to_mlir,
     const quantization::PyFunctionLibrary* quantization_py_function_lib =
         nullptr);
 }  // namespace tensorflow

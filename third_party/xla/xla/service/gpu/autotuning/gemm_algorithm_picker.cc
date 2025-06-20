@@ -15,9 +15,9 @@ limitations under the License.
 
 #include "xla/service/gpu/autotuning/gemm_algorithm_picker.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -28,20 +28,21 @@ limitations under the License.
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "xla/autotuning.pb.h"
+#include "xla/backends/gpu/runtime/buffer_comparator.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
-#include "xla/service/gpu/autotuning/autotuner_compile_util.h"
 #include "xla/service/gpu/autotuning/autotuner_util.h"
+#include "xla/service/gpu/autotuning/redzone_buffers.h"
 #include "xla/service/gpu/backend_configs.pb.h"
-#include "xla/service/gpu/buffer_comparator.h"
 #include "xla/service/gpu/cublas_cudnn.h"
 #include "xla/service/gpu/matmul_utils.h"
 #include "xla/service/gpu/stream_executor_util.h"
-#include "xla/service/gpu/variant_visitor.h"
+#include "xla/service/overload.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/stream_executor/blas.h"
@@ -49,11 +50,13 @@ limitations under the License.
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/device_memory_allocator.h"
 #include "xla/stream_executor/gpu/redzone_allocator.h"
+#include "xla/stream_executor/stream_executor.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/logging.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/util/proto/proto_utils.h"
 #include "xla/util.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/logging.h"
-#include "tsl/platform/statusor.h"
+#include "xla/xla.pb.h"
 #include "tsl/profiler/lib/scoped_annotation.h"
 
 namespace xla {
@@ -98,6 +101,8 @@ class GemmAutotuner {
   explicit GemmAutotuner(const AutotuneConfig& autotune_config)
       : autotune_config_(autotune_config) {}
 
+  const AutotuneConfig& config() const { return autotune_config_; }
+
   size_t num_algorithms_left() const { return num_algorithms_left_; }
 
   absl::StatusOr<AutotuneResult> operator()(const HloInstruction* gemm,
@@ -115,14 +120,24 @@ class GemmAutotuner {
     deterministic_ops_ = RequireDeterminism(gemm->GetModule()->config());
     solutions_limit_ = debug_options.xla_gpu_autotune_max_solutions();
 
-    TF_ASSIGN_OR_RETURN(auto gemm_config, GemmConfig::For(gemm));
+    TF_ASSIGN_OR_RETURN(auto gemm_config,
+                        GemmConfig::For(gemm, stream_->parent()
+                                                  ->GetDeviceDescription()
+                                                  .gpu_compute_capability()));
 
     // Don't run autotuning concurrently on the same GPU.
     absl::MutexLock gpu_lock(&GetGpuMutex(stream_->parent()));
 
-    TF_ASSIGN_OR_RETURN(rz_buffers_, RedzoneBuffers::FromInstruction(
-                                         *gemm, autotune_config_, debug_options,
-                                         RedzoneBuffers::kAllInputsAllOutputs));
+    bool should_init_buffers = autotune_config_.should_init_buffers();
+    bool should_check_correctness = autotune_config_.should_check_correctness();
+    int redzone_padding_bytes = debug_options.xla_gpu_redzone_padding_bytes();
+    TF_ASSIGN_OR_RETURN(se::Stream * stream, autotune_config_.GetStream());
+    TF_ASSIGN_OR_RETURN(
+        rz_buffers_,
+        RedzoneBuffers::FromInstruction(
+            *gemm, autotune_config_.GetAllocator(), stream,
+            RedzoneBuffers::kAllInputsAllOutputs, should_init_buffers,
+            should_check_correctness, redzone_padding_bytes));
 
     return IsCublasLtMatmul(*gemm) || IsCublasLtMatmulF8(*gemm)
                ? TuneGpuBlasLt(gemm, gemm_config)
@@ -143,8 +158,8 @@ class GemmAutotuner {
 
   absl::StatusOr<AutotuneResult> TuneGpuBlasLt(const HloInstruction* gemm,
                                                const GemmConfig& gemm_config) {
-    auto workspace_buffer =
-        rz_buffers_.output_buffers().at(gemm->shape().tuple_shapes_size() - 1);
+    auto workspace_buffer = rz_buffers_.output_buffers().at(
+        gemm->shape().tuple_shapes().size() - 1);
 
     GpuBackendConfig gpu_config =
         gemm->backend_config<GpuBackendConfig>().value();
@@ -166,9 +181,24 @@ class GemmAutotuner {
     se::DeviceMemoryBase a_scale_buffer, b_scale_buffer, c_scale_buffer,
         d_scale_buffer, d_amax_buffer, bias_buffer, aux_buffer;
 
+    int64_t input_buffer_idx = 2;  // lhs is at 0, rhs is at 1
     if (has_vector_bias) {
-      bias_buffer = rz_buffers_.input_buffers().at(has_matrix_bias ? 3 : 2);
+      if (has_matrix_bias) {
+        input_buffer_idx++;
+      }
+      bias_buffer = rz_buffers_.input_buffers().at(input_buffer_idx++);
     }
+    // In the current GemmRewriter design for FP8, the a/b scales remain active
+    // even when they are not used. Consequently, we must inform the autotuner
+    // so it can choose algorithms that properly support a/b scales.
+    if (xla::primitive_util::IsF8Type(
+            gemm->operand(0)->shape().element_type()) &&
+        xla::primitive_util::IsF8Type(
+            gemm->operand(1)->shape().element_type())) {
+      a_scale_buffer = rz_buffers_.input_buffers().at(input_buffer_idx++);
+      b_scale_buffer = rz_buffers_.input_buffers().at(input_buffer_idx++);
+    }
+
     if (has_aux_output) {
       aux_buffer = rz_buffers_.output_buffers().at(1);
     }
@@ -178,24 +208,24 @@ class GemmAutotuner {
 
     TF_ASSIGN_OR_RETURN(
         auto algorithms,
-        plan->GetAlgorithms(/*max_algorithm_count*/ 128,
+        plan->GetAlgorithms(stream_, GemmConfig::kNumAlgorithms,
                             /*max_workspace_size*/ workspace_buffer.size()));
 
     auto tuned_func = [&](const BlasLt::MatmulAlgorithm& algorithm)
         -> absl::StatusOr<se::blas::ProfileResult> {
       // Run a warmup iteration without the profiler active.
+      TF_RETURN_IF_ERROR(plan->SetAlgorithm(algorithm));
       TF_RETURN_IF_ERROR(plan->ExecuteOnStream(
           stream_, LhsBuffer(), RhsBuffer(), OutputBuffer(), OutputBuffer(),
           bias_buffer, aux_buffer, a_scale_buffer, b_scale_buffer,
-          c_scale_buffer, d_scale_buffer, d_amax_buffer, algorithm,
-          workspace_buffer));
+          c_scale_buffer, d_scale_buffer, d_amax_buffer, workspace_buffer));
       se::blas::ProfileResult profile_result;
       profile_result.set_warmup_run_executed(true);
       TF_RETURN_IF_ERROR(plan->ExecuteOnStream(
           stream_, LhsBuffer(), RhsBuffer(), OutputBuffer(), OutputBuffer(),
           bias_buffer, aux_buffer, a_scale_buffer, b_scale_buffer,
-          c_scale_buffer, d_scale_buffer, d_amax_buffer, algorithm,
-          workspace_buffer, &profile_result));
+          c_scale_buffer, d_scale_buffer, d_amax_buffer, workspace_buffer,
+          &profile_result));
       return std::move(profile_result);
     };
 
@@ -386,20 +416,18 @@ class GemmAutotuner {
                  << best.status();
     return AutotuneResult{};
   }  // GetBestAlgorithm
-};  // GemmAutotuner
+};  // class GemmAutotuner
 
 // Do Gemm Autotune without stream executor. Use results from autotune cache
 // only.
 absl::StatusOr<bool> RunOnInstruction(HloInstruction* gemm,
-                                      const AutotuneConfig& config,
-                                      size_t* num_algorithms_left) {
+                                      GemmAutotuner& autotuner) {
   VLOG(3) << "Loading the autotune result of GemmThunk " << gemm->ToString();
 
   GpuBackendConfig gpu_config =
       gemm->backend_config<GpuBackendConfig>().value();
   GemmBackendConfig& backend_config = *gpu_config.mutable_gemm_backend_config();
 
-  *num_algorithms_left = 0;
   // Degenerate gemms replaced with memzero operation, no need to auto tune it.
   if (backend_config.alpha_real() == 0.0 &&
       backend_config.alpha_imag() == 0.0 && backend_config.beta() == 0.0) {
@@ -407,27 +435,26 @@ absl::StatusOr<bool> RunOnInstruction(HloInstruction* gemm,
     return false;
   }
 
+  const AutotuneConfig& config = autotuner.config();
   AutotuneCacheKey key(config.GetModelStr(), *gemm);
-  GemmAutotuner autotuner(config);
   TF_ASSIGN_OR_RETURN(AutotuneResult algorithm,
                       AutotunerUtil::Autotune(
                           gemm, config, [&] { return autotuner(gemm, key); }));
 
-  *num_algorithms_left = autotuner.num_algorithms_left();
   auto old_algorithm = backend_config.selected_algorithm();
   bool update_algorithm =
       IsCublasLtMatmulF8(*gemm) ||
-      std::visit(VariantVisitor{[](const se::CudaComputeCapability& cc) {
-                                  // We only set the 'algorithm' field on
-                                  // non-Ampere architectures, as for Ampere
-                                  // it's ignored in any case.
-                                  return !cc.IsAtLeast(
-                                      se::CudaComputeCapability::AMPERE);
-                                },
-                                [](const se::RocmComputeCapability&) {
-                                  return true;  // TODO: not decided yet
-                                }},
-                 config.GetGpuComputeCapability());
+      std::visit(
+          Overload{[](const se::CudaComputeCapability& cc) {
+                     // We only set the 'algorithm' field on
+                     // non-Ampere architectures, as for Ampere
+                     // it's ignored in any case.
+                     return !cc.IsAtLeast(se::CudaComputeCapability::kAmpere);
+                   },
+                   [](const se::RocmComputeCapability&) {
+                     return true;  // TODO: not decided yet
+                   }},
+          config.GetGpuComputeCapability());
 
   if (update_algorithm) {
     int64_t new_algorithm{};
@@ -440,9 +467,8 @@ absl::StatusOr<bool> RunOnInstruction(HloInstruction* gemm,
 
     if (new_algorithm == old_algorithm &&
         backend_config.has_selected_algorithm()) {
-      // We don't need to update the backend config if
-      // the algorithm hasn't changed unless previously
-      // the algorithm wasn't set explicitly.
+      // We don't need to update the backend config if the algorithm was not
+      // changed unless previously the algorithm wasn't set explicitly.
       return false;
     }
 
@@ -455,17 +481,16 @@ absl::StatusOr<bool> RunOnInstruction(HloInstruction* gemm,
 }
 
 absl::StatusOr<bool> RunOnComputation(HloComputation* computation,
-                                      AutotuneConfig config,
+                                      GemmAutotuner& autotuner,
                                       size_t* num_algorithms_left) {
   bool changed = false;
 
   for (HloInstruction* instr : computation->instructions()) {
     if (IsCublasGemm(*instr)) {
-      size_t num_left;
-      TF_ASSIGN_OR_RETURN(bool result,
-                          RunOnInstruction(instr, config, &num_left));
+      TF_ASSIGN_OR_RETURN(bool result, RunOnInstruction(instr, autotuner));
       // Gathering statistics on the algorithms left after tuning (for testing)
-      *num_algorithms_left = std::max(*num_algorithms_left, num_left);
+      *num_algorithms_left =
+          std::max(*num_algorithms_left, autotuner.num_algorithms_left());
       changed |= result;
     }
   }
@@ -485,11 +510,11 @@ absl::StatusOr<bool> GemmAlgorithmPicker::Run(
     VLOG(2) << "GEMM auto-tuning disabled, GemmAlgorithmPicker returning early";
     return false;
   }
-
+  GemmAutotuner autotuner(config_);
   bool changed = false;
   for (HloComputation* computation :
        module->MakeNonfusionComputations(execution_threads)) {
-    TF_ASSIGN_OR_RETURN(bool result, RunOnComputation(computation, config_,
+    TF_ASSIGN_OR_RETURN(bool result, RunOnComputation(computation, autotuner,
                                                       &num_algorithms_left_));
     changed |= result;
   }

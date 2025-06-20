@@ -15,8 +15,7 @@ limitations under the License.
 
 #include "xla/service/gpu/transforms/priority_fusion.h"
 
-#include <stdint.h>
-
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -25,11 +24,12 @@ limitations under the License.
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
-#include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
-#include "xla/hlo/ir/hlo_instructions.h"
+#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
+#include "xla/hlo/testlib/pattern_matcher_gmock.h"
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/gpu_device_info_for_tests.h"
 #include "xla/service/gpu/gpu_fusible.h"
@@ -37,13 +37,11 @@ limitations under the License.
 #include "xla/service/gpu/model/gpu_hlo_cost_analysis.h"
 #include "xla/service/hlo_cost_analysis.h"
 #include "xla/service/pattern_matcher.h"
-#include "xla/service/pattern_matcher_gmock.h"
-#include "xla/shape.h"
-#include "xla/shape_util.h"
-#include "xla/tests/hlo_test_base.h"
-#include "xla/tests/verified_hlo_module.h"
-#include "tsl/platform/status_matchers.h"
-#include "tsl/platform/statusor.h"
+#include "xla/stream_executor/device_description.h"
+#include "xla/tsl/platform/env.h"
+#include "xla/tsl/platform/status_matchers.h"
+#include "xla/tsl/platform/statusor.h"
+#include "xla/tsl/platform/threadpool.h"
 
 namespace m = ::xla::match;
 
@@ -54,14 +52,7 @@ using ::tsl::testing::IsOkAndHolds;
 namespace xla {
 namespace gpu {
 
-class PriorityFusionTest : public HloTestBase {
-  HloCostAnalysis::ShapeSizeFunction ShapeSizeBytesFunction() const {
-    return [&](const Shape& shape) {
-      constexpr int64_t kPointerSize = 8;
-      return ShapeUtil::ByteSizeOf(shape, kPointerSize);
-    };
-  }
-
+class PriorityFusionTest : public HloHardwareIndependentTestBase {
  public:
   std::vector<HloFusionAnalysis::EmitterFusionKind> RunAndGetFusionKinds(
       absl::string_view hlo) {
@@ -70,30 +61,21 @@ class PriorityFusionTest : public HloTestBase {
     EXPECT_THAT(module->RemoveUnusedComputations(), IsOk());
     std::vector<HloFusionAnalysis::EmitterFusionKind> kinds;
     for (auto computation : module->computations()) {
-      if (!computation->FusionInstruction()) continue;
+      if (!computation->FusionInstruction()) {
+        continue;
+      }
 
-      auto device_info = TestGpuDeviceInfo::RTXA6000DeviceInfo();
       auto analysis = HloFusionAnalysis::Create(
-          *computation->FusionInstruction(), device_info);
+          *computation->FusionInstruction(), device_info_);
       kinds.push_back(analysis.GetEmitterFusionKind());
     }
     return kinds;
   }
 
+  se::DeviceDescription device_info_ = TestGpuDeviceInfo::RTXA6000DeviceInfo();
   PriorityFusion priority_fusion_{
-      /*thread_pool=*/nullptr, TestGpuDeviceInfo::RTXA6000DeviceInfo(),
-      GpuHloCostAnalysis::Options{ShapeSizeBytesFunction(),
-                                  /*per_second_rates=*/{},
-                                  /*count_multiple_input_accesses=*/true}};
-};
-
-class PriorityFusionWithTritonEnabledTest : public PriorityFusionTest {
- public:
-  DebugOptions GetDebugOptionsForTest() override {
-    DebugOptions debug_options = PriorityFusionTest::GetDebugOptionsForTest();
-    debug_options.set_xla_gpu_enable_triton_softmax_priority_fusion(true);
-    return debug_options;
-  }
+      /*thread_pool=*/nullptr, device_info_,
+      GpuHloCostAnalysis::Options{.count_multiple_input_accesses = true}};
 };
 
 TEST_F(PriorityFusionTest, FuseWithSharedArgument) {
@@ -116,6 +98,39 @@ TEST_F(PriorityFusionTest, FuseWithSharedArgument) {
   HloInstruction* root = module->entry_computation()->root_instruction();
   EXPECT_THAT(root, GmockMatch(m::Fusion()));
   EXPECT_EQ(root->fusion_kind(), HloInstruction::FusionKind::kLoop);
+}
+
+TEST_F(PriorityFusionTest, FusionOnStreamAnnotatedComputation) {
+  auto module = ParseAndReturnVerifiedModule(R"(
+    HloModule test_module
+    stream {
+      %p0 = f32[] parameter(0)
+      %p1 = f32[] parameter(1)
+      %subtract = f32[] subtract(%p0, %p1)
+      %compare = pred[] compare(%subtract, %subtract), direction=NE
+      %add = f32[] add(%p0, %p1)
+      %abs = f32[] abs(%subtract)
+      ROOT %select = f32[] select(%compare, %add, %abs)
+    }
+    ENTRY main {
+      %a = f32[] parameter(0)
+      %b = f32[] parameter(1)
+      ROOT %called = f32[] call(a, b), to_apply=stream,
+        frontend_attributes={_xla_stream_annotation="1"}
+    })")
+                    .value();
+
+  EXPECT_THAT(priority_fusion_.Run(module.get()), IsOkAndHolds(true));
+
+  // The call should still be there.
+  HloInstruction* root = module->entry_computation()->root_instruction();
+  EXPECT_THAT(root, GmockMatch(m::Call()));
+
+  // Instructions within the call are fused.
+  HloInstruction* called_root =
+      root->called_computations()[0]->root_instruction();
+  EXPECT_THAT(called_root, GmockMatch(m::Fusion()));
+  EXPECT_EQ(called_root->fusion_kind(), HloInstruction::FusionKind::kLoop);
 }
 
 TEST_F(PriorityFusionTest, FusionFusionWithDuplication) {
@@ -456,7 +471,6 @@ CHECK-NOT: fusion(
 }
 
 TEST_F(PriorityFusionTest, DoNotFuseDynamicUpdateSliceIntoReduce) {
-  GTEST_SKIP() << "b/294198633";
   absl::string_view kHlo = R"(
     HloModule test_module
 
@@ -524,11 +538,11 @@ ENTRY main {
 })";
 
   RunAndFilecheckHloRewrite(kHlo, std::move(priority_fusion_), R"(
-CHECK: ROOT {{.*}} dynamic-update-slice(
 CHECK: %[[REDUCE:.*]] = {{.*}} reduce(
 CHECK: ROOT {{.*}} log(%[[REDUCE]])
+CHECK: ROOT {{.*}} dynamic-update-slice(
 CHECK: ENTRY
-CHECK-COUNT-2: fusion(
+CHECK-COUNT-3: fusion(
   )");
 }
 
@@ -545,8 +559,8 @@ TEST_F(PriorityFusionTest, DontFuseIntoFirstOperandOfScatter) {
     ENTRY FuseIntoScatter {
       p0 = s32[3,3] parameter(0)
       operand = s32[3,3] add(p0, p0)
-      p1 = s32[2] parameter(1)
-      indices = s32[2] add(p1, p1)
+      p1 = s32[2,1] parameter(1)
+      indices = s32[2,1] add(p1, p1)
       p2 = s32[2,3] parameter(2)
       updates = s32[2,3] add(p2, p2)
       scatter = s32[3,3] scatter(operand, indices, updates),
@@ -817,7 +831,36 @@ TEST_F(PriorityFusionTest, FuseOnlySmallConstant) {
                   m::Add(m::Parameter(), m::Broadcast(m::Constant())))));
 }
 
-TEST_F(PriorityFusionTest, DoNotFuseProducerConsumerMergedTooLarge) {
+TEST_F(PriorityFusionTest, FuseSmallConstantIntoTritonFusion) {
+  auto module = *ParseAndReturnVerifiedModule(R"(
+HloModule module
+
+add {
+  Arg_0 = f32[] parameter(0)
+  Arg_1 = f32[] parameter(1)
+  ROOT add = f32[] add(Arg_0, Arg_1)
+}
+
+triton_computation {
+  param_0 = f32[32,64] parameter(0)
+  param_1 = f32[] parameter(1)
+  ROOT reduce = f32[32] reduce(param_0, param_1), dimensions={1}, to_apply=add
+}
+
+ENTRY main {
+  param_0 = f32[32,64] parameter(0)
+  c_0 = f32[] constant(0)
+  ROOT triton_softmax = f32[32] fusion(param_0, c_0), kind=kCustom, calls=triton_computation, backend_config={"fusion_backend_config": {"kind":"__triton","block_level_fusion_config":{"output_tiles":[{"sizes":["1"]}],"num_warps":"1"}}}
+})");
+  EXPECT_THAT(priority_fusion_.Run(module.get()), IsOkAndHolds(true));
+
+  HloInstruction* root = module->entry_computation()->root_instruction();
+  ASSERT_THAT(root, GmockMatch(m::Fusion(m::Parameter())));
+  EXPECT_THAT(root->fused_expression_root(),
+              GmockMatch(m::Reduce(m::Parameter(), m::Constant())));
+}
+
+TEST_F(PriorityFusionTest, FuseProducerConsumerMergedNotTooLarge) {
   auto module = *ParseAndReturnVerifiedModule(R"(
     HloModule module
 
@@ -865,13 +908,10 @@ TEST_F(PriorityFusionTest, DoNotFuseProducerConsumerMergedTooLarge) {
       ROOT fusion2 = pred[6]{0} fusion(fusion1), kind=kInput, calls=fused_computation.2
     }
   )");
-  auto& debug_options = module->mutable_config().mutable_debug_options();
-  debug_options.set_xla_gpu_mlir_emitter_level(3);
-  EXPECT_THAT(priority_fusion_.Run(module.get()), IsOkAndHolds(false));
+  EXPECT_THAT(priority_fusion_.Run(module.get()), IsOkAndHolds(true));
 }
 
-TEST_F(PriorityFusionWithTritonEnabledTest,
-       CanMergeTritonFusionWithBothProducerAndConsumer) {
+TEST_F(PriorityFusionTest, CanMergeTritonFusionWithBothProducerAndConsumer) {
   const std::string kHloText = R"(
 HloModule t
 add {
@@ -904,7 +944,7 @@ ENTRY main {
   param_0 = f32[125]{0} parameter(0)
   param_1 = f32[125,127]{1,0} parameter(1)
   producer_fusion = f32[125,127]{1,0} fusion(param_0), kind=kLoop, calls=producer_computation
-  triton_softmax = f32[125,127]{1,0} fusion(producer_fusion), kind=kCustom, calls=triton_softmax_computation, backend_config={"fusion_backend_config": {"kind":"__triton","block_level_fusion_config":{"output_tile_sizes":["1","127"],"num_warps":"1"}}}
+  triton_softmax = f32[125,127]{1,0} fusion(producer_fusion), kind=kCustom, calls=triton_softmax_computation, backend_config={"fusion_backend_config": {"kind":"__triton","block_level_fusion_config":{"output_tiles":[{"sizes":["1","127"]}],"num_warps":"1"}}}
   ROOT consumer_fusion = f32[125,127]{1,0} fusion(param_1, triton_softmax), kind=kLoop, calls=consumer_computation
 })";
   TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(kHloText));
@@ -923,12 +963,12 @@ ENTRY main {
   EXPECT_EQ(root->backend_config<GpuBackendConfig>()
                 ->fusion_backend_config()
                 .block_level_fusion_config()
-                .output_tile_sizes_size(),
+                .output_tiles(0)
+                .sizes_size(),
             2);
 }
 
-TEST_F(PriorityFusionWithTritonEnabledTest,
-       FuseTritonProducerWithTwoConsumers) {
+TEST_F(PriorityFusionTest, FuseTritonProducerWithTwoConsumers) {
   const std::string kHloText = R"(
 HloModule t
 add {
@@ -954,7 +994,7 @@ consumer_computation.2 {
 
 ENTRY main {
   param_0 = f32[125]{0} parameter(0)
-  producer_fusion = f32[125,127] fusion(param_0), kind=kCustom, calls=producer_computation, backend_config={"fusion_backend_config": {"kind":"__triton","block_level_fusion_config":{"output_tile_sizes":["1","127"],"num_warps":"1"}}}
+  producer_fusion = f32[125,127] fusion(param_0), kind=kCustom, calls=producer_computation, backend_config={"fusion_backend_config": {"kind":"__triton","block_level_fusion_config":{"output_tiles":[{"sizes":["1","127"]}],"num_warps":"1"}}}
   consumer_fusion.1 = f32[125,127] fusion(producer_fusion), kind=kLoop, calls=consumer_computation.1
   consumer_fusion.2 = f32[125,127] fusion(producer_fusion), kind=kLoop, calls=consumer_computation.2
   ROOT tuple = (f32[125,127], f32[125,127]) tuple(consumer_fusion.1, consumer_fusion.2)
@@ -976,7 +1016,8 @@ ENTRY main {
       backend_config1.fusion_backend_config().has_block_level_fusion_config());
   EXPECT_EQ(backend_config1.fusion_backend_config()
                 .block_level_fusion_config()
-                .output_tile_sizes_size(),
+                .output_tiles(0)
+                .sizes_size(),
             2);
 
   EXPECT_TRUE(IsGenericTritonFusion(*fusion2));
@@ -986,12 +1027,157 @@ ENTRY main {
       backend_config2.fusion_backend_config().has_block_level_fusion_config());
   EXPECT_EQ(backend_config2.fusion_backend_config()
                 .block_level_fusion_config()
-                .output_tile_sizes_size(),
+                .output_tiles(0)
+                .sizes_size(),
             2);
 }
 
-TEST_F(PriorityFusionWithTritonEnabledTest,
-       TritonProducerNotSupported_DoNotFuse) {
+TEST_F(PriorityFusionTest,
+       FuseTritonProducerWithTwoConsumersUsingMultiOutputFusion) {
+  const std::string kHloText = R"(
+HloModule t
+
+producer_computation {
+  parameter_0 = f32[125]{0} parameter(0)
+  ROOT broadcast = f32[125,127] broadcast(parameter_0), dimensions={0}
+}
+
+consumer_computation {
+  parameter_0 = f32[125,127] parameter(0)
+  ROOT log = f32[125,127] log(parameter_0)
+}
+
+ENTRY main {
+  param_0 = f32[125]{0} parameter(0)
+  producer_fusion = f32[125,127] fusion(param_0), kind=kCustom, calls=producer_computation, backend_config={"fusion_backend_config": {"kind":"__triton","block_level_fusion_config":{"output_tiles":[{"sizes":["1","127"]}],"num_warps":"1"}}}
+  consumer_fusion = f32[125,127] fusion(producer_fusion), kind=kLoop, calls=consumer_computation
+  ROOT tuple = (f32[125,127], f32[125,127]) tuple(consumer_fusion, producer_fusion)
+})";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(kHloText));
+
+  module->mutable_config()
+      .mutable_debug_options()
+      .set_xla_gpu_unsupported_enable_triton_multi_output_fusion(false);
+  EXPECT_FALSE(priority_fusion_.Run(module.get()).value());
+
+  module->mutable_config()
+      .mutable_debug_options()
+      .set_xla_gpu_unsupported_enable_triton_multi_output_fusion(true);
+  EXPECT_TRUE(priority_fusion_.Run(module.get()).value());
+  EXPECT_TRUE(verifier().Run(module.get()).status().ok());
+
+  HloInstruction* root = module->entry_computation()->root_instruction();
+  HloInstruction *fusion1, *fusion2;
+  EXPECT_THAT(root,
+              GmockMatch(m::Tuple(
+                  m::GetTupleElement(m::Fusion(&fusion1, m::Parameter()), 0),
+                  m::GetTupleElement(m::Fusion(&fusion2, m::Parameter()), 1))));
+  EXPECT_EQ(fusion1, fusion2);
+  EXPECT_TRUE(IsGenericTritonFusion(*fusion1));
+  TF_ASSERT_OK_AND_ASSIGN(auto backend_config1,
+                          fusion1->backend_config<GpuBackendConfig>());
+  EXPECT_TRUE(
+      backend_config1.fusion_backend_config().has_block_level_fusion_config());
+  EXPECT_EQ(backend_config1.fusion_backend_config()
+                .block_level_fusion_config()
+                .output_tiles(0)
+                .sizes_size(),
+            2);
+}
+
+TEST_F(PriorityFusionTest,
+       FuseProducerWithTritonConsumerUsingMultiOutputFusion) {
+  const std::string kHloText = R"(
+HloModule t
+
+consumer_computation {
+  parameter_0 = f32[125,127] parameter(0)
+  ROOT log = f32[125,127] log(parameter_0)
+}
+
+ENTRY main {
+  param_0 = f32[125]{0} parameter(0)
+  producer = f32[125,127] broadcast(param_0), dimensions={0}
+  consumer_fusion = f32[125,127] fusion(producer), kind=kCustom, calls=consumer_computation, backend_config={"fusion_backend_config": {"kind":"__triton","block_level_fusion_config":{"output_tiles":[{"sizes":["1","127"]}],"num_warps":"1"}}}
+  ROOT tuple = (f32[125,127], f32[125,127]) tuple(consumer_fusion, producer)
+})";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(kHloText));
+
+  module->mutable_config()
+      .mutable_debug_options()
+      .set_xla_gpu_unsupported_enable_triton_multi_output_fusion(false);
+  EXPECT_FALSE(priority_fusion_.Run(module.get()).value());
+
+  module->mutable_config()
+      .mutable_debug_options()
+      .set_xla_gpu_unsupported_enable_triton_multi_output_fusion(true);
+  EXPECT_TRUE(priority_fusion_.Run(module.get()).value());
+  EXPECT_TRUE(verifier().Run(module.get()).status().ok());
+
+  HloInstruction* root = module->entry_computation()->root_instruction();
+  HloInstruction *fusion1, *fusion2;
+  EXPECT_THAT(root,
+              GmockMatch(m::Tuple(
+                  m::GetTupleElement(m::Fusion(&fusion1, m::Parameter()), 0),
+                  m::GetTupleElement(m::Fusion(&fusion2, m::Parameter()), 1))));
+  EXPECT_EQ(fusion1, fusion2);
+  EXPECT_TRUE(IsGenericTritonFusion(*fusion1));
+  TF_ASSERT_OK_AND_ASSIGN(auto backend_config1,
+                          fusion1->backend_config<GpuBackendConfig>());
+  EXPECT_TRUE(
+      backend_config1.fusion_backend_config().has_block_level_fusion_config());
+  EXPECT_EQ(backend_config1.fusion_backend_config()
+                .block_level_fusion_config()
+                .output_tiles(0)
+                .sizes_size(),
+            2);
+}
+
+TEST_F(PriorityFusionTest, FuseTritonFusionBothEndsUsingMultiOutputFusion) {
+  // Here, we fuse `fusion` first into `exp` and `sqrt`. When we try to fuse
+  // `log` into the two fusions resulting from the previous step using
+  // multi-output fusion, we currently don't allow that, as we would need to
+  // select with which fusion to fuse first.
+  // TODO(b/390559452): Improve the logic to select the best consumer candidate
+  // for multi-output fusion.
+  const std::string kHloText = R"(
+HloModule t
+
+consumer_computation {
+  parameter_0 = f32[1024,512] parameter(0)
+  ROOT log = f32[1024,512] negate(parameter_0)
+}
+
+ENTRY main {
+  param_0 = f32[1024,512] parameter(0)
+  log = f32[1024,512] log(param_0)
+  fusion = f32[1024,512] fusion(log), kind=kCustom, calls=consumer_computation, backend_config={"fusion_backend_config": {"kind":"__triton","block_level_fusion_config":{"output_tiles":[{"sizes":["1","128"]}],"num_warps":"4"}}}
+  exponential = f32[1024,512] exponential(fusion)
+  sqrt = f32[1024,512] sqrt(fusion)
+  ROOT tuple = (f32[1024,512],f32[1024,512],f32[1024,512]) tuple(exponential, sqrt, log)
+})";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(kHloText));
+
+  module->mutable_config()
+      .mutable_debug_options()
+      .set_xla_gpu_unsupported_enable_triton_multi_output_fusion(true);
+  EXPECT_TRUE(priority_fusion_.Run(module.get()).value());
+  EXPECT_TRUE(verifier().Run(module.get()).status().ok());
+
+  HloInstruction* root = module->entry_computation()->root_instruction();
+  HloInstruction *fusion1, *fusion2;
+  EXPECT_THAT(root,
+              GmockMatch(m::Tuple(m::Fusion(&fusion1, m::Log()),
+                                  m::Fusion(&fusion2, m::Log()), m::Log())));
+  EXPECT_NE(fusion1, fusion2);
+  EXPECT_TRUE(IsGenericTritonFusion(*fusion1));
+  EXPECT_TRUE(IsGenericTritonFusion(*fusion2));
+}
+
+TEST_F(PriorityFusionTest, TritonProducerNotSupported_DoNotFuse) {
   const std::string kHloText = R"(
 HloModule t
 
@@ -1011,7 +1197,7 @@ ENTRY main {
   param_0 = c64[] parameter(0)
   param_1 = f32[125,127] parameter(1)
   producer_fusion = f32[125,127] fusion(param_0), kind=kLoop, calls=producer_computation
-  ROOT triton_fusion = f32[125,127] fusion(producer_fusion, param_1), kind=kCustom, calls=triton_computation, backend_config={"fusion_backend_config": {"kind":"__triton","block_level_fusion_config":{"output_tile_sizes":["1","127"],"num_warps":"1"}}}
+  ROOT triton_fusion = f32[125,127] fusion(producer_fusion, param_1), kind=kCustom, calls=triton_computation, backend_config={"fusion_backend_config": {"kind":"__triton","block_level_fusion_config":{"output_tiles":[{"sizes":["1","127"]}],"num_warps":"1"}}}
 })";
   TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(kHloText));
 
@@ -1020,8 +1206,7 @@ ENTRY main {
   EXPECT_FALSE(priority_fusion_.Run(module.get()).value());
 }
 
-TEST_F(PriorityFusionWithTritonEnabledTest,
-       TritonConsumerNotSupported_DoNotFuse) {
+TEST_F(PriorityFusionTest, TritonConsumerNotSupported_DoNotFuse) {
   const std::string kHloText = R"(
 HloModule t
 
@@ -1041,7 +1226,7 @@ consumer_computation {
 ENTRY main {
   param_0 = f32[] parameter(1)
   param_1 = c64[] parameter(0)
-  triton_fusion = f32[125,127] fusion(param_0), kind=kCustom, calls=triton_computation, backend_config={"fusion_backend_config": {"kind":"__triton","block_level_fusion_config":{"output_tile_sizes":["1","127"],"num_warps":"1"}}}
+  triton_fusion = f32[125,127] fusion(param_0), kind=kCustom, calls=triton_computation, backend_config={"fusion_backend_config": {"kind":"__triton","block_level_fusion_config":{"output_tiles":[{"sizes":["1","127"]}],"num_warps":"1"}}}
   ROOT consumer_fusion = f32[125,127] fusion(param_1, triton_fusion), kind=kLoop, calls=consumer_computation
 })";
   TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(kHloText));
@@ -1073,6 +1258,101 @@ TEST_F(PriorityFusionTest, DoNotFuseInsideReducer) {
     }
   )");
   EXPECT_THAT(priority_fusion_.Run(module.get()), IsOkAndHolds(false));
+}
+
+class PriorityFusionWithTritonEnabledTest : public PriorityFusionTest {
+ public:
+  DebugOptions GetDebugOptionsForTest() const override {
+    DebugOptions debug_options = PriorityFusionTest::GetDebugOptionsForTest();
+    debug_options
+        .set_xla_gpu_experimental_enable_triton_heroless_priority_fusion(true);
+    return debug_options;
+  }
+};
+
+TEST_F(PriorityFusionWithTritonEnabledTest,
+       TwoElementwiseOpsAreFusedWithTriton) {
+  auto module = *ParseAndReturnVerifiedModule(R"(
+HloModule m
+
+ENTRY main {
+  p0 = f32[2048] parameter(0)
+  p1 = f32[2048] parameter(1)
+  add = f32[2048] add(p0, p1)
+  ROOT mul = f32[2048] multiply(add, p0)
+})");
+  EXPECT_THAT(priority_fusion_.Run(module.get()), IsOkAndHolds(true));
+  EXPECT_TRUE(verifier().Run(module.get()).status().ok());
+
+  HloInstruction* root = module->entry_computation()->root_instruction();
+  EXPECT_THAT(root, GmockMatch(m::Fusion(m::Parameter(), m::Parameter())));
+  EXPECT_TRUE(IsGenericTritonFusion(*root));
+}
+
+TEST_F(PriorityFusionWithTritonEnabledTest, DoNotFuseIntoRoot) {
+  auto module = *ParseAndReturnVerifiedModule(R"(
+    HloModule test_module
+
+    ENTRY %main (p.0: s32[2], p.1: s32[]) -> s32[2] {
+      %p.0 = s32[2]{0} parameter(0)
+      %p.1 = s32[] parameter(1)
+      ROOT %broadcast = s32[2]{0} broadcast(s32[] %p.1), dimensions={}, sharding={replicated}
+      %add = s32[2]{0} add(s32[2]{0} %p.0, s32[2]{0} %broadcast)
+      %tuple.1 = (s32[2]{0}, s32[2]{0}) tuple(s32[2]{0} %add, s32[2]{0} %broadcast)
+      %token.0 = token[] after-all()
+      %outfeed.6 = token[] outfeed((s32[2]{0}, s32[2]{0}) %tuple.1, token[] %token.0), outfeed_shape=(s32[2]{0}, s32[2]{0}), sharding={maximal device=0}
+    })");
+
+  EXPECT_THAT(priority_fusion_.Run(module.get()), IsOkAndHolds(false));
+}
+
+TEST_F(PriorityFusionWithTritonEnabledTest, LimitNumberOfParameters) {
+  std::string module_text =
+      "HloModule m\n\nENTRY main {\nadd0 = f32[] parameter(0)\n";
+  for (int64_t i = 1; i <= MaxOperandsAndOutputsPerFusion(); ++i) {
+    module_text += absl::StrFormat("p%d = f32[] parameter(%d)\n", i, i);
+    module_text +=
+        absl::StrFormat("add%d = f32[] add(add%d, p%d)\n", i, i - 1, i);
+  }
+  module_text += "}";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(module_text));
+  EXPECT_THAT(priority_fusion_.Run(module.get()), IsOkAndHolds(true));
+  // Assert that there is not just a single fusion with all parameters as
+  // operands.
+  HloInstruction* root = module->entry_computation()->root_instruction();
+  EXPECT_LE(root->operand_count(), MaxOperandsAndOutputsPerFusion());
+}
+
+TEST_F(PriorityFusionWithTritonEnabledTest,
+       MultipleMultiOutputFusionCandidates) {
+  auto module = *ParseAndReturnVerifiedModule(R"(
+    HloModule test_module
+
+    ENTRY main {
+      p0 = f32[] parameter(0)
+      negate = f32[] negate(p0)
+      log = f32[] log(negate)
+      p1 = f32[] parameter(1)
+      exp = f32[] exponential(p1)
+      add = f32[] add(exp, log)
+      ROOT res = (f32[], f32[], f32[]) tuple(add, negate, exp)
+    })");
+
+  tsl::thread::ThreadPool pool(tsl::Env::Default(), "priority-fusion-test", 8);
+  GpuHloCostAnalysis::Options options;
+  options.count_multiple_input_accesses = true;
+  PriorityFusion priority_fusion_with_thread_pool{/*thread_pool=*/&pool,
+                                                  device_info_, options};
+  EXPECT_THAT(priority_fusion_with_thread_pool.Run(module.get()),
+              IsOkAndHolds(true));
+  HloInstruction* root = module->entry_computation()->root_instruction();
+  HloInstruction* fusion;
+  EXPECT_THAT(root, GmockMatch(m::Tuple(m::GetTupleElement(m::Fusion(&fusion)),
+                                        m::GetTupleElement(m::Fusion()),
+                                        m::GetTupleElement(m::Fusion()))));
+  EXPECT_THAT(fusion, GmockMatch(m::Fusion(m::Parameter(), m::Parameter())));
+  EXPECT_TRUE(IsGenericTritonFusion(*fusion));
 }
 
 }  // namespace gpu

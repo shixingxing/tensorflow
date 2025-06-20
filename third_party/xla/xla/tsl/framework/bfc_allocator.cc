@@ -16,25 +16,40 @@ limitations under the License.
 #include "xla/tsl/framework/bfc_allocator.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <deque>
+#include <map>
 #include <memory>
+#include <optional>
 #include <utility>
+#include <vector>
 
+#include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
+#include "xla/tsl/framework/allocator.h"
 #include "xla/tsl/framework/allocator_retry.h"
+#include "xla/tsl/platform/env.h"
+#include "xla/tsl/platform/file_system.h"
+#include "xla/tsl/platform/logging.h"
+#include "xla/tsl/platform/types.h"
+#include "xla/tsl/profiler/utils/trace_filter_utils.h"
 #include "xla/tsl/protobuf/bfc_memory_map.pb.h"
-#include "tsl/platform/file_system.h"
-#include "tsl/platform/logging.h"
-#include "tsl/platform/mutex.h"
 #include "tsl/platform/numbers.h"
 #include "tsl/platform/stacktrace.h"
-#include "tsl/platform/str_util.h"
-#include "tsl/platform/strcat.h"
-#include "tsl/platform/types.h"
 #include "tsl/profiler/lib/scoped_memory_debug_annotation.h"
 #include "tsl/profiler/lib/traceme.h"
 
 namespace tsl {
+
+const uint64_t kDefaultMemoryFilterMask = tsl::profiler::TraceMeFiltersToMask(
+    {tsl::profiler::TraceMeFilter::kTraceMemory});
 
 constexpr BFCAllocator::ChunkHandle BFCAllocator::kInvalidChunkHandle;
 
@@ -86,6 +101,11 @@ BFCAllocator::BFCAllocator(std::unique_ptr<SubAllocator> sub_allocator,
 }
 
 BFCAllocator::~BFCAllocator() {
+  // Lock the mutex to make sure that all memory effects are safely published
+  // and available to a thread running the destructor (i.e., deallocations
+  // happened on a different thread right before the destructor).
+  absl::MutexLock l(&mutex_);
+
   // Return memory back.
   VLOG(2) << "Number of regions allocated: "
           << region_manager_.regions().size();
@@ -320,7 +340,7 @@ size_t BFCAllocator::RoundedBytes(size_t bytes) {
 }
 
 bool BFCAllocator::DeallocateFreeRegions(size_t rounded_bytes)
-    TF_EXCLUSIVE_LOCKS_REQUIRED(lock_) {
+    ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
   // Do nothing if garbage collection is off.
   if (!opts_.garbage_collection) {
     return false;
@@ -377,7 +397,7 @@ bool BFCAllocator::DeallocateFreeRegions(size_t rounded_bytes)
 
 void BFCAllocator::DeallocateRegions(
     const absl::flat_hash_set<void*>& region_ptrs)
-    TF_EXCLUSIVE_LOCKS_REQUIRED(lock_) {
+    ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
   // Explicitly remove the const qualifier as some compilers disallow passing
   // const_iterator to std::vector::erase(), which is used in
   // RemoveAllocationRegion().
@@ -426,7 +446,7 @@ void* BFCAllocator::AllocateRawInternal(size_t unused_alignment,
   // The BFC allocator tries to find the best fit first.
   BinNum bin_num = BinNumForSize(rounded_bytes);
 
-  mutex_lock l(lock_);
+  absl::MutexLock l(&mutex_);
   if (!timestamped_chunks_.empty()) {
     // Merge timestamped chunks whose counts have become safe for general use.
     MergeTimestampedChunks(0);
@@ -481,8 +501,7 @@ void* BFCAllocator::AllocateRawInternal(size_t unused_alignment,
     LOG(WARNING)
         << "Allocator (" << Name() << ") ran out of memory trying "
         << "to allocate " << strings::HumanReadableNumBytes(num_bytes)
-        << " (rounded to " << rounded_bytes << ")"
-        << "requested by op "
+        << " (rounded to " << rounded_bytes << ")" << "requested by op "
         << tsl::profiler::ScopedMemoryDebugAnnotation::CurrentAnnotation()
                .pending_op_name
         << "\nIf the cause is memory fragmentation maybe the environment "
@@ -521,17 +540,11 @@ void BFCAllocator::AddTraceMe(absl::string_view traceme_name,
                               int64_t alloc_bytes) {
   tsl::profiler::TraceMe::InstantActivity(
       [this, traceme_name, chunk_ptr, req_bytes, alloc_bytes]()
-          TF_NO_THREAD_SAFETY_ANALYSIS {
+          ABSL_NO_THREAD_SAFETY_ANALYSIS {
             int64_t bytes_available =
                 memory_limit_ - stats_.bytes_reserved - stats_.bytes_in_use;
             const auto& annotation =
                 tsl::profiler::ScopedMemoryDebugAnnotation::CurrentAnnotation();
-            const auto op_name = annotation.pending_op_name
-                                     ? annotation.pending_op_name
-                                     : "(null)";
-            const auto region_type = annotation.pending_region_type
-                                         ? annotation.pending_region_type
-                                         : "(null)";
             return tsl::profiler::TraceMeEncode(
                 traceme_name, {{"allocator_name", name_},
                                {"bytes_reserved", stats_.bytes_reserved},
@@ -542,13 +555,14 @@ void BFCAllocator::AddTraceMe(absl::string_view traceme_name,
                                {"requested_bytes", req_bytes},
                                {"allocation_bytes", alloc_bytes},
                                {"addr", reinterpret_cast<uint64>(chunk_ptr)},
-                               {"tf_op", op_name},
+                               {"tf_op", annotation.pending_op_name},
                                {"id", annotation.pending_step_id},
-                               {"region_type", region_type},
+                               {"region_type", annotation.pending_region_type},
                                {"data_type", annotation.pending_data_type},
                                {"shape", annotation.pending_shape_func()}});
           },
-      /*level=*/tsl::profiler::TraceMeLevel::kInfo);
+      /*level=*/tsl::profiler::TraceMeLevel::kInfo,
+      /*filter_mask=*/kDefaultMemoryFilterMask);
 }
 
 void* BFCAllocator::FindChunkPtr(BinNum bin_num, size_t rounded_bytes,
@@ -610,13 +624,10 @@ void* BFCAllocator::FindChunkPtr(BinNum bin_num, size_t rounded_bytes,
         if (ShouldRecordOpName()) {
           const auto& annotation =
               profiler::ScopedMemoryDebugAnnotation::CurrentAnnotation();
-          if (annotation.pending_op_name != nullptr) {
+          if (!annotation.pending_op_name.empty()) {
             chunk->op_name = annotation.pending_op_name;
           } else {
-            LOG(INFO) << "missing pending_op_name for " << Name()
-                      << " reading addr "
-                      << static_cast<const void*>(&annotation.pending_op_name)
-                      << "\n"
+            LOG(INFO) << "missing pending_op_name for " << Name() << "\n"
                       << CurrentStackTrace();
             chunk->op_name = nullptr;
           }
@@ -692,7 +703,7 @@ void BFCAllocator::DeallocateRawInternal(void* ptr) {
     VLOG(2) << "tried to deallocate nullptr";
     return;
   }
-  mutex_lock l(lock_);
+  absl::MutexLock l(&mutex_);
 
   // Find the chunk from the ptr.
   BFCAllocator::ChunkHandle h = region_manager_.get_handle(ptr);
@@ -936,7 +947,7 @@ bool BFCAllocator::TracksAllocationSizes() const { return true; }
 
 size_t BFCAllocator::RequestedSize(const void* ptr) const {
   CHECK(ptr);
-  mutex_lock l(lock_);
+  absl::MutexLock l(&mutex_);
   BFCAllocator::ChunkHandle h = region_manager_.get_handle(ptr);
   CHECK(h != kInvalidChunkHandle)
       << "Asked for requested size of pointer we never allocated: " << ptr;
@@ -945,7 +956,7 @@ size_t BFCAllocator::RequestedSize(const void* ptr) const {
 }
 
 size_t BFCAllocator::AllocatedSize(const void* ptr) const {
-  mutex_lock l(lock_);
+  absl::MutexLock l(&mutex_);
   BFCAllocator::ChunkHandle h = region_manager_.get_handle(ptr);
   CHECK(h != kInvalidChunkHandle)
       << "Asked for allocated size of pointer we never allocated: " << ptr;
@@ -954,7 +965,7 @@ size_t BFCAllocator::AllocatedSize(const void* ptr) const {
 }
 
 int64_t BFCAllocator::AllocationId(const void* ptr) const {
-  mutex_lock l(lock_);
+  absl::MutexLock l(&mutex_);
   BFCAllocator::ChunkHandle h = region_manager_.get_handle(ptr);
   CHECK(h != kInvalidChunkHandle)
       << "Asked for allocation id of pointer we never allocated: " << ptr;
@@ -1078,18 +1089,18 @@ void BFCAllocator::DumpMemoryLog(size_t num_bytes) {
       if (c->in_use()) {
         in_use_by_size[c->size]++;
       }
-      string buf = strings::StrCat(
-          (c->in_use() ? "InUse" : "Free "), " at ",
-          strings::Hex(reinterpret_cast<uint64>(c->ptr)), " of size ", c->size);
+      string buf = absl::StrCat((c->in_use() ? "InUse" : "Free "), " at ",
+                                absl::Hex(reinterpret_cast<uint64>(c->ptr)),
+                                " of size ", c->size);
 #ifdef TENSORFLOW_MEM_DEBUG
       if (ShouldRecordOpName()) {
-        strings::StrAppend(&buf, " by op ", c->op_name, " action_count ",
-                           c->action_count, " step ", c->step_id);
+        absl::StrAppend(&buf, " by op ", c->op_name, " action_count ",
+                        c->action_count, " step ", c->step_id);
       }
 #endif
-      strings::StrAppend(&buf, " next ", c->next);
+      absl::StrAppend(&buf, " next ", c->next);
       if (timing_counter_) {
-        strings::StrAppend(&buf, " freed_at_count ", c->freed_at_count);
+        absl::StrAppend(&buf, " freed_at_count ", c->freed_at_count);
       }
       LOG(INFO) << buf;
       h = c->next;
@@ -1117,8 +1128,8 @@ void BFCAllocator::MaybeWriteMemoryMap() {
   const char* gpu_memory_map_file = std::getenv("TF_BFC_MEMORY_DUMP");
   if (gpu_memory_map_file != nullptr) {
     std::unique_ptr<WritableFile> dump_file;
-    string file_name = strings::StrCat(gpu_memory_map_file, "_", Name(), ".",
-                                       Env::Default()->NowMicros());
+    string file_name = absl::StrCat(gpu_memory_map_file, "_", Name(), ".",
+                                    Env::Default()->NowMicros());
     absl::Status status =
         Env::Default()->NewWritableFile(file_name, &dump_file);
     if (!status.ok()) {
@@ -1135,7 +1146,7 @@ void BFCAllocator::MaybeWriteMemoryMap() {
 }
 
 MemoryDump BFCAllocator::RecordMemoryMap() {
-  mutex_lock l(lock_);
+  absl::MutexLock l(&mutex_);
   return RecordMemoryMapInternal();
 }
 
@@ -1205,13 +1216,13 @@ MemoryDump BFCAllocator::RecordMemoryMapInternal() {
   return md;
 }
 
-absl::optional<AllocatorStats> BFCAllocator::GetStats() {
-  mutex_lock l(lock_);
+std::optional<AllocatorStats> BFCAllocator::GetStats() {
+  absl::MutexLock l(&mutex_);
   return stats_;
 }
 
 bool BFCAllocator::ClearStats() {
-  mutex_lock l(lock_);
+  absl::MutexLock l(&mutex_);
   stats_.num_allocs = 0;
   stats_.peak_bytes_in_use = stats_.bytes_in_use;
   stats_.largest_alloc_size = 0;

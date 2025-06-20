@@ -96,8 +96,13 @@ class CuptiInterface {
 
   virtual CUptiResult GetGraphId(CUgraph graph, uint32_t* graph_id) = 0;
 
+  // Gets the graph node id.
+  virtual CUptiResult GetGraphNodeId(CUgraphNode node, uint64_t* nodeId) = 0;
+
   virtual CUptiResult GetGraphExecId(CUgraphExec graph_exec,
                                      uint32_t* graph_id) = 0;
+
+  virtual CUptiResult SetThreadIdType(CUpti_ActivityThreadIdType type) = 0;
 
   // Interface maintenance functions. Not directly related to CUPTI, but
   // required for implementing an error resilient layer over CUPTI API.

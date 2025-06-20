@@ -15,6 +15,7 @@ cc_library(
     srcs = ["portable_tensor_utils.cc"],
     hdrs = ["portable_tensor_utils.h"],
     visibility = [
+        "//tensorflow/compiler/mlir/lite/quantization/common/quantization_lib:__pkg__",
         "//tensorflow/compiler/mlir/quantization/common/quantization_lib:__pkg__",
     ],
 )
@@ -67,12 +68,13 @@ tf_cc_test(
     ],
     deps = [
         ":quantization_utils",
+        "//tensorflow/compiler/mlir/lite/core:absl_error_model_builder",
         "//tensorflow/compiler/mlir/lite/quantization/lite:test_util",
         "//tensorflow/compiler/mlir/lite/schema:schema_fbs",
         "//tensorflow/compiler/mlir/lite/schema:schema_utils",
-        "//tensorflow/lite/core:framework",  # to remove when mlir version is ready.
         "@com_google_absl//absl/status",
         "@com_google_googletest//:gtest",
+        "@eigen_archive//:eigen3",
         "@local_tsl//tsl/platform:path",
         "@local_tsl//tsl/platform:platform_port",
         "@local_xla//xla/tsl/lib/core:status_test_util",
@@ -99,6 +101,7 @@ cc_library(
         "//tensorflow/core/platform:logging",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/log",
         "@com_google_absl//absl/memory",
         "@com_google_absl//absl/status",
         "@flatbuffers//:runtime_cc",
@@ -129,11 +132,11 @@ tf_cc_test(
     ],
     deps = [
         ":quantize_weights",
+        "//tensorflow/compiler/mlir/lite/core:absl_error_model_builder",
         "//tensorflow/compiler/mlir/lite/quantization/lite:test_util",
         "//tensorflow/compiler/mlir/lite/schema:schema_fbs",
         "//tensorflow/compiler/mlir/lite/schema:schema_utils",
         "//tensorflow/core:framework_internal",
-        "//tensorflow/lite/core:framework",  # to remove when mlir version is ready.
         "@com_google_googletest//:gtest",
         "@flatbuffers",
         "@local_tsl//tsl/platform:path",

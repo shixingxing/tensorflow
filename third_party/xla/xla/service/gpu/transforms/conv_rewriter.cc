@@ -21,7 +21,6 @@ limitations under the License.
 #include <numeric>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <tuple>
 #include <utility>
 #include <variant>
@@ -29,8 +28,10 @@ limitations under the License.
 
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "absl/strings/str_replace.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
@@ -42,6 +43,7 @@ limitations under the License.
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/stream_executor/device_description.h"
+#include "xla/stream_executor/dnn.h"
 #include "xla/util.h"
 #include "xla/window_util.h"
 #include "xla/xla_data.pb.h"
@@ -55,9 +57,10 @@ namespace gpu {
 
 namespace {
 
-absl::Status CheckTypes(HloInstruction* conv,
-                        const se::GpuComputeCapability cc) {
-  auto valid_shape = [conv, &cc](const Shape& shape) -> absl::Status {
+absl::Status CheckTypes(HloInstruction* conv, const se::GpuComputeCapability cc,
+                        const se::dnn::VersionInfo dnn_version) {
+  auto valid_shape = [conv, &cc,
+                      &dnn_version](const Shape& shape) -> absl::Status {
     PrimitiveType type = shape.element_type();
     if (!primitive_util::IsFloatingPointType(type) &&
         !primitive_util::IsIntegralType(type)) {
@@ -82,6 +85,16 @@ absl::Status CheckTypes(HloInstruction* conv,
             "FP8 convolutions are only supported on CUDA GPUs, but got "
             "FP8 convolution on ROCm GPU: %s",
             conv->ToString());
+      }
+      if (dnn_version >= se::dnn::VersionInfo{9, 8, 0}) {
+        if (!std::get<se::CudaComputeCapability>(cc).IsAtLeastAda()) {
+          return Unimplemented(
+              "FP8 convolutions are only supported on CUDA GPUs with compute "
+              "capability at least 8.9, but got "
+              "FP8 convolution on GPU with compute capability %s: %s",
+              std::get<se::CudaComputeCapability>(cc).ToString(),
+              conv->ToString());
+        }
       } else if (!std::get<se::CudaComputeCapability>(cc).IsAtLeastHopper()) {
         return Unimplemented(
             "FP8 convolutions are only supported on CUDA GPUs with compute "
@@ -398,7 +411,7 @@ ConvolutionMatch MatchBackwardInput(HloInstruction* conv) {
   // (b) cudnn has special fusions for forward conv plus bias and activation,
   // and we want to pattern-match to that after running this pass.
   bool is_reversed_filter =
-      reverse_filter->opcode() == HloOpcode::kReverse &&
+      HloPredicateIsOp<HloOpcode::kReverse>(reverse_filter) &&
       absl::c_is_permutation(dnums.kernel_spatial_dimensions(),
                              reverse_filter->dimensions());
   // For conv1d which reshape to conv2d, filter reverse pattern is
@@ -566,7 +579,7 @@ ConvolutionMatch MatchBackwardInput(HloInstruction* conv) {
   // If we matched against a constant, we need to add a reverse op that can be
   // subsumed by the cuDNN call. algebraic-simplifier will later remove any
   // unnecessary reverses.
-  if (reverse_filter->opcode() != HloOpcode::kReverse &&
+  if (HloPredicateIsNotOp<HloOpcode::kReverse>(reverse_filter) &&
       reverse_filter->IsConstant()) {
     // Create a double-reverse, which is a nop.
     HloComputation* c = conv->parent();
@@ -582,7 +595,7 @@ ConvolutionMatch MatchBackwardInput(HloInstruction* conv) {
   // Calculate the 'rhs' that goes into the backward input convolution.
   HloInstruction* rhs = reverse_filter;
   // One reverse is subsumed by the cuDNN call.
-  if (rhs->opcode() == HloOpcode::kReverse) {
+  if (HloPredicateIsOp<HloOpcode::kReverse>(rhs)) {
     rhs = rhs->mutable_operand(0);
   } else if (is_reversed_conv1d_filter) {
     auto src = rhs->mutable_operand(0)->mutable_operand(0);
@@ -630,7 +643,7 @@ ConvolutionMatch MatchBackwardInput(HloInstruction* conv) {
 
   // Transpose [H, W, ..., G, in_depth/G, out_depth / G] -> [H, W, ...,
   // in_depth/G, G, out_depth / G]
-  std::vector<int64_t> transpose_dims(rhs->shape().dimensions_size());
+  std::vector<int64_t> transpose_dims(rhs->shape().dimensions().size());
   std::iota(transpose_dims.begin(), transpose_dims.end(), 0);
   transpose_dims.erase(transpose_dims.begin() + input_feature_dimension);
   transpose_dims.insert(transpose_dims.begin() + output_feature_dimension,
@@ -729,7 +742,7 @@ HloInstruction* ConvertBatchGroupedToFeatureGroupedConvolution(
 
   // Transpose G to the axis before C, For eg: [G, N/G, H, W, C ] -> [N/G, H,
   // W, G, C]
-  std::vector<int64_t> transpose_dims(lhs->shape().dimensions_size());
+  std::vector<int64_t> transpose_dims(lhs->shape().dimensions().size());
   std::iota(transpose_dims.begin(), transpose_dims.end(), 0);
   transpose_dims.erase(transpose_dims.begin() + input_batch_dimension);
   transpose_dims.insert(transpose_dims.begin() + input_feature_dimension,
@@ -763,8 +776,9 @@ CudnnConvBackendConfig GetDefaultBackendConfig() {
 // Helper function to create a custom_call instruction to replace the given
 // conv instruction
 static absl::StatusOr<HloInstruction*> CreateCustomCallHelper(
-    HloInstruction* conv, const se::GpuComputeCapability& cc) {
-  TF_RETURN_IF_ERROR(CheckTypes(conv, cc));
+    HloInstruction* conv, const se::GpuComputeCapability& cc,
+    const se::dnn::VersionInfo& dnn_version) {
+  TF_RETURN_IF_ERROR(CheckTypes(conv, cc, dnn_version));
   if (ConvolutionMatch m = MatchBackwardInput(conv)) {
     auto& [window, dnums, rhs] = *m;
     return CreateGpuConv(kCudnnConvBackwardInputCallTarget, conv->shape(),
@@ -799,11 +813,12 @@ static absl::StatusOr<HloInstruction*> CreateCustomCallHelper(
 
 // Tries to rewrite a single convolution into a call to cudnn/miopen.
 absl::StatusOr<bool> RunOnInstruction(HloInstruction* conv,
-                                      const se::GpuComputeCapability& cc) {
+                                      const se::GpuComputeCapability& cc,
+                                      const se::dnn::VersionInfo& dnn_version) {
   CHECK_EQ(conv->opcode(), HloOpcode::kConvolution);
 
   TF_ASSIGN_OR_RETURN(HloInstruction * custom_call,
-                      CreateCustomCallHelper(conv, cc));
+                      CreateCustomCallHelper(conv, cc, dnn_version));
   if (custom_call == nullptr) {
     return false;
   }
@@ -828,17 +843,18 @@ absl::StatusOr<bool> RunOnInstruction(HloInstruction* conv,
 // cudnn/miopen.
 // Returns true if it made any changes.
 absl::StatusOr<bool> RunOnComputation(HloComputation* computation,
-                                      const se::GpuComputeCapability& cc) {
+                                      const se::GpuComputeCapability& cc,
+                                      const se::dnn::VersionInfo dnn_version) {
   std::vector<HloInstruction*> convs;
   for (auto* hlo : computation->instructions()) {
-    if (hlo->opcode() == HloOpcode::kConvolution) {
+    if (HloPredicateIsOp<HloOpcode::kConvolution>(hlo)) {
       convs.push_back(hlo);
     }
   }
 
   bool changed = false;
   for (HloInstruction* conv : convs) {
-    TF_ASSIGN_OR_RETURN(bool result, RunOnInstruction(conv, cc));
+    TF_ASSIGN_OR_RETURN(bool result, RunOnInstruction(conv, cc, dnn_version));
     changed |= result;
   }
   return changed;
@@ -852,8 +868,9 @@ absl::StatusOr<bool> ConvRewriter::Run(
   bool changed = false;
   for (HloComputation* computation :
        module->MakeNonfusionComputations(execution_threads)) {
-    TF_ASSIGN_OR_RETURN(bool result,
-                        RunOnComputation(computation, compute_capability_));
+    TF_ASSIGN_OR_RETURN(
+        bool result,
+        RunOnComputation(computation, compute_capability_, dnn_version_));
     changed |= result;
   }
   XLA_VLOG_LINES(2, "ConvRewriter::Run(), after:\n" + module->ToString());

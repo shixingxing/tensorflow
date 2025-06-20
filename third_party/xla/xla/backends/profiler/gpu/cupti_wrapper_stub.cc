@@ -117,8 +117,17 @@ CUptiResult CuptiWrapperStub::GetGraphId(CUgraph graph, uint32_t* graph_id) {
   return CUPTI_SUCCESS;
 }
 
+CUptiResult CuptiWrapperStub::GetGraphNodeId(CUgraphNode node,
+                                             uint64_t* nodeId) {
+  return CUPTI_SUCCESS;
+}
+
 CUptiResult CuptiWrapperStub::GetGraphExecId(CUgraphExec graph_exec,
                                              uint32_t* graph_id) {
+  return CUPTI_SUCCESS;
+}
+
+CUptiResult CuptiWrapperStub::SetThreadIdType(CUpti_ActivityThreadIdType type) {
   return CUPTI_SUCCESS;
 }
 

@@ -24,6 +24,8 @@ limitations under the License.
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/container/inlined_vector.h"
+#include "absl/log/log.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
@@ -32,9 +34,12 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_module.h"
+#include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/kernels/custom_kernel_fusion_pattern.h"
+#include "xla/service/hlo.pb.h"
 #include "xla/shape_util.h"
 #include "xla/stream_executor/device_description.h"
+#include "xla/xla_data.pb.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/logging.h"
 #include "tsl/platform/statusor.h"
@@ -42,9 +47,9 @@ limitations under the License.
 namespace xla::gpu {
 
 CustomKernelFusionRewriter::CustomKernelFusionRewriter(
-    const se::DeviceDescription* device,
+    const se::DeviceDescription* device, int kernel_index,
     const CustomKernelFusionPatternRegistry* patterns)
-    : device_(device), patterns_(patterns) {}
+    : device_(device), kernel_index_(kernel_index), patterns_(patterns) {}
 
 // Returns a set of instruction that have users outside of a matched pattern
 // and have a replacement that must be applied after building a new custom
@@ -89,7 +94,7 @@ static absl::InlinedVector<HloInstruction*, 4> GetPatternCaptures(
     for (HloInstruction* operand : instr->operands()) {
       if (!instructions_set.contains(operand) &&
           absl::c_find(captures, operand) == captures.end()) {
-        captures.emplace_back(operand);
+        captures.push_back(operand);
       }
     }
   }
@@ -148,9 +153,11 @@ static absl::StatusOr<HloComputation*> CreateFusionBody(
   return module->AddComputationAndUnifyNamesAndIds(builder.Build(), false);
 }
 
-static absl::StatusOr<HloInstruction*> CreateFusionInstruction(
+namespace {
+absl::StatusOr<HloInstruction*> CreateFusionInstruction(
     HloModule* module, const CustomKernelFusionPattern::Match& match,
-    absl::Span<HloInstruction* const> captures, HloComputation* body) {
+    absl::Span<HloInstruction* const> captures, HloComputation* body,
+    int kernel_index) {
   // We'll be replacing the root operation of a custom kernel fusion with a
   // fusion instruction calling fusion computation.
   HloInstruction* root = match.root();
@@ -168,7 +175,7 @@ static absl::StatusOr<HloInstruction*> CreateFusionInstruction(
       *gpu_config.mutable_fusion_backend_config();
   backend_config.set_kind("__custom_fusion");
   *backend_config.mutable_custom_fusion_config() = match.config();
-  backend_config.mutable_custom_fusion_config()->set_kernel_index(0);
+  backend_config.mutable_custom_fusion_config()->set_kernel_index(kernel_index);
   TF_RETURN_IF_ERROR(fusion->set_backend_config(std::move(gpu_config)));
 
   // If we don't have workspace we can return constructed fusion instruction.
@@ -178,6 +185,7 @@ static absl::StatusOr<HloInstruction*> CreateFusionInstruction(
   return parent->AddInstruction(
       HloInstruction::CreateGetTupleElement(fusion, 0));
 }
+}  // namespace
 
 absl::StatusOr<bool> CustomKernelFusionRewriter::Run(
     HloModule* module,
@@ -205,9 +213,9 @@ absl::StatusOr<bool> CustomKernelFusionRewriter::Run(
 
     TF_ASSIGN_OR_RETURN(HloComputation * fusion_body,
                         CreateFusionBody(module, match, captures));
-    TF_ASSIGN_OR_RETURN(
-        HloInstruction * fusion,
-        CreateFusionInstruction(module, match, captures, fusion_body));
+    TF_ASSIGN_OR_RETURN(HloInstruction * fusion,
+                        CreateFusionInstruction(module, match, captures,
+                                                fusion_body, kernel_index_));
 
     VLOG(2) << "Added a fusion instruction: " << fusion->name()
             << " for custom kernel fusion " << match.config().name()

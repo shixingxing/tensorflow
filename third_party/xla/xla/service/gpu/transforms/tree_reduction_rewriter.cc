@@ -42,6 +42,7 @@ limitations under the License.
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/stream_executor/device_description.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/statusor.h"
@@ -71,8 +72,9 @@ bool IsMinMaxReduction(HloReduceInstruction *reduce) {
 
 class ReductionRewriterVisitor : public DfsHloRewriteVisitor {
  public:
-  explicit ReductionRewriterVisitor(se::GpuComputeCapability gpu_version)
-      : gpu_version_(gpu_version) {}
+  explicit ReductionRewriterVisitor(
+      const se::DeviceDescription &device_description)
+      : device_description_(device_description) {}
 
   absl::Status HandleReduce(HloInstruction *hlo) override {
     auto *reduce = Cast<HloReduceInstruction>(hlo);
@@ -84,7 +86,7 @@ class ReductionRewriterVisitor : public DfsHloRewriteVisitor {
     }
     ReductionDimensions reduction_dims =
         GetReductionKindAndContiguousComponents(*hlo);
-    if (ReductionIsRaceFree(config, reduction_dims)) {
+    if (ReductionIsRaceFree(reduction_dims, device_description_)) {
       VLOG(3) << "Base case: dimensions fit";
       return absl::OkStatus();
     }
@@ -110,18 +112,10 @@ class ReductionRewriterVisitor : public DfsHloRewriteVisitor {
   bool MatchReductionForSplit(HloReduceInstruction *reduce,
                               const HloModuleConfig &config) {
     // MLIR emitters only support race-free reductions.
-    // TODO(jreiffers: Verify performance and implement atomics for reductions
+    // TODO(jreiffers): Verify performance and implement atomics for reductions
     // if needed.
-    bool reductions_via_mlir_disabled =
-        config.debug_options().xla_gpu_mlir_emitter_level() < 4;
-    if (reductions_via_mlir_disabled && IsMinMaxReduction(reduce)) {
-      // TODO(cheshire): Also enable for integers.
-      VLOG(1) << "Not performing tree expansion on min/max-reduction: "
-              << reduce->ToString()
-              << " since min/max operations are associative";
-      return false;
-    }
-    if (!IsReductionFromOrToContiguousDimensions(*reduce)) {
+    if (!IsReductionFromOrToContiguousDimensions(*reduce,
+                                                 device_description_)) {
       VLOG(3) << "Is not a reduction from or to contiguous dimensions";
       return false;
     }
@@ -136,7 +130,7 @@ class ReductionRewriterVisitor : public DfsHloRewriteVisitor {
                                                     uint64_t n,
                                                     int64_t race_free_bound,
                                                     bool is_row_reduction) {
-    CHECK(k1 >= k2);
+    CHECK_GE(k1, k2);
     // Keep inner reduction as race free.
     if (k1 > race_free_bound) {
       return false;
@@ -200,8 +194,8 @@ class ReductionRewriterVisitor : public DfsHloRewriteVisitor {
     // will have a power of 2 in that range.
     uint64_t k2 =
         static_cast<uint64_t>(std::floor(std::sqrt(reduced_dim_size)));
-    int64_t race_free_bound = ReductionDimensionRaceFreeBound(
-        reduce->GetModule()->config(), reduction_dims);
+    int64_t race_free_bound =
+        ReductionDimensionRaceFreeBound(reduction_dims, device_description_);
     if (k2 > race_free_bound) {
       // This means we need more than one split. It is best to limit the n/k
       // dimension to the maximum size that doesn't require further splitting.
@@ -325,11 +319,13 @@ class ReductionRewriterVisitor : public DfsHloRewriteVisitor {
     }
 
     // Inner reduce that reduces [k1, k2] to [k1].
+    TF_ASSIGN_OR_RETURN(
+        auto tuple_shape,
+        ShapeUtil::MakeValidatedMaybeTupleShape(inner_reduce_shapes));
     HloInstruction *inner_reduce = reduce->parent()->AddInstruction(
-        HloInstruction::CreateReduce(
-            ShapeUtil::MakeMaybeTupleShape(inner_reduce_shapes),
-            reshaped_padded_inputs, reduce->init_values(), inner_reduce_dims,
-            reduce->to_apply()),
+        HloInstruction::CreateReduce(tuple_shape, reshaped_padded_inputs,
+                                     reduce->init_values(), inner_reduce_dims,
+                                     reduce->to_apply()),
         &reduce->metadata());
     VLOG(1) << "Generated inner reduction: " << inner_reduce->ToString();
 
@@ -359,10 +355,12 @@ class ReductionRewriterVisitor : public DfsHloRewriteVisitor {
           ShapeUtil::DeleteDimension(minor_reduction_dim, input->shape()));
     }
 
+    TF_ASSIGN_OR_RETURN(auto tuple_shape,
+                        ShapeUtil::MakeValidatedMaybeTupleShape(tuple_shapes));
     HloInstruction *inner_reduce =
         hlo->parent()->AddInstruction(HloInstruction::CreateReduce(
-            ShapeUtil::MakeMaybeTupleShape(tuple_shapes), hlo->inputs(),
-            hlo->init_values(), {minor_reduction_dim}, hlo->to_apply()));
+            tuple_shape, hlo->inputs(), hlo->init_values(),
+            {minor_reduction_dim}, hlo->to_apply()));
 
     VLOG(1) << "Inner reduction: " << inner_reduce->ToString();
     std::unique_ptr<HloInstruction> out = HloInstruction::CreateReduce(
@@ -371,7 +369,7 @@ class ReductionRewriterVisitor : public DfsHloRewriteVisitor {
     return ReplaceWithNewInstruction(hlo, std::move(out));
   }
 
-  se::GpuComputeCapability gpu_version_;
+  const se::DeviceDescription &device_description_;
 };
 
 absl::StatusOr<bool> TreeReductionRewriter::Run(
@@ -379,7 +377,7 @@ absl::StatusOr<bool> TreeReductionRewriter::Run(
     const absl::flat_hash_set<absl::string_view> &execution_threads) {
   VLOG(5) << "Rewriter input: " << module->ToString();
   TF_ASSIGN_OR_RETURN(bool changed,
-                      ReductionRewriterVisitor(gpu_version_)
+                      ReductionRewriterVisitor(device_description_)
                           .RunOnModule(module, execution_threads));
   VLOG(5) << "Rewriter output: " << module->ToString();
   return changed;

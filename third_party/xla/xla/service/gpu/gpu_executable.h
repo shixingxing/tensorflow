@@ -20,6 +20,7 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <variant>
 #include <vector>
 
@@ -30,17 +31,16 @@ limitations under the License.
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
-#include "absl/types/variant.h"
+#include "xla/backends/gpu/runtime/annotation.h"
+#include "xla/backends/gpu/runtime/sequential_thunk.h"
+#include "xla/backends/gpu/runtime/thunk.h"
 #include "xla/hlo/ir/hlo_input_output_alias_config.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/executable.h"
 #include "xla/service/gpu/buffer_allocations.h"
+#include "xla/service/gpu/gpu_executable.pb.h"
 #include "xla/service/gpu/ir_emission_utils.h"
-#include "xla/service/gpu/runtime/annotation.h"
-#include "xla/service/gpu/runtime/sequential_thunk.h"
-#include "xla/service/gpu/runtime/thunk.h"
-#include "xla/service/hlo_execution_profile.h"
 #include "xla/service/service_executable_run_options.h"
 #include "xla/service/shaped_buffer.h"
 #include "xla/shape.h"
@@ -77,6 +77,19 @@ class GpuExecutable : public Executable {
     // Whether this output is hinted to alias a parameter (BufferAllocation*
     // would indicate the aliased parameter), and what kind of alias it is.
     std::optional<HloInputOutputAliasConfig::Alias> alias_config;
+
+    OutputInfoProto ToProto() const;
+    static absl::StatusOr<OutputInfo> FromProto(const OutputInfoProto& proto);
+
+    friend bool operator==(const OutputInfo& lhs, const OutputInfo& rhs) {
+      return std::tie(lhs.allocation_index, lhs.passthrough,
+                      lhs.alias_config) ==
+             std::tie(rhs.allocation_index, rhs.passthrough, rhs.alias_config);
+    }
+
+    friend bool operator!=(const OutputInfo& lhs, const OutputInfo& rhs) {
+      return !(lhs == rhs);
+    }
   };
 
   struct Params {
@@ -103,6 +116,14 @@ class GpuExecutable : public Executable {
 
   // This should be called after set_ir_module_string.
   const std::string& ir_module_string() const { return ir_module_string_; }
+
+  const std::string& module_name() const { return module_name_; }
+
+  const xla::Shape& output_shape() const { return output_shape_; }
+
+  const absl::flat_hash_map<ShapeIndex, OutputInfo>& output_info() const {
+    return output_info_;
+  }
 
   // This should be called before ExecuteOnStream.
   void set_ir_module_string(const std::string& ir_module_string) {
@@ -131,13 +152,11 @@ class GpuExecutable : public Executable {
   // doesn't match the compute capability passed to this object's constructor.
   absl::StatusOr<ExecutionOutput> ExecuteAsyncOnStream(
       const ServiceExecutableRunOptions* run_options,
-      std::vector<ExecutionInput> arguments,
-      HloExecutionProfile* hlo_execution_profile) override;
+      std::vector<ExecutionInput> arguments) override;
 
   absl::StatusOr<ScopedShapedBuffer> ExecuteAsyncOnStream(
       const ServiceExecutableRunOptions* run_options,
-      absl::Span<const ShapedBuffer* const> arguments,
-      HloExecutionProfile* hlo_execution_profile) override;
+      absl::Span<const ShapedBuffer* const> arguments) override;
 
   using VariantArguments = std::variant<absl::Span<const ShapedBuffer* const>,
                                         absl::Span<ExecutionInput>>;
@@ -167,9 +186,10 @@ class GpuExecutable : public Executable {
     return buffer_assignment_.get();
   }
 
- private:
-  // Use GpuExecutable::Create() to create an instance.
-  explicit GpuExecutable(Params params);
+  const SequentialThunk& GetThunk() { return *thunks_; }
+
+  absl::Status ExecuteThunks(const BufferAllocations& buffer_allocations,
+                             const ServiceExecutableRunOptions* run_options);
 
   using BufferAllocToDeviceMemoryMap =
       absl::flat_hash_map<BufferAllocation::Index, se::DeviceMemoryBase>;
@@ -186,6 +206,12 @@ class GpuExecutable : public Executable {
   // instead.
   absl::StatusOr<const BufferAllocToDeviceMemoryMap*> ResolveConstantGlobals(
       stream_executor::Stream* stream);
+
+  absl::Status VerboseAllocationError(absl::Status s);
+
+ private:
+  // Use GpuExecutable::Create() to create an instance.
+  explicit GpuExecutable(Params params);
 
   // GpuExecutable check with either AMD's ISA version, or Nvidia's major minor
   // version for compute capability, depending on the hardware.

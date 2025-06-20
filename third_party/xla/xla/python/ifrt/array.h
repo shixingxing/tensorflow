@@ -19,12 +19,13 @@ limitations under the License.
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <string>
-#include <utility>
 #include <vector>
 
 #include "absl/base/attributes.h"
-#include "absl/status/status.h"
+#include "absl/base/macros.h"
+#include "absl/base/nullability.h"
+#include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "llvm/Support/ExtensibleRTTI.h"
 #include "xla/pjrt/pjrt_layout.h"
 #include "xla/python/ifrt/dtype.h"
@@ -38,8 +39,7 @@ namespace xla {
 namespace ifrt {
 
 class Client;
-
-using Layout = ::xla::PjRtLayout;
+class Array;
 
 // Semantics for operations that may copy or move sharded buffers in an array.
 enum class ArrayCopySemantics : int {
@@ -58,6 +58,8 @@ enum class ArrayCopySemantics : int {
   kDonateInput,
 };
 
+using ArrayRef = tsl::RCReference<Array>;
+
 // Represents a single logical array from one or more sharded buffers.
 // Implementations must be thread-safe.
 class Array : public llvm::RTTIExtends<Array, Value> {
@@ -73,21 +75,34 @@ class Array : public llvm::RTTIExtends<Array, Value> {
   virtual DType dtype() const = 0;
   virtual const Shape& shape() const = 0;
   virtual const Sharding& sharding() const = 0;
-  virtual std::shared_ptr<const Sharding> shared_ptr_sharding() const = 0;
+  virtual ShardingRef shared_ptr_sharding() const = 0;
   // The device memory layout for each shard of the Array. All shards are
   // assumed to have the same layout. Cannot be nullptr; implementations should
   // return UNIMPLEMENTED instead.
-  virtual absl::StatusOr<std::unique_ptr<PjRtLayout>> layout() const = 0;
+  virtual absl::StatusOr<std::shared_ptr<const xla::PjRtLayout>> layout()
+      const = 0;
 
   // Breaks an array up into per-device arrays. This is the elimination
   // counterpart of `Client::AssembleArrayFromSingleDeviceArrays()`.
-  virtual absl::StatusOr<std::vector<tsl::RCReference<Array>>>
-  DisassembleIntoSingleDeviceArrays(ArrayCopySemantics semantics) = 0;
+  virtual absl::StatusOr<std::vector<ArrayRef>>
+  DisassembleIntoSingleDeviceArrays(
+      ArrayCopySemantics array_copy_semantics,
+      SingleDeviceShardSemantics single_device_shard_semantics) = 0;
+
+  // TODO(hyeontaek): Replace this API with the version that takes
+  // `SingleDeviceShardSemantics`.
+  ABSL_DEPRECATE_AND_INLINE()
+  absl::StatusOr<std::vector<ArrayRef>> DisassembleIntoSingleDeviceArrays(
+      ArrayCopySemantics semantics) {
+    return DisassembleIntoSingleDeviceArrays(
+        semantics, SingleDeviceShardSemantics::kAddressableShards);
+  }
+
   // Returns a shard of an Array which is fully replicated. This is an
   // optimization so that instead of disassembling into all the shards when
   // the Array is fully replicated, we can just get 1 shard out and create an
   // Array from it.
-  virtual absl::StatusOr<tsl::RCReference<Array>> FullyReplicatedShard(
+  virtual absl::StatusOr<ArrayRef> FullyReplicatedShard(
       ArrayCopySemantics semantics) = 0;
 
   // Fetches the array to host and stores it as unreplicated, unsharded data.
@@ -127,8 +142,7 @@ class Array : public llvm::RTTIExtends<Array, Value> {
 
 // Convenience function to create a list of pointer Arrays from a list of
 // RCReference<Array>s.
-std::vector<Array*> MakeArrayPointerList(
-    absl::Span<const tsl::RCReference<Array>> arrays);
+std::vector<Array*> MakeArrayPointerList(absl::Span<const ArrayRef> arrays);
 
 }  // namespace ifrt
 }  // namespace xla

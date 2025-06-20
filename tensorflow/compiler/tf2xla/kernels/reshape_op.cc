@@ -15,14 +15,15 @@ limitations under the License.
 
 // XLA-specific reshape Op.
 
+#include <cstdint>
 #include <vector>
 
 #include "absl/log/log.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "xla/client/lib/constants.h"
-#include "xla/client/value_inference.h"
-#include "xla/client/xla_builder.h"
+#include "xla/hlo/builder/lib/constants.h"
+#include "xla/hlo/builder/value_inference.h"
+#include "xla/hlo/builder/xla_builder.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
 #include "tensorflow/core/framework/op_kernel.h"
@@ -98,7 +99,8 @@ class ReshapeOp : public XlaOpKernel {
 
       int64_t missing = input_num_elements / product;
       if (!input_has_zero_dim) {
-        if (input_xla_shape->is_static() || input_xla_shape->rank() != 1) {
+        if (input_xla_shape->is_static() ||
+            input_xla_shape->dimensions().size() != 1) {
           OP_REQUIRES(
               ctx, product * missing == input_num_elements,
               errors::InvalidArgument(

@@ -22,7 +22,9 @@ limitations under the License.
 
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
@@ -88,7 +90,7 @@ absl::StatusOr<bool> DotDimensionSorter::Run(
   for (const HloComputation* computation :
        module->MakeNonfusionComputations(execution_threads)) {
     for (HloInstruction* instr : computation->instructions()) {
-      if (instr->opcode() != HloOpcode::kDot) {
+      if (HloPredicateIsNotOp<HloOpcode::kDot>(instr)) {
         continue;
       }
       // TODO(b/265688934): should non-default layouts be expected here at all?

@@ -31,10 +31,10 @@ limitations under the License.
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
-#include "xla/client/lib/comparators.h"
-#include "xla/client/xla_builder.h"
-#include "xla/client/xla_computation.h"
 #include "xla/comparison_util.h"
+#include "xla/hlo/builder/lib/comparators.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "xla/hlo/builder/xla_computation.h"
 #include "xla/hlo/ir/hlo_clone_context.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_module.h"
@@ -46,6 +46,7 @@ limitations under the License.
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/status_macros.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/errors.h"
@@ -390,6 +391,22 @@ absl::StatusOr<HloInstruction*> MakeDotHlo(
       metadata);
 }
 
+absl::StatusOr<HloInstruction*> MakeRaggedDotHlo(
+    HloInstruction* lhs, HloInstruction* rhs, HloInstruction* group_sizes,
+    const RaggedDotDimensionNumbers& dim_numbers,
+    const PrecisionConfig& precision_config,
+    std::optional<PrimitiveType> preferred_element_type) {
+  HloComputation* computation = lhs->parent();
+  CHECK_EQ(computation, rhs->parent());
+  CHECK_EQ(computation, group_sizes->parent());
+  TF_ASSIGN_OR_RETURN(Shape ragged_dot_shape,
+                      ShapeInference::InferRaggedDotOpShape(
+                          lhs->shape(), rhs->shape(), group_sizes->shape(),
+                          dim_numbers, preferred_element_type));
+  return computation->AddInstruction(HloInstruction::CreateRaggedDot(
+      ragged_dot_shape, lhs, rhs, group_sizes, dim_numbers, precision_config));
+}
+
 absl::StatusOr<HloInstruction*> MakeMapHlo(
     absl::Span<HloInstruction* const> operands, HloComputation* map_computation,
     const OpMetadata* metadata) {
@@ -400,7 +417,9 @@ absl::StatusOr<HloInstruction*> MakeMapHlo(
   for (const HloInstruction* operand : operands) {
     CHECK_EQ(computation, operand->parent());
     operand_shapes.push_back(&operand->shape());
-    max_operand_rank = std::max(max_operand_rank, operand->shape().rank());
+    max_operand_rank =
+        std::max(max_operand_rank,
+                 static_cast<int64_t>(operand->shape().dimensions().size()));
   }
   std::vector<int64_t> map_dims(max_operand_rank);
   std::iota(map_dims.begin(), map_dims.end(), 0);
@@ -500,7 +519,7 @@ absl::StatusOr<HloInstruction*> MakeReduceHlo(
     HloOpcode binary_opcode, HloModule* module, const OpMetadata* metadata,
     const FrontendAttributes* frontend_attributes) {
   DCHECK_NE(nullptr, module);
-  std::vector<int64_t> all_dims(operand->shape().rank());
+  std::vector<int64_t> all_dims(operand->shape().dimensions().size());
   std::iota(all_dims.begin(), all_dims.end(), 0);
 
   HloComputation* reduce_computation = MakeBinaryScalarComputation(
@@ -532,8 +551,8 @@ absl::StatusOr<HloInstruction*> MakeReduceHlo(
         operand->shape()));
   }
 
-  auto output_shape = ShapeUtil::MakeMaybeTupleShape(expected_shapes);
-
+  TF_ASSIGN_OR_RETURN(auto output_shape,
+                      ShapeUtil::MakeValidatedMaybeTupleShape(expected_shapes));
   return operands[0]->parent()->AddInstruction(
       HloInstruction::CreateReduce(output_shape, operands, init_values,
                                    dimensions, reduce_computation),
@@ -597,12 +616,22 @@ HloInstruction* MaybeMakeTuple(absl::Span<HloInstruction* const> operands) {
       HloInstruction::CreateTuple(operands));
 }
 
+absl::StatusOr<HloComputation*> XlaComputationToHloComputation(
+    XlaComputation& src_comp, HloModule* dest_module) {
+  TF_ASSIGN_OR_RETURN(ProgramShape program_shape, src_comp.GetProgramShape());
+  HloModuleConfig config(program_shape);
+  TF_ASSIGN_OR_RETURN(auto new_module,
+                      HloModule::CreateFromProto(src_comp.proto(), config));
+  HloCloneContext context(dest_module);
+  return dest_module->DeepCloneComputation(new_module->entry_computation(),
+                                           &context);
+}
+
 absl::StatusOr<HloInstruction*> MakeSortHlo(
     const Shape& sort_shape, absl::Span<HloInstruction* const> operands,
     int64_t dimension_to_sort, bool is_stable, HloComputation::Builder* builder,
     HloModule* module, const OpMetadata* metadata) {
   CHECK(!operands.empty()) << "Sort Hlo requires at least one operand.";
-  HloComputation* compare_computation;
   XlaBuilder b("Sort.Compare");
   if (metadata != nullptr) {
     b.SetOpMetadata(*metadata);
@@ -612,13 +641,8 @@ absl::StatusOr<HloInstruction*> MakeSortHlo(
     operand_types[i] = operands[i]->shape().element_type();
   }
   XlaComputation comparator = CreateScalarLtComputation(operand_types, &b);
-  TF_ASSIGN_OR_RETURN(ProgramShape program_shape, comparator.GetProgramShape());
-  HloModuleConfig config(program_shape);
-  TF_ASSIGN_OR_RETURN(auto new_module,
-                      HloModule::CreateFromProto(comparator.proto(), config));
-  HloCloneContext context(module);
-  compare_computation =
-      module->DeepCloneComputation(new_module->entry_computation(), &context);
+  TF_ASSIGN_OR_RETURN(HloComputation * compare_computation,
+                      XlaComputationToHloComputation(comparator, module));
   return builder->AddInstruction(HloInstruction::CreateSort(
       sort_shape, dimension_to_sort, operands, compare_computation, is_stable));
 }
@@ -628,7 +652,7 @@ absl::StatusOr<HloInstruction*> CollapseFirstNDims(HloInstruction* operand,
   CHECK_GT(n, 0);
 
   const Shape& operand_shape = operand->shape();
-  CHECK_GE(operand_shape.dimensions_size(), n);
+  CHECK_GE(static_cast<int64_t>(operand_shape.dimensions().size()), n);
   int64_t new_shape_leading_bound = 1;
   bool new_shape_leading_is_dynamic = false;
   for (int64_t i = 0; i < n; i++) {
@@ -637,7 +661,7 @@ absl::StatusOr<HloInstruction*> CollapseFirstNDims(HloInstruction* operand,
   }
 
   std::vector<int64_t> new_shape_dims;
-  new_shape_dims.reserve(operand_shape.dimensions_size() - n + 1);
+  new_shape_dims.reserve(operand_shape.dimensions().size() - n + 1);
   new_shape_dims.push_back(new_shape_leading_bound);
 
   std::copy(operand_shape.dimensions().begin() + n,
@@ -645,7 +669,7 @@ absl::StatusOr<HloInstruction*> CollapseFirstNDims(HloInstruction* operand,
             std::back_inserter(new_shape_dims));
 
   std::vector<bool> new_shape_dynamic_dims;
-  new_shape_dynamic_dims.reserve(operand_shape.dimensions_size() - n + 1);
+  new_shape_dynamic_dims.reserve(operand_shape.dimensions().size() - n + 1);
   new_shape_dynamic_dims.push_back(new_shape_leading_is_dynamic);
   std::copy(operand_shape.dynamic_dimensions().begin() + n,
             operand_shape.dynamic_dimensions().end(),
@@ -662,7 +686,7 @@ absl::StatusOr<HloInstruction*> PrependDegenerateDims(HloInstruction* operand,
   CHECK_GT(n, 0);
   std::vector<int64_t> new_shape_dims;
   const Shape& operand_shape = operand->shape();
-  new_shape_dims.reserve(n + operand_shape.dimensions_size());
+  new_shape_dims.reserve(n + operand_shape.dimensions().size());
   new_shape_dims.insert(new_shape_dims.begin(), n, 1);
   absl::c_copy(operand_shape.dimensions(), std::back_inserter(new_shape_dims));
   return MakeReshapeHlo(new_shape_dims, operand);
@@ -670,12 +694,12 @@ absl::StatusOr<HloInstruction*> PrependDegenerateDims(HloInstruction* operand,
 
 absl::StatusOr<HloInstruction*> ExpandFirstDimIntoNDims(
     HloInstruction* operand, absl::Span<const int64_t> expanded_dims) {
-  CHECK_GT(operand->shape().dimensions_size(), 0);
+  CHECK_GT(operand->shape().dimensions().size(), 0);
   CHECK_EQ(operand->shape().dimensions(0), Product(expanded_dims));
 
   std::vector<int64_t> expanded_shape_dim_bounds;
   expanded_shape_dim_bounds.reserve(expanded_dims.size() +
-                                    operand->shape().dimensions_size() - 1);
+                                    operand->shape().dimensions().size() - 1);
   absl::c_copy(expanded_dims, std::back_inserter(expanded_shape_dim_bounds));
   std::copy(operand->shape().dimensions().begin() + 1,
             operand->shape().dimensions().end(),
@@ -701,7 +725,7 @@ absl::StatusOr<HloInstruction*> InsertDegenerateDims(
 
   const Shape& operand_shape = operand->shape();
   int64_t output_shape_rank =
-      operand_shape.dimensions_size() + dims_to_insert.size();
+      operand_shape.dimensions().size() + dims_to_insert.size();
   for (auto dim_to_insert : dims_to_insert) {
     CHECK_LT(dim_to_insert, output_shape_rank);
   }
@@ -731,7 +755,7 @@ absl::StatusOr<HloInstruction*> PadVectorWithZeros(HloInstruction* operand,
                                                    int64_t zeros_to_prepend,
                                                    int64_t zeros_to_append) {
   HloComputation* computation = operand->parent();
-  CHECK_EQ(operand->shape().dimensions_size(), 1);
+  CHECK_EQ(operand->shape().dimensions().size(), 1);
   PaddingConfig padding_config;
   PaddingConfig::PaddingConfigDimension padding_config_dim;
   padding_config_dim.set_edge_padding_low(zeros_to_prepend);
@@ -796,7 +820,7 @@ HloInstruction* CreateDummyOp(HloComputation::Builder* b, const Shape& shape) {
 absl::StatusOr<std::unique_ptr<HloComputation>> CreateComputationWithSignature(
     absl::Span<const Shape* const> domain, const Shape& range,
     absl::string_view name) {
-  HloComputation::Builder b{std::string(name)};
+  HloComputation::Builder b{name};
   int64_t param_idx = 0;
   for (const Shape* param_shape : domain) {
     b.AddInstruction(HloInstruction::CreateParameter(
@@ -815,8 +839,8 @@ HloInstruction* CreateDegenerateRemovingReshape(HloInstruction* hlo,
                                                 const int64_t index_to_remove) {
   Shape input_shape = hlo->shape();
   std::vector<int64_t> dims;
-  dims.reserve(input_shape.rank() - 1);
-  for (int64_t index = 0; index < input_shape.rank(); index++) {
+  dims.reserve(input_shape.dimensions().size() - 1);
+  for (int64_t index = 0; index < input_shape.dimensions().size(); index++) {
     if (index == index_to_remove) {
       continue;
     }
@@ -831,15 +855,15 @@ HloInstruction* CreateDegenerateAddingReshape(HloInstruction* hlo,
                                               const int index_to_add) {
   Shape input_shape = hlo->shape();
   std::vector<int64_t> dims;
-  dims.reserve(input_shape.rank() - 1);
-  for (int64_t index = 0; index < input_shape.rank(); index++) {
+  dims.reserve(input_shape.dimensions().size() - 1);
+  for (int64_t index = 0; index < input_shape.dimensions().size(); index++) {
     if (index == index_to_add) {
       dims.push_back(1);
     }
     int64_t dim_size = input_shape.dimensions(index);
     dims.push_back(dim_size);
   }
-  if (index_to_add == input_shape.rank()) {
+  if (index_to_add == input_shape.dimensions().size()) {
     dims.push_back(1);
   }
   Shape new_shape = ShapeUtil::MakeShape(input_shape.element_type(), dims);
@@ -882,6 +906,18 @@ HloInstruction* ExpandDegenerateReshape(HloInstruction* inst) {
     return degenerate_adding_hlo;
   }
   return nullptr;
+}
+
+absl::StatusOr<HloInstruction*> MakeWithinBounds(HloInstruction* inst,
+                                                 HloInstruction* lower_bound,
+                                                 HloInstruction* upper_bound) {
+  TF_ASSIGN_OR_RETURN(
+      HloInstruction * le,
+      MakeCompareHlo(Comparison::Direction::kLe, lower_bound, inst));
+  TF_ASSIGN_OR_RETURN(
+      HloInstruction * gt,
+      MakeCompareHlo(Comparison::Direction::kGt, upper_bound, inst));
+  return MakeBinaryHlo(HloOpcode::kAnd, le, gt);
 }
 
 }  // namespace xla

@@ -15,7 +15,8 @@ limitations under the License.
 
 #include "xla/service/llvm_ir/alias_analysis.h"
 
-#include <map>
+#include <set>
+#include <vector>
 
 #include "absl/container/flat_hash_set.h"
 #include "llvm/IR/MDBuilder.h"
@@ -34,8 +35,9 @@ namespace llvm_ir {
 
 // Sentry allocation used to represent parameters of the entry computation in
 // alias_scope_metadata_ and noalias_metadata_.
-static const BufferAllocation* kParameterAllocation = new BufferAllocation(
-    /*index=*/-1, /*size=*/0, LogicalBuffer::Color(0));
+static const BufferAllocation* const kParameterAllocation =
+    new BufferAllocation(
+        /*index=*/-1, /*size=*/0, LogicalBuffer::Color(0));
 
 void AliasAnalysis::AddAliasingInformationToIrArray(const HloInstruction& hlo,
                                                     llvm_ir::IrArray* array,

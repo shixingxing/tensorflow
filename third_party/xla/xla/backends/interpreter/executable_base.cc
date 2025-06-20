@@ -15,7 +15,11 @@ limitations under the License.
 
 #include "xla/backends/interpreter/executable_base.h"
 
-#include <type_traits>
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <utility>
 #include <vector>
 
 #include "absl/log/log.h"
@@ -27,7 +31,6 @@ limitations under the License.
 #include "xla/layout_util.h"
 #include "xla/literal.h"
 #include "xla/service/executable.h"
-#include "xla/service/hlo_execution_profile.h"
 #include "xla/service/maybe_owning_device_memory.h"
 #include "xla/service/service_executable_run_options.h"
 #include "xla/service/shaped_buffer.h"
@@ -41,11 +44,11 @@ limitations under the License.
 #include "xla/stream_executor/platform.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
+#include "xla/tsl/platform/env.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/platform/env.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/statusor.h"
 
 namespace xla {
 namespace interpreter {
@@ -57,8 +60,7 @@ InterpreterExecutableBase::InterpreterExecutableBase(
 
 absl::StatusOr<ExecutionOutput> InterpreterExecutableBase::ExecuteAsyncOnStream(
     const ServiceExecutableRunOptions* run_options,
-    std::vector<ExecutionInput> arguments,
-    HloExecutionProfile* hlo_execution_profile) {
+    std::vector<ExecutionInput> arguments) {
   se::Stream* stream = run_options->stream();
   se::StreamExecutor* executor = stream->parent();
   const se::Platform* platform = executor->GetPlatform();
@@ -93,7 +95,7 @@ absl::StatusOr<ExecutionOutput> InterpreterExecutableBase::ExecuteAsyncOnStream(
 
   const HloComputation* computation = module().entry_computation();
   if (computation->num_parameters() != arguments.size()) {
-    return tsl::errors::Internal(
+    return absl::InternalError(
         "Mismatch between argument count and graph parameter count.");
   }
 

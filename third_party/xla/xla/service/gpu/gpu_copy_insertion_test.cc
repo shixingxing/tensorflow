@@ -23,11 +23,13 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
+#include "xla/hlo/testlib/test.h"
+#include "xla/hlo/testlib/test_helpers.h"
 #include "xla/service/copy_insertion.h"
-#include "xla/service/gpu/buffer_sharing.h"
-#include "xla/test.h"
-#include "xla/test_helpers.h"
-#include "xla/tests/hlo_test_base.h"
+#include "xla/service/gpu/alias_info.h"
+#include "xla/service/gpu/gpu_device_info_for_tests.h"
+#include "xla/stream_executor/device_description.h"
 #include "tsl/platform/statusor.h"
 
 namespace xla {
@@ -64,7 +66,18 @@ void ExpectOptionalFalse(std::optional<bool> value) {
   EXPECT_FALSE(*value);
 }
 
-using GpuCopyInsertionTest = HloTestBase;
+class GpuCopyInsertionTest : public HloHardwareIndependentTestBase {
+ public:
+  CopyInsertion CreateCopyInsertion() const {
+    return CopyInsertion(&alias_info_,
+                         /*use_region_based_live_range_analysis=*/0);
+  }
+
+ private:
+  const se::DeviceDescription device_description_{
+      xla::gpu::TestGpuDeviceInfo::CudaOrRocmDeviceInfo()};
+  GpuAliasInfo alias_info_{&device_description_};
+};
 
 // This is some kind of end-to-end test for FusionCanShareBufferHint.
 TEST_F(GpuCopyInsertionTest, DUSBitcastNoCopy) {
@@ -116,8 +129,7 @@ ENTRY main {
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<xla::HloModule> module,
                           ParseAndReturnVerifiedModule(kModuleString));
 
-  CopyInsertion copy_insertion(FusionCanShareBufferHint,
-                               /*use_region_based_live_range_analysis=*/0);
+  CopyInsertion copy_insertion = CreateCopyInsertion();
   ASSERT_IS_OK(copy_insertion.Run(module.get(), {"foobar"}).status());
   VLOG(2) << module->ToString();
   // Copy insertion adds two copies inside the entry computation.
@@ -127,7 +139,19 @@ ENTRY main {
   EXPECT_EQ(CountCopies(*module), 2);
 }
 
-using FusionCanShareBufferHintTest = HloTestBase;
+class FusionCanShareBufferHintTest : public HloHardwareIndependentTestBase {
+ public:
+  std::optional<bool> FusionCanShareBufferHint(const HloInstruction* fusion,
+                                               const HloInstruction* operand,
+                                               const ShapeIndex& user_index) {
+    return alias_info_.MayAlias(operand, {}, fusion, user_index);
+  }
+
+ private:
+  const se::DeviceDescription device_description_{
+      xla::gpu::TestGpuDeviceInfo::CudaOrRocmDeviceInfo()};
+  GpuAliasInfo alias_info_{&device_description_};
+};
 
 TEST_F(FusionCanShareBufferHintTest, BufferCanBeSharedSameShape) {
   const char* const kModuleString = R"(
@@ -990,8 +1014,7 @@ ENTRY main {
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<xla::HloModule> module,
                           ParseAndReturnVerifiedModule(kModuleString));
 
-  CopyInsertion copy_insertion(FusionCanShareBufferHint,
-                               /*use_region_based_live_range_analysis=*/0);
+  CopyInsertion copy_insertion = CreateCopyInsertion();
   ASSERT_IS_OK(copy_insertion.Run(module.get(), {"foobar"}).status());
   VLOG(2) << module->ToString();
   EXPECT_EQ(CountCopies(*module), 0);

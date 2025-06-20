@@ -15,14 +15,12 @@ limitations under the License.
 
 #include "xla/stream_executor/tpu/tpu_platform.h"
 
-#include <cstddef>
 #include <cstdint>
-#include <cstdlib>
-#include <map>
 #include <memory>
 #include <string>
 #include <utility>
 
+#include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
@@ -107,7 +105,7 @@ bool TpuPlatform::ShouldRegisterTpuDeviceToDeviceCopy() {
       ->TpuPlatform_ShouldRegisterTpuDeviceToDeviceCopyFn(platform_);
 }
 
-const tensorflow::tpu::TpuTopologyPtr TpuPlatform::GetTopologyPtr() {
+const SE_TpuTopology* TpuPlatform::GetTopologyPtr() {
   return stream_executor::tpu::ExecutorApiFn()->TpuPlatform_GetTopologyPtrFn(
       platform_);
 }

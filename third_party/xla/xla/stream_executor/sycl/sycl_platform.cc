@@ -29,8 +29,6 @@ limitations under the License.
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
 #include "xla/stream_executor/device_description.h"
-#include "xla/stream_executor/gpu/gpu_driver.h"
-#include "xla/stream_executor/gpu/gpu_executor.h"
 #include "xla/stream_executor/platform.h"
 #include "xla/stream_executor/platform/initialize.h"
 #include "xla/stream_executor/platform_manager.h"
@@ -49,10 +47,7 @@ Platform::Id SyclPlatform::id() const { return sycl::kSyclPlatformId; }
 
 int SyclPlatform::VisibleDeviceCount() const {
   // Initialized in a thread-safe manner the first time this is run.
-  static const int num_devices = [] {
-    if (!GpuDriver::Init().ok()) return -1;
-    return GpuDriver::GetDeviceCount();
-  }();
+  static const int num_devices = [] { return 0; }();
   return num_devices;
 }
 
@@ -60,19 +55,16 @@ const std::string& SyclPlatform::Name() const { return name_; }
 
 absl::StatusOr<std::unique_ptr<DeviceDescription>>
 SyclPlatform::DescriptionForDevice(int ordinal) const {
-  return GpuExecutor::CreateDeviceDescription(ordinal);
+  return absl::UnimplementedError("Unimplemented");
 }
 
 absl::StatusOr<StreamExecutor*> SyclPlatform::ExecutorForDevice(int ordinal) {
-  return executor_cache_.GetOrCreate(
-      ordinal, [this, ordinal]() { return GetUncachedExecutor(ordinal); });
+  return absl::UnimplementedError("Unimplemented");
 }
 
 absl::StatusOr<std::unique_ptr<StreamExecutor>>
-SyclPlatform::GetUncachedExecutor(int ordinal {
-  auto executor = std::make_unique<GpuExecutor>(this, ordinal);
-  TF_RETURN_IF_ERROR(executor->Init());
-  return std::move(executor);
+SyclPlatform::GetUncachedExecutor(int ordinal) {
+  return absl::UnimplementedError("Unimplemented");
 }
 
 }  // namespace gpu

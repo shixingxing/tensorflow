@@ -20,9 +20,11 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
@@ -53,23 +55,23 @@ static constexpr auto Sm90 = Arch::kSm90;        // NOLINT
 //     want to minimize the number of headers included in .cu.cc files as NVCC
 //     does not particularly like templates defined in ABSL.
 //
-extern template struct Adaptor<F32xF32ToF32<Default>>;
-extern template struct DeviceKernel<F32xF32ToF32<Default>>;
+extern template class Adaptor<F32xF32ToF32<Default>>;
+extern template class DeviceKernel<F32xF32ToF32<Default>>;
 
-extern template struct Adaptor<Bf16xBf16ToBf16<Default>>;
-extern template struct DeviceKernel<Bf16xBf16ToBf16<Default>>;
+extern template class Adaptor<Bf16xBf16ToBf16<Default>>;
+extern template class DeviceKernel<Bf16xBf16ToBf16<Default>>;
 
-extern template struct Adaptor<Bf16xBf16ToBf16<Sm80>>;
-extern template struct DeviceKernel<Bf16xBf16ToBf16<Sm80>>;
+extern template class Adaptor<Bf16xBf16ToBf16<Sm80>>;
+extern template class DeviceKernel<Bf16xBf16ToBf16<Sm80>>;
 
-extern template struct Adaptor<Bf16xBf16ToBf16<Sm90>>;
-extern template struct DeviceKernel<Bf16xBf16ToBf16<Sm90>>;
+extern template class Adaptor<Bf16xBf16ToBf16<Sm90>>;
+extern template class DeviceKernel<Bf16xBf16ToBf16<Sm90>>;
 
 //===----------------------------------------------------------------------===//
 // CUTLASS kernel arguments packing
 //===----------------------------------------------------------------------===//
 
-using KernelArgsPacking = se::MultiKernelLoaderSpec::KernelArgsPacking;
+using KernelArgsPacking = se::KernelLoaderSpec::KernelArgsPacking;
 
 template <typename Dim>
 static Dim As(Dim3 dim3) {
@@ -192,96 +194,82 @@ static CustomKernel Load(std::string name, GemmMode mode, int32_t batch_count,
   auto packing = ArgsPacking<Tag>(mode, batch_count, m, n, k, indices, slices,
                                   device.core_count(), adaptor);
 
-  se::MultiKernelLoaderSpec spec(/*arity=*/2, std::move(packing));
-  spec.AddInProcessSymbol(kernel.symbol(), name);
+  se::KernelLoaderSpec spec = se::KernelLoaderSpec::CreateInProcessSymbolSpec(
+      kernel.symbol(), name, /*arity=*/2, std::move(packing));
 
   if (cluster_dim.has_value()) {
     return CustomKernel(std::move(name), std::move(spec), block_dim, thread_dim,
                         *cluster_dim, shared_memory_bytes);
-  } else {
-    return CustomKernel(std::move(name), std::move(spec), block_dim, thread_dim,
-                        shared_memory_bytes);
   }
+
+  return CustomKernel(std::move(name), std::move(spec), block_dim, thread_dim,
+                      shared_memory_bytes);
 }
+
+namespace {
+std::vector<CustomKernel> GetF32xBF16ToF32Kernels(
+    std::string name, int32_t m, int32_t n, int32_t k,
+    const ArgsIndices& indices, const DynamicSliceIndices& slices,
+    const se::DeviceDescription& device) {
+  std::vector<CustomKernel> kernels{Load<F32xBf16ToF32<Default>>(
+      name, GemmMode::kGemm, 1, m, n, k, indices, slices, device)};
+  if (k == 32 || k == 64) {
+    kernels.push_back(Load<F32xBf16ToF32<Default>>(
+        name, GemmMode::kGemmSplitKParallel,
+        /*batch_count=*/16, m, n, k, indices, slices, device));
+  }
+  return kernels;
+}
+
+std::vector<CustomKernel> GetBF16xS8ToF32Kernels(
+    std::string name, int32_t m, int32_t n, int32_t k,
+    const ArgsIndices& indices, const DynamicSliceIndices& slices,
+    const se::DeviceDescription& device) {
+  std::vector<CustomKernel> kernels{Load<Bf16xS8ToF32<Default>>(
+      name, GemmMode::kGemm, 1, m, n, k, indices, slices, device)};
+  if (k == 64 || k == 128) {
+    kernels.push_back(Load<Bf16xS8ToF32<Default>>(
+        name, GemmMode::kGemmSplitKParallel,
+        /*batch_count=*/16, m, n, k, indices, slices, device));
+  }
+  return kernels;
+}
+}  // namespace
 
 absl::StatusOr<std::vector<CustomKernel>> GetCutlassGemmKernels(
     std::string name, PrimitiveType dot_type, PrimitiveType lhs_type,
     PrimitiveType rhs_type, int32_t m, int32_t n, int32_t k,
     const ArgsIndices& indices, const DynamicSliceIndices& slices,
     const se::DeviceDescription& device) {
-  auto& cuda_cc =
-      std::get<se::CudaComputeCapability>(device.gpu_compute_capability());
+  // Lookup table for supported kernels.
+  // LHS_TYPE, RHS_TYPE, DOT_TYPE -> [kernel]
+  absl::flat_hash_map<std::tuple<PrimitiveType, PrimitiveType, PrimitiveType>,
+                      std::vector<CustomKernel>>
+      kernels = {
+          {{BF16, BF16, BF16},
+           {Load<Bf16xBf16ToBf16<Default>>(name, GemmMode::kGemm, 1, m, n, k,
+                                           indices, slices, device)}},
+          {{BF16, BF16, F32},
+           {Load<Bf16xBf16ToF32<Default>>(name, GemmMode::kGemm, 1, m, n, k,
+                                          indices, slices, device)}},
+          {{F32, BF16, F32},
+           GetF32xBF16ToF32Kernels(name, m, n, k, indices, slices, device)},
+          {{BF16, S8, F32},
+           GetBF16xS8ToF32Kernels(name, m, n, k, indices, slices, device)},
+          {{F32, F32, F32},
+           {Load<F32xF32ToF32<Default>>(name, GemmMode::kGemm, 1, m, n, k,
+                                        indices, slices, device)}}};
 
-  if (dot_type == PrimitiveType::F32 && lhs_type == PrimitiveType::F32 &&
-      rhs_type == PrimitiveType::F32) {
-    return {{Load<F32xF32ToF32<Default>>(std::move(name), GemmMode::kGemm,
-                                         /*batch_count=*/1, m, n, k, indices,
-                                         slices, device)}};
+  auto loaded_kernels = kernels.find({lhs_type, rhs_type, dot_type});
+  if (loaded_kernels != kernels.end()) {
+    return loaded_kernels->second;
+  } else {
+    std::string kernel_name = PrimitiveType_Name(lhs_type) + "x" +
+                              PrimitiveType_Name(rhs_type) + "To" +
+                              PrimitiveType_Name(dot_type);
+    return absl::InvalidArgumentError(absl::StrCat(
+        "Unsupported CUTLASS gemm data type for kernel: ", kernel_name));
   }
-
-  if (dot_type == PrimitiveType::BF16 && lhs_type == PrimitiveType::BF16 &&
-      rhs_type == PrimitiveType::BF16) {
-#if CUDA_VERSION >= 12000
-      if (cuda_cc.IsAtLeastHopper()) {
-        return {{Load<Bf16xBf16ToBf16<Sm90>>(std::move(name), GemmMode::kGemm,
-                                             /*batch_count=*/1, m, n, k,
-                                             indices, slices, device)}};
-      }
-#endif
-      if (cuda_cc.IsAtLeastAmpere()) {
-        return {{Load<Bf16xBf16ToBf16<Default>>(
-            std::move(name), GemmMode::kGemm, /*batch_count=*/1, m, n, k,
-            indices, slices, device)}};
-      }
-      return {{Load<Bf16xBf16ToBf16<Default>>(std::move(name), GemmMode::kGemm,
-                                              /*batch_count=*/1, m, n, k,
-                                              indices, slices, device)}};
-  }
-
-  if (dot_type == PrimitiveType::F32 && lhs_type == PrimitiveType::BF16 &&
-      rhs_type == PrimitiveType::BF16) {
-    return {{Load<Bf16xBf16ToF32<Default>>(std::move(name), GemmMode::kGemm,
-                                           /*batch_count=*/1, m, n, k, indices,
-                                           slices, device)}};
-  }
-
-  if (dot_type == PrimitiveType::F32 && lhs_type == PrimitiveType::BF16 &&
-      rhs_type == PrimitiveType::F32) {
-    return {{Load<Bf16xF32ToF32<Default>>(name, GemmMode::kGemm,
-                                          /*batch_count=*/1, m, n, k, indices,
-                                          slices, device),
-             Load<Bf16xF32ToF32<Default>>(name, GemmMode::kGemmSplitKParallel,
-                                          /*batch_count=*/16, m, n, k, indices,
-                                          slices, device)}};
-  }
-
-  if (dot_type == PrimitiveType::F32 && lhs_type == PrimitiveType::F32 &&
-      rhs_type == PrimitiveType::BF16) {
-    return {{Load<F32xBf16ToF32<Default>>(name, GemmMode::kGemm,
-                                          /*batch_count=*/1, m, n, k, indices,
-                                          slices, device),
-             Load<F32xBf16ToF32<Default>>(name, GemmMode::kGemmSplitKParallel,
-                                          /*batch_count=*/16, m, n, k, indices,
-                                          slices, device)}};
-  }
-
-  if (dot_type == PrimitiveType::F32 && lhs_type == PrimitiveType::BF16 &&
-      rhs_type == PrimitiveType::S8) {
-    return {{
-        Load<Bf16xS8ToF32<Default>>(name, GemmMode::kGemm,
-                                    /*batch_count=*/1, m, n, k, indices, slices,
-                                    device),
-        Load<Bf16xS8ToF32<Default>>(name, GemmMode::kGemmSplitKParallel,
-                                    /*batch_count=*/16, m, n, k, indices,
-                                    slices, device),
-    }};
-  }
-
-  std::string kernel_name = PrimitiveType_Name(lhs_type) + "x" +
-                            PrimitiveType_Name(rhs_type) + "To" +
-                            PrimitiveType_Name(dot_type);
-  return absl::InvalidArgumentError(absl::StrCat(
-      "Unsupported CUTLASS gemm data type for kernel: ", kernel_name));
 }
 
 absl::StatusOr<CustomKernel> LoadCutlassGemmKernel(

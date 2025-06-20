@@ -18,17 +18,16 @@ limitations under the License.
 #include <cstddef>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <utility>
 
 #include "absl/strings/str_format.h"
+#include "absl/strings/string_view.h"
 #include "xla/stream_executor/kernel_spec.h"
 #include "xla/stream_executor/launch_dim.h"
 
 namespace xla::gpu {
 
-CustomKernel::CustomKernel(std::string name,
-                           se::MultiKernelLoaderSpec kernel_spec,
+CustomKernel::CustomKernel(std::string name, se::KernelLoaderSpec kernel_spec,
                            se::BlockDim block_dims, se::ThreadDim thread_dims,
                            size_t shared_memory_bytes)
     : name_(std::move(name)),
@@ -38,8 +37,7 @@ CustomKernel::CustomKernel(std::string name,
       cluster_dims_(std::nullopt),
       shared_memory_bytes_(shared_memory_bytes) {}
 
-CustomKernel::CustomKernel(std::string name,
-                           se::MultiKernelLoaderSpec kernel_spec,
+CustomKernel::CustomKernel(std::string name, se::KernelLoaderSpec kernel_spec,
                            se::BlockDim block_dims, se::ThreadDim thread_dims,
                            se::ClusterDim cluster_dims,
                            size_t shared_memory_bytes)
@@ -50,9 +48,9 @@ CustomKernel::CustomKernel(std::string name,
       cluster_dims_(cluster_dims),
       shared_memory_bytes_(shared_memory_bytes) {}
 
-std::string_view CustomKernel::name() const { return name_; }
+absl::string_view CustomKernel::name() const { return name_; }
 
-const se::MultiKernelLoaderSpec& CustomKernel::kernel_spec() const {
+const se::KernelLoaderSpec& CustomKernel::kernel_spec() const {
   return kernel_spec_;
 }
 

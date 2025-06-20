@@ -15,34 +15,56 @@ limitations under the License.
 
 #include "xla/service/gpu/ir_emission_utils.h"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
 #include "absl/container/inlined_vector.h"
 #include "absl/strings/str_cat.h"
-#include "xla/hlo/ir/backend_config.h"
+#include "absl/strings/string_view.h"
+#include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_module.h"
+#include "xla/hlo/utils/hlo_traversal.h"
 #include "xla/literal.h"
 #include "xla/literal_util.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/gpu/backend_configs.pb.h"
-#include "xla/service/gpu/hlo_traversal.h"
+#include "xla/service/gpu/ir_emission_utils.pb.h"
+#include "xla/service/hlo_runner.h"
+#include "xla/service/platform_util.h"
 #include "xla/shape_util.h"
-#include "xla/tests/hlo_test_base.h"
+#include "xla/tests/hlo_runner_agnostic_test_base.h"
+#include "xla/tsl/platform/status_matchers.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/types.h"
-#include "tsl/platform/status_matchers.h"
-#include "tsl/platform/statusor.h"
-#include "tsl/platform/test.h"
 
 namespace xla {
 namespace gpu {
 
+using ::testing::ElementsAre;
+using ::testing::ElementsAreArray;
+using ::testing::SizeIs;
 using ::tsl::testing::IsOkAndHolds;
 
-using IrEmissionUtilsTest = HloTestBase;
+class IrEmissionUtilsTest : public HloRunnerAgnosticTestBase {
+ public:
+  IrEmissionUtilsTest()
+      : HloRunnerAgnosticTestBase(
+            std::make_unique<HloRunner>(*PlatformUtil::GetDefaultPlatform())) {}
+
+  TransposeSpec GetTransposeSpecFromRoot(absl::string_view hlo_text) {
+    auto module = ParseAndReturnVerifiedModule(hlo_text).value();
+    auto* root = module->entry_computation()->root_instruction();
+    return GetTransposeSpec(Cast<HloTransposeInstruction>(root));
+  }
+};
+
 using InlinedVector = absl::InlinedVector<int64_t, 3>;
 
 TEST_F(IrEmissionUtilsTest, FindTiledLogicalTranspose) {
@@ -56,9 +78,6 @@ ENTRY entry {
 )";
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnVerifiedModule(hlo));
-  auto& debug_options = module->mutable_config().mutable_debug_options();
-  debug_options.set_xla_gpu_mlir_emitter_level(3);
-
   HloInstruction* tr = module->entry_computation()->root_instruction();
 
   auto result = GetDescriptionForTiledTransposeEmitter(*tr);
@@ -79,9 +98,6 @@ ENTRY entry {
 )";
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnVerifiedModule(hlo));
-  auto& debug_options = module->mutable_config().mutable_debug_options();
-  debug_options.set_xla_gpu_mlir_emitter_level(3);
-
   HloInstruction* tr = module->entry_computation()->root_instruction();
 
   auto result = GetDescriptionForTiledTransposeEmitter(*tr);
@@ -102,9 +118,6 @@ ENTRY entry {
 )";
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnVerifiedModule(hlo));
-  auto& debug_options = module->mutable_config().mutable_debug_options();
-  debug_options.set_xla_gpu_mlir_emitter_level(3);
-
   HloInstruction* tr = module->entry_computation()->root_instruction();
 
   auto result = GetDescriptionForTiledTransposeEmitter(*tr);
@@ -122,9 +135,6 @@ ENTRY entry {
 )";
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnVerifiedModule(hlo));
-  auto& debug_options = module->mutable_config().mutable_debug_options();
-  debug_options.set_xla_gpu_mlir_emitter_level(3);
-
   HloInstruction* tr = module->entry_computation()->root_instruction();
 
   auto result = GetDescriptionForTiledTransposeEmitter(*tr);
@@ -145,9 +155,6 @@ ENTRY entry {
 )";
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnVerifiedModule(hlo));
-  auto& debug_options = module->mutable_config().mutable_debug_options();
-  debug_options.set_xla_gpu_mlir_emitter_level(3);
-
   HloInstruction* tr = module->entry_computation()->root_instruction();
 
   auto result = GetDescriptionForTiledTransposeEmitter(*tr);
@@ -155,49 +162,6 @@ ENTRY entry {
   EXPECT_EQ(result->instr, tr);
   EXPECT_EQ(result->dimensions, InlinedVector({48, 34, 32, 33}));
   EXPECT_EQ(result->permutation, InlinedVector({1, 3, 2, 0}));
-}
-
-TEST_F(IrEmissionUtilsTest, FindTiled102Transpose) {
-  const char* hlo = R"(
-HloModule module
-
-ENTRY entry {
-  p = s16[32,48,4]{2,1,0} parameter(0)
-  ROOT t = s16[32,48,4]{2,0,1} copy(p)
-}
-)";
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
-                          ParseAndReturnVerifiedModule(hlo));
-  auto& debug_options = module->mutable_config().mutable_debug_options();
-  debug_options.set_xla_gpu_mlir_emitter_level(3);
-
-  HloInstruction* tr = module->entry_computation()->root_instruction();
-
-  auto result = GetDescriptionForTiledTransposeEmitter(*tr);
-  EXPECT_TRUE(result.has_value());
-  EXPECT_EQ(result->instr, tr);
-  EXPECT_EQ(result->dimensions, InlinedVector({48, 32, 4}));
-  EXPECT_EQ(result->permutation, InlinedVector({1, 0, 2}));
-}
-
-TEST_F(IrEmissionUtilsTest, FindTiled102TransposeTooMuchMemoryRequired) {
-  const char* hlo = R"(
-HloModule module
-
-ENTRY entry {
-  p = s8[32,48,9]{2,1,0} parameter(0)
-  ROOT t = s8[32,48,9]{2,0,1} copy(p)
-}
-)";
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
-                          ParseAndReturnVerifiedModule(hlo));
-  auto& debug_options = module->mutable_config().mutable_debug_options();
-  debug_options.set_xla_gpu_mlir_emitter_level(3);
-
-  HloInstruction* tr = module->entry_computation()->root_instruction();
-
-  auto result = GetDescriptionForTiledTransposeEmitter(*tr);
-  EXPECT_FALSE(result.has_value());
 }
 
 TEST_F(IrEmissionUtilsTest, FindAnyTiledTranspose) {
@@ -526,40 +490,6 @@ ENTRY entry {
             transpose);
 }
 
-TEST_F(IrEmissionUtilsTest, FindNonTrivialCopyHeroInsideFusion) {
-  const char* hlo = R"(
-HloModule module
-
-f {
-  p0 = f32[100,200,300]{2,1,0} parameter(0)
-  t = f32[100,200,300]{0,1,2} copy(p0)
-  ROOT add = f32[100,200,300]{0,1,2} add(t, t)
-}
-
-ENTRY entry {
-  p0 = f32[100,200,300]{2,1,0} parameter(0)
-  p1 = f32[100,200,300]{0,1,2} parameter(1)
-  fusion = f32[100,200,300]{0,1,2} fusion(p0), kind=kLoop, calls=f
-  ROOT add = f32[100,200,300]{0,1,2} add(p1, fusion)
-}
-)";
-
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
-                          ParseAndReturnVerifiedModule(hlo));
-
-  HloInstruction* r = module->entry_computation()->root_instruction();
-  HloInstruction* copy = module->GetComputationWithName("f")
-                             ->parameter_instruction(0)
-                             ->users()
-                             .front();
-  HloInstruction* fusion =
-      module->entry_computation()->GetInstructionWithName("fusion");
-  auto fusion_adaptor = HloFusionAdaptor::ForProducerConsumer(fusion, r);
-  EXPECT_EQ(&FindNonTrivialHero(HloInstructionAdaptor(*r, fusion_adaptor.get()))
-                 .instruction(),
-            copy);
-}
-
 TEST_F(IrEmissionUtilsTest, TransposeReachableViaTrivialAndNontrivialOps) {
   const char* hlo = R"(
 HloModule module
@@ -588,33 +518,6 @@ ENTRY main {
   EXPECT_EQ(&FindNonTrivialHero(*r), r);
 }
 
-TEST_F(IrEmissionUtilsTest, FindTiledTransposeOneSwapDimIsSmall) {
-  const char* hlo = R"(
-HloModule module
-
-fusion {
-  p = f32[100,11,12,8]{3,2,1,0} parameter(0)
-  ROOT c = f32[100,11,12,8]{1,0,2,3} copy(p)
-}
-
-ENTRY main {
-  param = f32[100,11,12,8]{3,2,1,0} parameter(0)
-  ROOT fusion = f32[100,11,12,8]{1,0,2,3} fusion(param), kind=kInput, calls=fusion
-}
-)";
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
-                          ParseAndReturnVerifiedModule(hlo));
-
-  HloInstruction* copy =
-      module->entry_computation()->root_instruction()->fused_expression_root();
-  auto result =
-      GetDescriptionForTiledTransposeEmitter(FindNonTrivialHero(*copy));
-  EXPECT_TRUE(result.has_value());
-  EXPECT_EQ(result->instr, copy);
-  EXPECT_EQ(result->dimensions, InlinedVector({8, 12, 1100}));
-  EXPECT_EQ(result->permutation, InlinedVector({2, 1, 0}));
-}
-
 TEST_F(IrEmissionUtilsTest, FindTiledLogicalTransposeOneSwapDimIsSmall) {
   const char* hlo = R"(
 HloModule module
@@ -638,33 +541,6 @@ ENTRY main {
   EXPECT_TRUE(result.has_value());
   EXPECT_EQ(result->instr, tr);
   EXPECT_EQ(result->dimensions, InlinedVector({8, 12, 1100}));
-  EXPECT_EQ(result->permutation, InlinedVector({2, 1, 0}));
-}
-
-TEST_F(IrEmissionUtilsTest, FindTiledTransposeOtherSwapDimIsSmall) {
-  const char* hlo = R"(
-HloModule module
-
-fusion {
-  p = f32[8,12,100,11]{3,2,1,0} parameter(0)
-  ROOT c = f32[8,12,100,11]{0,1,3,2} copy(p)
-}
-
-ENTRY main {
-  param = f32[8,12,100,11]{3,2,1,0} parameter(0)
-  ROOT fusion = f32[8,12,100,11]{0,1,3,2} fusion(param), kind=kInput, calls=fusion
-}
-)";
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
-                          ParseAndReturnVerifiedModule(hlo));
-
-  HloInstruction* copy =
-      module->entry_computation()->root_instruction()->fused_expression_root();
-  auto result =
-      GetDescriptionForTiledTransposeEmitter(FindNonTrivialHero(*copy));
-  EXPECT_TRUE(result.has_value());
-  EXPECT_EQ(result->instr, copy);
-  EXPECT_EQ(result->dimensions, InlinedVector({1100, 12, 8}));
   EXPECT_EQ(result->permutation, InlinedVector({2, 1, 0}));
 }
 
@@ -789,7 +665,7 @@ TEST_F(IrEmissionUtilsTest, LiteralToAttrToXlaFormat) {
 
     TF_ASSERT_OK_AND_ASSIGN(DenseDataIntermediate data,
                             LiteralToXlaFormat(literal));
-    EXPECT_EQ(data.span(), std::vector<uint8_t>({0x01, 0x23, 0x45}));
+    EXPECT_EQ(data.span(), std::vector<uint8_t>({0x10, 0x32, 0x54}));
     EXPECT_NE(reinterpret_cast<const void*>(data.span().data()),
               literal.untyped_data());
   }
@@ -802,7 +678,7 @@ TEST_F(IrEmissionUtilsTest, LiteralToAttrToXlaFormat) {
     TF_ASSERT_OK_AND_ASSIGN(DenseDataIntermediate data,
                             LiteralToXlaFormat(literal));
     EXPECT_EQ(data.span(),
-              std::vector<uint8_t>({0x01, 0x23, 0x45, 0x67, 0x80}));
+              std::vector<uint8_t>({0x10, 0x32, 0x54, 0x76, 0x08}));
     EXPECT_NE(reinterpret_cast<const void*>(data.span().data()),
               literal.untyped_data());
   }
@@ -1018,6 +894,49 @@ ENTRY main {
 
 TEST_F(
     IrEmissionUtilsTest,
+    CanEmitFusedDynamicUpdateSliceInPlaceForGpu_HandlesMultiOutputFusionSharedParameter) {  // NOLINT
+  const char* hlo = R"(
+HloModule MultipleInplaceDus, is_scheduled=true, input_output_alias={ {0}: (0, {}), {1}: (2, {}) }
+
+fused_computation {
+  p0 = bf16[10,11,12] parameter(0)
+  p1 = bf16[1,11,12] parameter(1)
+  p2 = bf16[1,11,12] parameter(2)
+  p3 = s32[] parameter(3)
+  c0 = s32[] constant(0)
+  cmp = pred[] compare(p3, c0), direction=EQ
+  broadcast = pred[1,11,12] broadcast(cmp), dimensions={}
+  select = bf16[1,11,12] select(broadcast, p1, p2)
+  dus0 = bf16[10,11,12] dynamic-update-slice(p0, select, c0, c0, c0)
+  dus1 = bf16[10,11,12] dynamic-update-slice(p0, select, c0, c0, c0)
+  ROOT tuple = (bf16[10,11,12], bf16[10,11,12]) tuple(dus0, dus1)
+}
+
+ENTRY main {
+  p0 = bf16[10,11,12] parameter(0)
+  p1 = bf16[1,11,12] parameter(1)
+  p2 = bf16[1,11,12] parameter(2)
+  p3 = s32[] parameter(3)
+  ROOT fusion_root_multiple = (bf16[10,11,12], bf16[10,11,12]) fusion(p0, p1, p2, p3), kind=kLoop, calls=fused_computation
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(hlo));
+  auto fusion = module->entry_computation()->root_instruction();
+  BufferAllocation alloc(/*index=*/0, /*size=*/1024, /*color=*/0);
+  BufferAllocation::Slice slice0(&alloc, 0, 10);
+  auto adaptor = HloFusionAdaptor::ForInstruction(fusion);
+  EXPECT_THAT(CanEmitFusedDynamicUpdateSliceInPlaceForGpu(
+                  *adaptor,
+                  [&slice0](const HloInstruction*, const ShapeIndex&) {
+                    return slice0;
+                  },
+                  fusion),
+              IsOkAndHolds(false));
+}
+
+TEST_F(
+    IrEmissionUtilsTest,
     CanEmitFusedDynamicUpdateSliceInPlaceForGpu_HandlesMultiOutputFusionWithTransposeBitcasts) {  // NOLINT
   const char* hlo = R"(
 HloModule MultipleInplaceDusWithTransposeBitcastToTheRoot, is_scheduled=true, input_output_alias={ {0}: (0, {}), {1}: (2, {}) }
@@ -1211,14 +1130,6 @@ TEST_F(IrEmissionUtilsTest, ProtoFingerprintIsDeterministic) {
   EXPECT_EQ(fingerprint, kTestProtoFingerprint);
 }
 
-TEST_F(IrEmissionUtilsTest, BackendConfigFingerprintIsDeterministic) {
-  BackendConfigWrapper wrapper(CreateTestProto());
-  TF_ASSERT_OK_AND_ASSIGN(
-      std::string fingerprint,
-      GetBackendConfigFingerprint<GpuBackendConfig>(wrapper));
-  EXPECT_EQ(fingerprint, kTestProtoFingerprint);
-}
-
 TEST_F(IrEmissionUtilsTest,
        InstructionFingerprintWithBackendConfigIsDeterministic) {
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
@@ -1233,6 +1144,418 @@ ENTRY e {
             absl::StrCat("u8[0]{0} custom-call(), custom_call_target=\"\", "
                          "backend_config_fingerprint=",
                          kTestProtoFingerprint));
+}
+
+constexpr absl::string_view kWhileLoopTestModule = R"(
+    plus_one {
+      p0 = s32[] parameter(0)
+      p1 = s32[] parameter(1)
+      c1 = s32[] constant(0)
+      sum = s32[] add(p0, c1)
+      ROOT tuple = (s32[], s32[]) tuple(sum, p1)
+    }
+    identity2 {
+      ROOT p0 = s32[] parameter(0)
+    }
+
+    remainder {
+      p0 = s32[] parameter(0)
+      c4 = s32[] constant(4)
+      ROOT remainder = s32[] remainder(p0, c4)
+    }
+
+    call_body {
+      p0 = s32[] parameter(0)
+      p1 = s32[] parameter(1)
+      p2 = s32[] parameter(2)
+      sum = s32[] add(p0, p2)
+      called_fusion = (s32[], s32[]) fusion(p1, sum), kind=kLoop, calls=plus_one
+      ROOT gte = s32[] get-tuple-element(called_fusion), index=0
+    }
+
+    add_values {
+      p0 = s32[] parameter(0)
+      p1 = s32[] parameter(1)
+      ROOT sum = s32[] add(p0, p1)
+    }
+
+    while_body {
+      p0 = (s32[], s32[]) parameter(0)
+      ivar = s32[] get-tuple-element(p0), index=0
+      ivar_copy = s32[] copy(ivar)
+
+      side_effect = s32[] custom-call(), custom_call_target=""
+
+      derived = s32[] fusion(ivar_copy), kind=kLoop, calls=remainder
+      call = s32[] call(side_effect, derived, ivar), to_apply=call_body
+
+      // `derived_with_invalid_dep` and `not_functionally_dependent` are not, because
+      // they have a custom call in their transitive dependencies.
+      derived_with_invalid_dep = s32[] fusion(ivar_copy, side_effect), kind=kLoop,
+        calls=add_values
+      not_functionally_dependent = s32[] fusion(derived_with_invalid_dep),
+        kind=kLoop, calls=identity2
+
+      c1 = s32[] constant(1)
+      next_ivar = s32[] add(ivar_copy, c1)
+      use = s32[] add(call, not_functionally_dependent)
+
+      ROOT result = (s32[], s32[]) tuple(next_ivar, use)
+    }
+
+    compare {
+      p0 = s32[] parameter(0)
+      c5 = s32[] constant(5)
+      ROOT cmp = pred[] compare(p0, c5), direction=LT
+    }
+
+    condition {
+      p0 = (s32[], s32[]) parameter(0)
+      ivar = s32[] get-tuple-element(p0), index=0
+      ROOT cmp = pred[] fusion(ivar), kind=kLoop, calls=compare
+    }
+
+    ENTRY main {
+      c0 = s32[] constant(0)
+      tuple = (s32[], s32[]) tuple(c0, c0)
+      ROOT while = (s32[], s32[]) while(tuple),
+          condition=condition, body=while_body,
+          backend_config={"known_induction_variable":{"tuple_index":"0"}}
+    }
+)";
+
+TEST_F(IrEmissionUtilsTest, ResolveWhileLoopDependency) {
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(kWhileLoopTestModule));
+
+  HloComputation* while_body = module->GetComputationWithName("while_body");
+  HloComputation* plus_one = module->GetComputationWithName("plus_one");
+  HloComputation* call_body = module->GetComputationWithName("call_body");
+
+  const HloInstruction* loop = module->entry_computation()->root_instruction();
+  auto result = ResolveFunctionalDependencyOnInductionVariable(
+      plus_one->GetInstructionWithName("sum"));
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->loop, loop);
+  EXPECT_EQ(result->induction_var, while_body->GetInstructionWithName("ivar"));
+
+  EXPECT_THAT(result->required_parameters, SizeIs(2));
+  EXPECT_THAT(result->required_parameters[plus_one], ElementsAre(true, false));
+  EXPECT_THAT(result->required_parameters[call_body],
+              ElementsAre(false, true, false));
+}
+
+TEST_F(IrEmissionUtilsTest,
+       ResolveWhileLoopDependencyUnknownInductionVariable) {
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(kWhileLoopTestModule));
+
+  HloInstruction* loop = module->entry_computation()->root_instruction();
+  loop->clear_backend_config();
+  auto result = ResolveFunctionalDependencyOnInductionVariable(
+      module->GetComputationWithName("plus_one")->root_instruction());
+
+  ASSERT_FALSE(result.has_value());
+}
+
+TEST_F(IrEmissionUtilsTest, ResolveWhileLoopDependencySideEffect) {
+  // Verifies that we detect `not_functionally_dependent` depends on an
+  // instruction that has a side effect.
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(kWhileLoopTestModule));
+
+  auto* while_body = module->GetComputationWithName("while_body");
+  const HloInstruction* called_fusion =
+      while_body->GetInstructionWithName("not_functionally_dependent");
+  auto result = ResolveFunctionalDependencyOnInductionVariable(
+      called_fusion->called_computations()[0]->root_instruction());
+
+  ASSERT_FALSE(result.has_value());
+}
+
+TEST_F(IrEmissionUtilsTest, InternalTuple) {
+  // Verifies that we can resolve dependencies that involve internal tuples.
+  constexpr absl::string_view kHlo = R"(
+      add12 {
+        p0 = s32[] parameter(0)
+        c1 = s32[] constant(1)
+        c2 = s32[] constant(2)
+        p0p1 = s32[] add(p0, c1)
+        p0p2 = s32[] add(p0, c2)
+        ROOT tuple = (s32[], s32[]) tuple(p0p1, p0p2)
+      }
+
+      call_body {
+        p0 = s32[] parameter(0)
+        ROOT sum = s32[] add(p0, p0)
+      }
+
+      while_body {
+        p0 = (s32[], s32[]) parameter(0)
+        ivar = s32[] get-tuple-element(p0), index=0
+        ivar_copy = s32[] copy(ivar)
+
+        side_effect = s32[] custom-call(), custom_call_target=""
+
+        derived = (s32[], s32[]) fusion(ivar_copy), kind=kLoop, calls=add12
+        val = get-tuple-element(derived), index=1
+
+        c1 = s32[] constant(1)
+        next_ivar = s32[] add(ivar_copy, c1)
+        use = s32[] call(val), to_apply=call_body
+
+        ROOT result = (s32[], s32[]) tuple(next_ivar, use)
+      }
+
+      condition {
+        p0 = (s32[], s32[]) parameter(0)
+        ivar = s32[] get-tuple-element(p0), index=0
+        c5 = s32[] constant(5)
+        ROOT cmp = pred[] compare(ivar, c5), direction=LT
+      }
+
+      ENTRY main {
+        c0 = s32[] constant(0)
+        tuple = (s32[], s32[]) tuple(c0, c0)
+        ROOT while = (s32[], s32[]) while(tuple),
+            condition=condition, body=while_body,
+            backend_config={"known_induction_variable":{"tuple_index":"0"}}
+      }
+  )";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(kHlo));
+  auto result = ResolveFunctionalDependencyOnInductionVariable(
+      module->GetComputationWithName("call_body")->root_instruction());
+
+  ASSERT_TRUE(result.has_value());
+
+  HloComputation* while_body = module->GetComputationWithName("while_body");
+  const HloComputation* call_body = module->GetComputationWithName("call_body");
+  const HloInstruction* loop = module->entry_computation()->root_instruction();
+
+  EXPECT_EQ(result->loop, loop);
+  EXPECT_EQ(result->induction_var, while_body->GetInstructionWithName("ivar"));
+
+  EXPECT_THAT(result->required_parameters, SizeIs(1));
+  EXPECT_THAT(result->required_parameters[call_body], ElementsAre(true));
+}
+
+TEST_F(IrEmissionUtilsTest, NonInductionVariableLoopCarriedVariable) {
+  // Verifies that we detect when there is a dependency on a non-induction
+  // variable loop-carried variable.
+  constexpr absl::string_view kHlo = R"(
+      while_body {
+        p0 = (s32[], s32[]) parameter(0)
+        ivar = s32[] get-tuple-element(p0), index=0
+        lcv = s32[] get-tuple-element(p0), index=1
+
+        c1 = s32[] constant(1)
+        next_ivar = s32[] add(ivar, c1)
+        next_lcv = s32[] add(ivar, lcv)
+
+        ROOT result = (s32[], s32[]) tuple(next_ivar, next_lcv)
+      }
+
+      condition {
+        p0 = (s32[], s32[]) parameter(0)
+        ivar = s32[] get-tuple-element(p0), index=0
+        c5 = s32[] constant(5)
+        ROOT cmp = pred[] compare(ivar, c5), direction=LT
+      }
+
+      ENTRY main {
+        c0 = s32[] constant(0)
+        tuple = (s32[], s32[]) tuple(c0, c0)
+        ROOT while = (s32[], s32[]) while(tuple),
+            condition=condition, body=while_body,
+            backend_config={"known_induction_variable":{"tuple_index":"0"}}
+      }
+  )";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(kHlo));
+  HloComputation* while_body = module->GetComputationWithName("while_body");
+
+  // Sanity check to ensure there isn't something wrong with the loop.
+  ASSERT_TRUE(ResolveFunctionalDependencyOnInductionVariable(
+                  while_body->GetInstructionWithName("next_ivar"))
+                  .has_value());
+
+  // This must be false, since it depends on tuple index 1, which is not the
+  // induction variable.
+  ASSERT_FALSE(ResolveFunctionalDependencyOnInductionVariable(
+                   while_body->GetInstructionWithName("next_lcv"))
+                   .has_value());
+}
+
+TEST_F(IrEmissionUtilsTest, Transpose_10) {
+  auto spec = GetTransposeSpecFromRoot(R"(ENTRY entry {
+    p0 = f32[8, 32] parameter(0)
+    ROOT transpose_p0 = f32[32, 8] transpose(p0), dimensions={1, 0}
+  })");
+  EXPECT_THAT(spec.permutation, ElementsAre(1, 0));
+  EXPECT_THAT(spec.inv_permutation, ElementsAre(1, 0));
+  EXPECT_THAT(spec.canonical_input_shape, ElementsAre(8, 1, 32, 1));
+  EXPECT_THAT(spec.canonical_output_shape, ElementsAre(32, 1, 8, 1));
+  EXPECT_THAT(spec.canonical_permutation, ElementsAre(2, 1, 0, 3));
+  EXPECT_THAT(spec.canonical_inv_permutation, ElementsAre(2, 1, 0, 3));
+}
+
+TEST_F(IrEmissionUtilsTest, Transpose_210) {
+  auto spec = GetTransposeSpecFromRoot(R"(ENTRY entry {
+    p0 = f32[8, 2, 32] parameter(0)
+    ROOT transpose_p0 = f32[32, 2, 8] transpose(p0), dimensions={2, 1, 0}
+  })");
+  EXPECT_THAT(spec.canonical_input_shape, ElementsAre(8, 2, 32, 1));
+  EXPECT_THAT(spec.canonical_output_shape, ElementsAre(32, 2, 8, 1));
+  EXPECT_THAT(spec.canonical_permutation, ElementsAre(2, 1, 0, 3));
+  EXPECT_THAT(spec.canonical_inv_permutation, ElementsAre(2, 1, 0, 3));
+}
+
+TEST_F(IrEmissionUtilsTest, Transpose_102) {
+  auto spec = GetTransposeSpecFromRoot(R"(ENTRY entry {
+    p0 = f32[8, 2, 32, 7, 6] parameter(0)
+    ROOT transpose_p0 = f32[6, 32, 2, 7, 8] transpose(p0),
+      dimensions={4, 2, 1, 3, 0}
+  })");
+  EXPECT_THAT(spec.canonical_input_shape, ElementsAre(8, 2, 32, 7, 6, 1));
+  EXPECT_THAT(spec.canonical_output_shape, ElementsAre(6, 32, 2, 7, 8, 1));
+  EXPECT_THAT(spec.canonical_permutation, ElementsAre(4, 2, 1, 3, 0, 5));
+  EXPECT_THAT(spec.canonical_inv_permutation, ElementsAre(4, 2, 1, 3, 0, 5));
+}
+
+TEST(DenseDataIntermediateTest, OwnedDataToProto) {
+  const std::vector<uint8_t> data = {1, 2, 3, 4};
+  DenseDataIntermediate constant = DenseDataIntermediate::Own(data);
+
+  DenseDataIntermediateProto proto = constant.ToProto();
+  EXPECT_THAT(proto.data(), ElementsAreArray(data));
+}
+
+TEST(DenseDataIntermediateTest, BorrowedDataToProto) {
+  constexpr std::array<uint8_t, 4> kData = {5, 6, 7, 8};
+  DenseDataIntermediate constant = DenseDataIntermediate::Alias(kData);
+  DenseDataIntermediateProto proto = constant.ToProto();
+  EXPECT_THAT(proto.data(), ElementsAreArray(kData));
+}
+
+TEST(DenseDataIntermediateTest, FromProto) {
+  constexpr std::array<uint8_t, 4> kData = {1, 2, 3, 4};
+  DenseDataIntermediateProto proto;
+  proto.mutable_data()->assign(kData.begin(), kData.end());
+
+  DenseDataIntermediate constant = DenseDataIntermediate::FromProto(proto);
+  EXPECT_THAT(constant.span(), ElementsAreArray(kData));
+}
+
+TEST_F(IrEmissionUtilsTest, OrdinaryMatmul) {
+  const char* hlo_string = R"(
+  HloModule t
+
+  ENTRY entry {
+    p0 = f32[10,20,30,40] parameter(0)
+    p1 = f32[10,20,50,40] parameter(1)
+    ROOT t = f32[10,20,30,50] dot(p0, p1),
+        lhs_batch_dims={0,1}, lhs_contracting_dims={3},
+        rhs_batch_dims={0,1}, rhs_contracting_dims={3}
+  })";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+  auto* root = module->entry_computation()->root_instruction();
+  EXPECT_THAT(IsCublasSupportedMatMul(*root, true), IsOkAndHolds(true));
+  EXPECT_THAT(IsCublasSupportedMatMul(*root, false), IsOkAndHolds(true));
+}
+
+TEST_F(IrEmissionUtilsTest, SingletonNoncontractingDim) {
+  const char* hlo_string = R"(
+  HloModule t
+
+  ENTRY entry {
+    p0 = f32[10,20,1,40] parameter(0)
+    p1 = f32[10,20,50,40] parameter(1)
+    ROOT t = f32[10,20,1,50] dot(p0, p1),
+        lhs_batch_dims={0,1}, lhs_contracting_dims={3},
+        rhs_batch_dims={0,1}, rhs_contracting_dims={3}
+  })";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+  auto* root = module->entry_computation()->root_instruction();
+  EXPECT_THAT(IsCublasSupportedMatMul(*root, true), IsOkAndHolds(true));
+  EXPECT_THAT(IsCublasSupportedMatMul(*root, false), IsOkAndHolds(false));
+}
+
+TEST_F(IrEmissionUtilsTest, BothOperandsHaveSingletonNoncontractingDims) {
+  const char* hlo_string = R"(
+  HloModule t
+
+  ENTRY entry {
+    p0 = f32[10,20,1,40] parameter(0)
+    p1 = f32[10,20,1,40] parameter(1)
+    ROOT t = f32[10,20,1,1] dot(p0, p1),
+        lhs_batch_dims={0,1}, lhs_contracting_dims={3},
+        rhs_batch_dims={0,1}, rhs_contracting_dims={3}
+  })";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+  auto* root = module->entry_computation()->root_instruction();
+  EXPECT_THAT(IsCublasSupportedMatMul(*root, true), IsOkAndHolds(false));
+  EXPECT_THAT(IsCublasSupportedMatMul(*root, false), IsOkAndHolds(false));
+}
+
+TEST_F(IrEmissionUtilsTest, OneSideDoesntHaveNoncontractingDims) {
+  const char* hlo_string = R"(
+  HloModule t
+
+  ENTRY entry {
+    p0 = f32[10,20,40] parameter(0)
+    p1 = f32[10,20,2,40] parameter(1)
+    ROOT t = f32[10,20,2] dot(p0, p1),
+        lhs_batch_dims={0,1}, lhs_contracting_dims={2},
+        rhs_batch_dims={0,1}, rhs_contracting_dims={3}
+  })";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+  auto* root = module->entry_computation()->root_instruction();
+  EXPECT_THAT(IsCublasSupportedMatMul(*root, true), IsOkAndHolds(true));
+  EXPECT_THAT(IsCublasSupportedMatMul(*root, false), IsOkAndHolds(false));
+}
+
+TEST_F(IrEmissionUtilsTest, OneSideMissesNoncontractingDimsOtherIsSingleton) {
+  const char* hlo_string = R"(
+  HloModule t
+
+  ENTRY entry {
+    p0 = f32[10,20,40] parameter(0)
+    p1 = f32[10,20,1,40] parameter(1)
+    ROOT t = f32[10,20,1] dot(p0, p1),
+        lhs_batch_dims={0,1}, lhs_contracting_dims={2},
+        rhs_batch_dims={0,1}, rhs_contracting_dims={3}
+  })";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+  auto* root = module->entry_computation()->root_instruction();
+  EXPECT_THAT(IsCublasSupportedMatMul(*root, true), IsOkAndHolds(false));
+  EXPECT_THAT(IsCublasSupportedMatMul(*root, false), IsOkAndHolds(false));
+}
+
+TEST_F(IrEmissionUtilsTest, NoNonContractingDims) {
+  const char* hlo_string = R"(
+  HloModule t
+
+  ENTRY entry {
+    p0 = f32[10,20,40] parameter(0)
+    p1 = f32[10,20,40] parameter(1)
+    ROOT t = f32[10,20] dot(p0, p1),
+        lhs_batch_dims={0,1}, lhs_contracting_dims={2},
+        rhs_batch_dims={0,1}, rhs_contracting_dims={2}
+  })";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+  auto* root = module->entry_computation()->root_instruction();
+  EXPECT_THAT(IsCublasSupportedMatMul(*root, true), IsOkAndHolds(false));
+  EXPECT_THAT(IsCublasSupportedMatMul(*root, false), IsOkAndHolds(false));
 }
 
 }  // namespace gpu

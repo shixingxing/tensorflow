@@ -28,16 +28,125 @@ def ShapeToConst : NativeCodeCall<"ShapeToConst($_builder, $0)">;
 def CreateTFLCastToInt32Op : NativeCodeCall<
   "CreateCastToInt32($0, $_loc, $_builder)">;
 
-def LegalizeTranspose : Pat<(MHLO_TransposeOp $arg, $perm),
-                            (TFL_TransposeOp $arg,
-                            (CreateTFLCastToInt32Op (TFL_ConstOp $perm)))>;
+def ConstDefaultResultAccuracyAttr :
+  ConstantAttr<MHLO_ResultAccuracyAttr, "::mlir::mhlo::ResultAccuracyMode::DEFAULT">;
 
-def LegalizeReshape : Pat<(MHLO_ReshapeOp:$output $input),
-          (TFL_ReshapeOp $input,
-            (CreateTFLCastToInt32Op (ShapeToConst $output)))>;
+def : Pat<
+  (MHLO_ConstantOp:$output $value),
+  (Arith_ConstantOp $value),
+  [(TFL_TensorOf<[AnyType]> $output)]>;
 
-def LegalizeDynamicReshape : Pat<(MHLO_DynamicReshapeOp $input, $shape),
-          (TFL_ReshapeOp $input, (CreateTFLCastToInt32Op $shape))>;
+
+//===----------------------------------------------------------------------===//
+// data movement
+//===----------------------------------------------------------------------===//
+
+def : Pat<
+  (MHLO_TransposeOp $arg, $perm),
+  (TFL_TransposeOp $arg,
+    (CreateTFLCastToInt32Op
+      (TFL_ConstOp $perm)))>;
+
+def : Pat<
+  (MHLO_ReverseOp $input, $dims),
+  (TFL_ReverseV2Op $input,
+    (CreateTFLCastToInt32Op
+      (Arith_ConstantOp $dims)))>;
+
+def I64AttrToI32Attr:
+  NativeCodeCall<
+    "$_builder.getI32IntegerAttr("
+      "static_cast<int32_t>(llvm::cast<IntegerAttr>($0).getInt()))">;
+
+def : Pat<
+  (MHLO_ConcatenateOp $inputs, $dim),
+  (TFL_ConcatenationOp
+    $inputs,
+    (I64AttrToI32Attr $dim),
+    TFL_AF_None)>;
+
+//
+// Reshapes
+//
+
+def : Pat<
+  (MHLO_ReshapeOp:$output $input),
+  (TFL_ReshapeOp $input,
+    (CreateTFLCastToInt32Op
+      (ShapeToConst $output)))>;
+
+def : Pat<
+  (MHLO_DynamicReshapeOp $input, $shape),
+  (TFL_ReshapeOp $input,
+    (CreateTFLCastToInt32Op $shape))>;
+
+//
+// Broadcasts
+//
+
+def IsTFLStyleBroadcast :
+  Constraint<CPred<"IsTFLStyleBroadcast($0, $1)">>;
+
+def IsNotTFLStyleBroadcast :
+  Constraint<Neg<IsTFLStyleBroadcast.predicate>>;
+
+def ExpandedShape :
+  NativeCodeCall<"ExpandedShape($_builder, $0, $1, $2)">;
+
+def ExpandedDynamicShape :
+  NativeCodeCall<"ExpandedDynamicShape($_builder, $0, $1, $2)">;
+
+def : Pat<
+  (MHLO_BroadcastInDimOp:$output
+    $input,
+    $broadcast_dimensions),
+  (TFL_BroadcastToOp
+    $input,
+    (ShapeToConst $output)),
+  [(IsTFLStyleBroadcast $broadcast_dimensions, $output)]>;
+
+def : Pat<
+  (MHLO_BroadcastInDimOp:$output
+    $input,
+    $broadcast_dimensions),
+  (TFL_BroadcastToOp
+    (TFL_ReshapeOp
+        $input,
+        (ExpandedShape
+          $input,
+          $broadcast_dimensions,
+          $output)),
+    (ShapeToConst $output)),
+  [(IsNotTFLStyleBroadcast $broadcast_dimensions, $output)]>;
+
+def : Pat<
+  (MHLO_DynamicBroadcastInDimOp:$output
+    $input,
+    $output_dimensions,
+    $broadcast_dimensions,
+    $expanding_dimensions_unused,
+    $nonexpanding_dimensions_unused),
+  (TFL_BroadcastToOp
+    $input,
+    $output_dimensions),
+  [(IsTFLStyleBroadcast $broadcast_dimensions, $output)]>;
+
+def : Pat<
+  (MHLO_DynamicBroadcastInDimOp:$output
+    $input,
+    $output_dimensions,
+    $broadcast_dimensions,
+    $expanding_dimensions_unused,
+    $nonexpanding_dimensions_unused),
+  (TFL_BroadcastToOp
+    (ExpandedDynamicShape
+      $input,
+      $broadcast_dimensions,
+      $output),
+    $output_dimensions),
+  [(IsNotTFLStyleBroadcast $broadcast_dimensions, $output)]>;
+
+
 
 //===----------------------------------------------------------------------===//
 // logical and bitwise ops
@@ -114,6 +223,10 @@ def : Pat<
   (TFL_RightShiftOp $l, $r)>;
 
 def : Pat<
+  (MHLO_Atan2Op $l, $r),
+  (TFL_Atan2Op $l, $r)>;
+
+def : Pat<
   (MHLO_RemOp $l, $r),
   (TFL_FloorModOp $l, $r)>;
 
@@ -125,18 +238,55 @@ foreach pair = [
 ] in {
   def : Pat<
     (pair[0] $l, $r),
-    (pair[1] $l, $r)>;
+    (pair[1] $l, $r)>; 
+
+  def : Pat<
+    (pair[0] 
+      (MHLO_BroadcastInDimOp:$output
+        $bcast_operand,
+        $broadcast_dimensions),
+      $r),
+    (pair[1] $bcast_operand, $r),
+    [(IsTFLStyleBroadcast $broadcast_dimensions, $output)]>; 
+
+  def : Pat<
+    (pair[0] 
+      $l,
+      (MHLO_BroadcastInDimOp:$output
+        $bcast_operand,
+        $broadcast_dimensions)),
+    (pair[1] $l, $bcast_operand),
+    [(IsTFLStyleBroadcast $broadcast_dimensions, $output)]>; 
 }
 
 // Binary ops with fused activiation attr.
 foreach pair = [
   [MHLO_DivOp, TFL_DivOp],
+  [MHLO_AddOp, TFL_AddOp],
   [MHLO_MulOp, TFL_MulOp],
   [MHLO_SubtractOp, TFL_SubOp],
 ] in {
   def : Pat<
     (pair[0] $l, $r),
     (pair[1] $l, $r, TFL_AF_None)>;
+
+  def : Pat<
+    (pair[0] 
+      (MHLO_BroadcastInDimOp:$output
+        $bcast_operand,
+        $broadcast_dimensions),
+      $r),
+    (pair[1] $bcast_operand, $r, TFL_AF_None),
+    [(IsTFLStyleBroadcast $broadcast_dimensions, $output)]>; 
+
+  def : Pat<
+    (pair[0] 
+      $l,
+      (MHLO_BroadcastInDimOp:$output
+        $bcast_operand,
+        $broadcast_dimensions)),
+    (pair[1] $l, $bcast_operand, TFL_AF_None),
+    [(IsTFLStyleBroadcast $broadcast_dimensions, $output)]>; 
 }
 
 
@@ -148,7 +298,7 @@ foreach pair = [
 // Check implicit bool cast of `$_self` to ensure Attribute is non-null before
 // casting.
 def HasSupportedComparisonType : AttrConstraint<
-  CPred<"!$_self || SupportedComparisonType($_self.cast<mhlo::ComparisonTypeAttr>())">>;
+  CPred<"!$_self || SupportedComparisonType(llvm::cast<mhlo::ComparisonTypeAttr>($_self))">>;
 
 class MHLO_ComparisonDirectionValue<string enumStr> :
   ConstantAttr<MHLO_ComparisonDirectionAttr,
@@ -171,7 +321,7 @@ in {
 // unary element-wise op
 //===----------------------------------------------------------------------===//
 
-def LowerCbrt : Pat<(MHLO_CbrtOp $opr),
+def LowerCbrt : Pat<(MHLO_CbrtOp $opr, ConstDefaultResultAccuracyAttr),
   (TFL_PowOp $opr,
     (TFL_DivOp
       (Arith_ConstantOp ConstantAttr<RankedF32ElementsAttr<[]>, "1.0f">),
@@ -179,36 +329,48 @@ def LowerCbrt : Pat<(MHLO_CbrtOp $opr),
       TFL_AF_None)),
       [(F32Tensor $opr)]>;
 
+// Pattern to legacyze mhlo.abs(complex) to tfl.complex_abs.
+def : Pat<(MHLO_AbsOp MHLO_ComplexTensor:$arg), (TFL_ComplexAbsOp $arg)>;
+
+// Pattern to match non-complex abs.
+def : Pat<(MHLO_AbsOp MHLO_PredIntFpOrQuantizedTensor:$arg), (TFL_AbsOp $arg)>;
 
 foreach pair = [
-  [MHLO_AbsOp, TFL_AbsOp],
   [MHLO_BitcastConvertOp, TFL_BitcastOp],
   [MHLO_CeilOp, TFL_CeilOp],
-  [MHLO_CosineOp, TFL_CosOp],
-  [MHLO_ExpOp, TFL_ExpOp],
   [MHLO_FloorOp, TFL_FloorOp],
   [MHLO_ImagOp, TFL_ImagOp],
-  [MHLO_LogOp, TFL_LogOp],
-  [MHLO_LogisticOp, TFL_LogisticOp],
   [MHLO_NegOp, TFL_NegOp],
   [MHLO_RealOp, TFL_RealOp],
-  [MHLO_RsqrtOp, TFL_RsqrtOp],
-  [MHLO_SineOp, TFL_SinOp],
   [MHLO_SignOp, TFL_SignOp],
-  [MHLO_SqrtOp, TFL_SqrtOp],
-  [MHLO_TanhOp, TFL_TanhOp]
 ] in {
   def : Pat<
     (pair[0] $input),
     (pair[1] $input)>;
 }
 
+foreach pair = [
+  [MHLO_CosineOp, TFL_CosOp],
+  [MHLO_ExpOp, TFL_ExpOp],
+  [MHLO_LogOp, TFL_LogOp],
+  [MHLO_LogisticOp, TFL_LogisticOp],
+  [MHLO_RsqrtOp, TFL_RsqrtOp],
+  [MHLO_SineOp, TFL_SinOp],
+  [MHLO_SqrtOp, TFL_SqrtOp],
+  [MHLO_TanhOp, TFL_TanhOp],
+] in {
+  def : Pat<
+    (pair[0] $input, ConstDefaultResultAccuracyAttr),
+    (pair[1] $input)>;
+}
+
+
 def : Pat<
   (MHLO_ConvertOp $input),
   (TFL_CastOp $input)>;
 
 def : Pat<
-  (MHLO_Expm1Op F32Tensor:$x),
+  (MHLO_Expm1Op F32Tensor:$x, ConstDefaultResultAccuracyAttr),
   (TFL_SubOp
     (TFL_ExpOp $x),
     (Arith_ConstantOp
@@ -223,7 +385,7 @@ def : Pat<
       ConstantAttr<RankedF32ElementsAttr<[]>, "0.0f">))>;
 
 def : Pat<
-  (MHLO_Log1pOp F32Tensor:$x),
+  (MHLO_Log1pOp F32Tensor:$x, ConstDefaultResultAccuracyAttr),
   (TFL_LogOp
     (TFL_AddOp
       $x,
@@ -256,6 +418,9 @@ def TensorIsSign :
 def ValueGreaterThanZero :
   Constraint<CPred<"ValueGreaterThanZero($0)">>;
 
+def : Pat<
+  (MHLO_RoundNearestEvenOp $input),
+  (TFL_RoundOp $input)>;
 
 // Converts a dag of HLOs representing banker rounding (round x.5 to nearest
 // even) to tfl.round. This only supports float types because mhlo.floor only
@@ -268,7 +433,7 @@ def ValueGreaterThanZero :
 //   return floor(x) + 1
 // else
 //   return floor(x)
-def Round : Pat<(MHLO_SelectOp
+def Phase1_Round : Pat<(MHLO_SelectOp
             (MHLO_OrOp
               (MHLO_CompareOp (MHLO_SubtractOp:$frac
                                $input,
@@ -316,7 +481,7 @@ def Round : Pat<(MHLO_SelectOp
 //    if ((rem[i] < 0) != (arg0[i] < 0) && arg0[i] != 0)
 //       rem[i] += arg1[i]
 // return rem
-def : Pat<(MHLO_SelectOp
+def Phase1_FloorMod : Pat<(MHLO_SelectOp
             (MHLO_AndOp
               (MHLO_CompareOp
                 (MHLO_CompareOp:$rltz
@@ -349,7 +514,7 @@ def : Pat<(MHLO_SelectOp
 //    if (rem[i] < 0 && rem[i] != 0)
 //       rem[i] += cst
 // return rem
-def : Pat<(MHLO_SelectOp
+def Phase1_FloorMod2 : Pat<(MHLO_SelectOp
             (MHLO_AndOp
               (MHLO_CompareOp:$rltz
                 (MHLO_RemOp:$rem $arg, (MHLO_ConstantOp $cst)),
@@ -395,7 +560,7 @@ def : Pat<(MHLO_SelectOp
 // the same function in this case the sign function. Named values like 'div'
 // refer to the same value produced by the same function, in this case division.
 // Mathematical symbols do not indicate a re-use of the value.
-def : Pat<(MHLO_RoundOp
+def Phase1_FloorDiv : Pat<(MHLO_RoundOp
             (MHLO_SelectOp
               (MHLO_AndOp
                 (MHLO_CompareOp
@@ -451,7 +616,7 @@ def : Pat<(MHLO_RoundOp
 // the same function in this case the sign function. Named values like 'div'
 // refer to the same value produced by the same function, in this case division.
 // Mathematical symbols do not indicate a re-use of the value.
-def : Pat<(MHLO_RoundOp
+def Phase1_FloorDiv2 : Pat<(MHLO_RoundOp
             (MHLO_SelectOp
               (MHLO_AndOp
                 (MHLO_CompareOp
@@ -509,7 +674,7 @@ def : Pat<(MHLO_RoundOp
 // the same function in this case the sign function. Named values like 'div'
 // refer to the same value produced by the same function, in this case division.
 // Mathematical symbols do not indicate a re-use of the value.
-def : Pat<(MHLO_RoundOp
+def Phase1_FloorDiv3 : Pat<(MHLO_RoundOp
             (MHLO_SelectOp
               (MHLO_AndOp
                 (MHLO_CompareOp
@@ -571,7 +736,7 @@ def : Pat<(MHLO_RoundOp
 // the same function in this case the sign function. Named values like 'div'
 // refer to the same value produced by the same function, in this case division.
 // Mathematical symbols do not indicate a re-use of the value.
-def : Pat<(MHLO_RoundOp
+def Phase1_FloorDiv4 : Pat<(MHLO_RoundOp
             (MHLO_SelectOp
               (MHLO_AndOp
                 (MHLO_CompareOp
@@ -603,6 +768,42 @@ def : Pat<(MHLO_RoundOp
            (SameValue $rem, $rem2),
            (FloatOrDefaultCompare $compare_type, $cst_zero),
            (FloatOrDefaultCompare $compare_type1, $cst_sgn)]>;
+
+// Semantically equivalant to above, just uses sub(x, 1) instead of
+// add(x, -1).
+def Phase1_FloorDiv5 : Pat<
+          (MHLO_RoundOp
+            (MHLO_SelectOp
+              (MHLO_AndOp
+                (MHLO_CompareOp
+                  (MHLO_RemOp:$rem
+                    $arg0,
+                    (MHLO_ConstantOp:$cstv_op $cstv)),
+                  (MHLO_ConstantOp $cst_zero),
+                  MHLO_ComparisonDirectionValue<"NE">,
+                  $compare_type),
+                (MHLO_CompareOp
+                  (MHLO_ConstantOp $cst_sgn),
+                  (MHLO_SignOp $rem1),
+                  MHLO_ComparisonDirectionValue<"NE">,
+                  $compare_type1)),
+              (MHLO_SubtractOp
+                (MHLO_DivOp:$div
+                  (MHLO_SubtractOp $arg0, $rem2),
+                  $cstv_op_2),
+                (MHLO_ConstantOp $cst_1)),
+              $div1)),
+          (TFL_FloorDivOp $arg0, $cstv_op),
+          [(ValueEquals<"0.0"> $cst_zero),
+           (ValueEquals<"1.0"> $cst_1),
+           (TensorIsSign $cstv, $cst_sgn),
+           (SameValue $cstv_op, $cstv_op_2),
+           (SameValue $div, $div1),
+           (SameValue $rem, $rem1),
+           (SameValue $rem, $rem2),
+           (FloatOrDefaultCompare $compare_type, $cst_zero),
+           (FloatOrDefaultCompare $compare_type1, $cst_sgn)]>;
+
 
 
 //===----------------------------------------------------------------------===//

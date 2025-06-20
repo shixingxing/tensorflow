@@ -38,7 +38,6 @@ package_group(
 py_strict_binary(
     name = "upgrade_schema",
     srcs = ["upgrade_schema.py"],
-    python_version = "PY3",
     deps = [":upgrade_schema_main_lib"],
 )
 
@@ -54,7 +53,6 @@ py_strict_library(
         "//tensorflow/compiler/mlir/lite/schema:schema_v3.fbs",
         "@flatbuffers//:flatc",
     ],
-    srcs_version = "PY3",
     deps = [
         "//tensorflow:tensorflow_py",
         "//tensorflow/python/platform:resource_loader",
@@ -65,8 +63,6 @@ py_strict_test(
     name = "upgrade_schema_test",
     size = "small",
     srcs = ["upgrade_schema_test.py"],
-    python_version = "PY3",
-    srcs_version = "PY3",
     tags = [
         "manual",
         "no_oss",
@@ -88,7 +84,6 @@ py_strict_test(
 #         ":schema_fbs_srcs",
 #         ":schema_generated.h.oss",
 #     ],
-#     python_version = "PY3",
 #     # TODO(b/235550563): Enable this TAP with FlatBuffer 2.0.6 migration.
 #     tags = [
 #         "manual",
@@ -105,10 +100,24 @@ exports_files([
     "conversion_metadata.fbs",
 ])
 
-flatbuffer_cc_library(
-    name = "schema_fbs",
-    srcs = ["//tensorflow/compiler/mlir/lite/schema:schema.fbs"],
-    compatible_with = get_compatible_with_portable(),
+# copybara:uncomment_begin(google-only)
+# flatbuffer_cc_library(
+#     name = "schema_fbs",
+#     srcs = ["//tensorflow/compiler/mlir/lite/schema:schema.fbs"],
+#     compatible_with = get_compatible_with_portable(),
+# )
+# copybara:uncomment_end(google-only)
+
+cc_library(
+    name = "schema_fbs",  # copybara:comment_replace name = "schema_fbs_for_oss",
+    hdrs = [
+        ":schema_generated.h",
+        "//tensorflow/compiler/mlir/lite/schema:schema_generated.h",
+    ],
+    deps = [
+        "//tensorflow/compiler/mlir/lite/schema:schema_fbs",
+        "@flatbuffers//:runtime_cc",
+    ],
 )
 
 # Generic schema for flatbuffer converter (but with mutable makes bigger).
@@ -155,7 +164,7 @@ cc_library(
 
 flatbuffer_cc_library(
     name = "conversion_metadata_fbs",
-    srcs = ["conversion_metadata.fbs"],
+    srcs = ["//tensorflow/compiler/mlir/lite/schema:conversion_metadata.fbs"],
     compatible_with = get_compatible_with_portable(),
 )
 

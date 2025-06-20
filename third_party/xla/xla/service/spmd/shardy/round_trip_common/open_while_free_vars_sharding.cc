@@ -20,6 +20,7 @@ limitations under the License.
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Pass/Pass.h"
@@ -28,7 +29,7 @@ limitations under the License.
 #include "mlir/Transforms/RegionUtils.h"
 #include "shardy/dialect/sdy/ir/dialect.h"
 #include "shardy/dialect/sdy/ir/utils.h"
-#include "xla/mlir_hlo/mhlo/IR/hlo_ops.h"
+#include "stablehlo/dialect/StablehloOps.h"
 
 namespace xla {
 namespace sdy {
@@ -49,7 +50,7 @@ class OpenWhileFreeVarsShardingPass
     FuncOp funcOp = getOperation();
     mlir::IRRewriter rewriter(funcOp);
 
-    funcOp.walk([&](mlir::mhlo::WhileOp op) {
+    funcOp.walk([&](mlir::stablehlo::WhileOp op) {
       llvm::SetVector<mlir::Value> freeVars;
       mlir::getUsedValuesDefinedAbove(op->getRegions(), freeVars);
       rewriter.setInsertionPoint(op);
@@ -58,10 +59,15 @@ class OpenWhileFreeVarsShardingPass
         if (!sharding || sharding.getRank() == 0) {
           continue;
         }
+        auto fullyOpenSharding = TensorShardingAttr::getFullyOpenLike(sharding);
+        if (fullyOpenSharding == sharding) {
+          // The sharding of the `freeVar` is already fully open, no need to add
+          // a sharding constraint.
+          continue;
+        }
         auto shardingConstraint =
             rewriter.create<mlir::sdy::ShardingConstraintOp>(
-                freeVar.getLoc(), freeVar,
-                TensorShardingAttr::getFullyOpenLike(sharding));
+                freeVar.getLoc(), freeVar, fullyOpenSharding);
         // Only replace uses in the regions of the while op.
         rewriter.replaceUsesWithIf(
             freeVar, shardingConstraint, [op](mlir::OpOperand& use) {
@@ -78,6 +84,10 @@ class OpenWhileFreeVarsShardingPass
   StringRef getDescription() const override {
     return "Adds a fully open sharding constraint to free variables of while "
            "op that already have a sharding.";
+  }
+
+  void getDependentDialects(mlir::DialectRegistry& registry) const final {
+    registry.insert<mlir::sdy::SdyDialect>();
   }
 };
 

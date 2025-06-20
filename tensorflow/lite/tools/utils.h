@@ -16,8 +16,10 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_TOOLS_UTILS_H_
 #define TENSORFLOW_LITE_TOOLS_UTILS_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "absl/types/span.h"
@@ -41,6 +43,12 @@ struct InputTensorData {
 // Data returned should be between 'low_range' and 'high_range'.
 InputTensorData CreateRandomTensorData(const TfLiteTensor& tensor,
                                        float low_range, float high_range);
+
+// Returns random test data for tensor of given name, type and size.
+// Data returned should be between 'low_range' and 'high_range'.
+InputTensorData CreateRandomTensorData(std::string name, TfLiteType type,
+                                       int num_elements, float low_range,
+                                       float high_range);
 
 // Fills out params 'low_range' and 'high_range' with range for tensor type
 // 'type'. Note that these ranges returned are just dummy used only for

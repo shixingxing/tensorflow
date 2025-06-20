@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 #include "xla/python/refine_polymorphic_shapes.h"
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -44,13 +45,17 @@ limitations under the License.
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Support/TypeID.h"
 #include "mlir/Transforms/Passes.h"
+#include "shardy/dialect/sdy/ir/dialect.h"
 #include "stablehlo/dialect/Base.h"
 #include "stablehlo/dialect/ChloOps.h"
 #include "stablehlo/dialect/StablehloOps.h"
 #include "xla/mlir/utils/error_util.h"
+#include "xla/mlir_hlo/mhlo/transforms/passes.h"
 #include "xla/mlir_hlo/stablehlo_ext/transforms/passes.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/logging.h"
+#include "xla/service/spmd/shardy/round_trip_common/import_constants.h"
+#include "xla/service/spmd/shardy/sdy_round_trip/pipelines.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/logging.h"
 
 namespace xla {
 
@@ -150,8 +155,6 @@ struct CheckShapeAssertionsPass
       return op.emitError() << "expects an empty backend_config";
     if (op.getCallTargetName() != shapeAssertionName)
       return op.emitError() << "expects @shape_assertion";
-    if (!op.getHasSideEffect())
-      return op.emitError() << "expects has_side_effect=true";
 
     // input[0] (assert_what) : tensor<i1>
     auto assertWhatType =
@@ -217,13 +220,13 @@ struct CheckShapeAssertionsPass
       return (idx < nrErrorMessageInputs ? errorMessageInputs[idx] : -1);
     };
     return llvm::formatv(
-        errorMessageFormat, errInput(0), errInput(1), errInput(2), errInput(3),
-        errInput(4), errInput(5), errInput(6), errInput(7), errInput(8),
-        errInput(9), errInput(10), errInput(11), errInput(12), errInput(13),
-        errInput(14), errInput(15), errInput(16), errInput(17), errInput(18),
-        errInput(19), errInput(20), errInput(21), errInput(22), errInput(23),
-        errInput(24), errInput(25), errInput(26), errInput(27), errInput(28),
-        errInput(29), errInput(30), errInput(31));
+        false, errorMessageFormat, errInput(0), errInput(1), errInput(2),
+        errInput(3), errInput(4), errInput(5), errInput(6), errInput(7),
+        errInput(8), errInput(9), errInput(10), errInput(11), errInput(12),
+        errInput(13), errInput(14), errInput(15), errInput(16), errInput(17),
+        errInput(18), errInput(19), errInput(20), errInput(21), errInput(22),
+        errInput(23), errInput(24), errInput(25), errInput(26), errInput(27),
+        errInput(28), errInput(29), errInput(30), errInput(31));
   }
 
   mlir::StringRef getArgument() const override {
@@ -269,7 +272,8 @@ absl::Status RefinePolymorphicShapes(mlir::ModuleOp module,
   // TODO(necula): we should not need the inliner.
   pm.addPass(mlir::createInlinerPass());
   pm.addPass(mlir::createCSEPass());
-  pm.addPass(mlir::stablehlo_ext::createChloRecomposeOpsPass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::stablehlo_ext::createChloRecomposeOpsPass());
   pm.addPass(mlir::stablehlo_ext::createStablehloRefineShapesPass());
   pm.addNestedPass<mlir::func::FuncOp>(
       mlir::stablehlo_ext::createStablehloCanonicalizeDynamismPass());
@@ -286,12 +290,14 @@ absl::Status RefinePolymorphicShapes(mlir::ModuleOp module,
 absl::Status RefinePolymorphicShapes(llvm::StringRef module_str,
                                      llvm::raw_ostream &os,
                                      bool enable_shape_assertions,
-                                     bool validate_static_shapes) {
+                                     bool validate_static_shapes,
+                                     bool enable_shardy) {
   mlir::MLIRContext context;
   if (VLOG_IS_ON(3)) context.disableMultithreading();
   context.loadDialect<mlir::func::FuncDialect>();
   context.loadDialect<mlir::stablehlo::StablehloDialect>();
   context.loadDialect<mlir::chlo::ChloDialect>();
+  context.loadDialect<mlir::sdy::SdyDialect>();
 
   mlir::DialectRegistry registry;
   mlir::func::registerAllExtensions(registry);
@@ -303,10 +309,37 @@ absl::Status RefinePolymorphicShapes(llvm::StringRef module_str,
   if (!module) {
     return absl::InvalidArgumentError("Cannot parse module.");
   }
+  if (enable_shardy) {
+    mlir::PassManager pm(module.get()->getName(),
+                         mlir::OpPassManager::Nesting::Implicit);
+    // TODO(b/422690222): Remove `addSdyRoundTripImportPipeline` after 6 months.
+    // NOTE: JAX shape refinement has `@shape_assertion` custom calls that
+    // require constant folding. As such, we cannot import constants here just
+    // yet. We have to delay it until after shape refinement.
+    xla::sdy::addSdyRoundTripImportPipeline(pm, /*enableConstantImport=*/false);
+    mlir::BaseScopedDiagnosticHandler diag_handler(module.get()->getContext());
+    if (mlir::failed(pm.run(*module))) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Error importing Sdy dialect: ",
+                       diag_handler.ConsumeStatus().ToString()));
+    }
+  }
+
   TF_RETURN_IF_ERROR(RefinePolymorphicShapes(*module, enable_shape_assertions));
   if (validate_static_shapes) TF_RETURN_IF_ERROR(ValidateStaticShapes(*module));
   if (mlir::failed(mlir::writeBytecodeToFile(*module, os))) {
     return absl::InternalError("Cannot serialize module.");
+  }
+  if (enable_shardy) {
+    mlir::PassManager pm(module.get()->getName(),
+                         mlir::OpPassManager::Nesting::Implicit);
+    pm.addNestedPass<mlir::func::FuncOp>(xla::sdy::createImportConstantsPass());
+    mlir::BaseScopedDiagnosticHandler diag_handler(module.get()->getContext());
+    if (mlir::failed(pm.run(*module))) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Error importing Sdy constants: ",
+                       diag_handler.ConsumeStatus().ToString()));
+    }
   }
   return absl::OkStatus();
 }

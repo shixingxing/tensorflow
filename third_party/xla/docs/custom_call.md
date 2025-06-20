@@ -33,7 +33,7 @@ end to end examples of integrating custom calls and XLA FFI with JAX.
 XLA FFI binding is a compile-time specification of the custom call signature:
 custom call arguments, attributes and their types, and additional parameters
 passed via the execution context (i.e., gpu stream for GPU backend). XLA FFI
-finding can be bound to any C++ callable (function pointer, lambda, etc.) with
+binding can be bound to any C++ callable (function pointer, lambda, etc.) with
 compatible `operator()` signature. Constructed handler decodes XLA FFI call
 frame (defined by the stable C API), type check all parameters, and forward
 decoded results to the user-defined callback.
@@ -93,7 +93,7 @@ type, dimensions, and a pointer to the buffer itself.
 
 
 ```c++
-// Buffers of any rank and data type.
+// Buffers of any number of dimensions and data type.
 auto handler = Ffi::Bind().Arg<AnyBuffer>().Ret<AnyBuffer>().To(
     [](AnyBuffer arg, Result<AnyBuffer> res) -> Error {
       void* arg_data = arg.untyped_data();
@@ -104,12 +104,13 @@ auto handler = Ffi::Bind().Arg<AnyBuffer>().Ret<AnyBuffer>().To(
 
 ### Constrained Buffer Arguments And Results
 
-`Buffer` allows to add constraints on the buffer data type and rank, and they
-will be automatically checked by the handler and return an error to XLA runtime,
-if run time arguments do not match the FFI handler signature.
+`Buffer` allows to add constraints on the buffer data type and number of
+dimensions, and they will be automatically checked by the handler and return
+an error to XLA runtime, if run time arguments do not match the FFI handler
+signature.
 
 ```c++
-// Buffers of any rank and F32 data type.
+// Buffers of any number of dimensions and F32 data type.
 auto handler = Ffi::Bind().Arg<Buffer<F32>>().Ret<Buffer<F32>>().To(
     [](Buffer<F32> arg, Result<Buffer<F32>> res) -> Error {
       float* arg_data = arg.typed_data();
@@ -119,7 +120,7 @@ auto handler = Ffi::Bind().Arg<Buffer<F32>>().Ret<Buffer<F32>>().To(
 ```
 
 ```c++
-// Buffers of rank 2 and F32 data type.
+// Buffers of number of dimensions 2 and F32 data type.
 auto handler = Ffi::Bind().Arg<BufferR2<F32>>().Ret<BufferR2<F32>>().To(
     [](BufferR2<F32> arg, Result<BufferR2<F32>> res) -> Error {
       float* arg_data = arg.typed_data();
@@ -267,8 +268,8 @@ struct Range {
   int64_t hi;
 };
 
-XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(Range, StructMember<int64_t>("i64"),
-                                             StructMember<int64_t>("i64"));
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(Range, StructMember<int64_t>("lo"),
+                                             StructMember<int64_t>("hi"));
 
 auto handler = Ffi::Bind().Attr<Range>("range").To([](Range range) -> Error{
   return Error::Success();
@@ -312,7 +313,7 @@ void do_it() {
         /*api_version=*/CustomCallApiVersion::API_VERSION_TYPED_FFI);
 }
 
-// Constrain custom call arguments to rank-1 buffers of F32 data type.
+// Constrain custom call arguments to 1-dimensional buffers of F32 data type.
 using BufferF32 = xla::ffi::BufferR1<xla::ffi::DataType::F32>;
 
 // Implement a custom call as a C+ function. Note that we can use `Buffer` type

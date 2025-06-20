@@ -29,127 +29,108 @@ limitations under the License.
 #include "absl/container/inlined_vector.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/escaping.h"
+#include "absl/strings/str_join.h"
 #include "absl/strings/string_view.h"
+#include "absl/strings/substitute.h"
 #include "absl/types/span.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/DerivedTypes.h"
-#include "llvm/IR/FPEnv.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Intrinsics.h"
-#include "llvm/IR/IntrinsicsNVPTX.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Value.h"
 #include "llvm/IR/Verifier.h"
-#include "llvm/Support/Casting.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/TargetParser/Triple.h"
+#include "xla/codegen/ir_emission_utils.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/utils/hlo_traversal.h"
 #include "xla/literal.h"
+#include "xla/permutation_util.h"
 #include "xla/primitive_util.h"
 #include "xla/service/buffer_assignment.h"
-#include "xla/service/gpu/hlo_traversal.h"
+#include "xla/service/gpu/backend_configs.pb.h"
+#include "xla/service/gpu/matmul_indexing_utils.h"
 #include "xla/service/gpu/target_util.h"
-#include "xla/service/llvm_ir/llvm_type_conversion_util.h"
 #include "xla/service/llvm_ir/llvm_util.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/status_macros.h"
-#include "xla/stream_executor/device_description.h"
 #include "xla/tsl/lib/strings/proto_serialization.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/protobuf.h"
-#include "tsl/platform/statusor.h"
 
 namespace xla {
 namespace gpu {
 
-namespace {
-
-// Return whether the given shape is rank 2 excluding the batch dimensions.
-bool IsRank2(const Shape& shape, int64_t batch_dimensions_size) {
-  return shape.rank() == batch_dimensions_size + 2;
-}
-
-// Return whether the given shape is rank 1 excluding the batch dimensions.
-bool IsRank1(const Shape& shape, int64_t batch_dimensions_size) {
-  return shape.rank() == batch_dimensions_size + 1;
-}
-
-bool IsMlirTransposeEmitterEnabled(const HloInstruction& hlo) {
-  return hlo.GetModule()
-             ->config()
-             .debug_options()
-             .xla_gpu_mlir_emitter_level() >= 3;
-}
-
-}  // namespace
-
-bool IsMatrixMultiplication(const HloInstruction& dot) {
+absl::StatusOr<bool> IsCublasSupportedMatMul(
+    const HloInstruction& dot, bool allow_matrix_vector_multiplication) {
   if (dot.opcode() != HloOpcode::kDot) {
     return false;
   }
-  const Shape& lhs_shape = dot.operand(0)->shape();
-  const Shape& rhs_shape = dot.operand(1)->shape();
-  const DotDimensionNumbers& dim_numbers = dot.dot_dimension_numbers();
 
-  PrimitiveType output_primitive_type = dot.shape().element_type();
-  bool type_is_allowed =
-      (output_primitive_type == F8E4M3FN || output_primitive_type == F8E5M2 ||
-       output_primitive_type == F8E4M3FNUZ ||
-       output_primitive_type == F8E5M2FNUZ || output_primitive_type == F16 ||
-       output_primitive_type == BF16 || output_primitive_type == F32 ||
-       output_primitive_type == F64 || output_primitive_type == C64 ||
-       output_primitive_type == C128) ||
-      (output_primitive_type == S32 && lhs_shape.element_type() == S8 &&
-       rhs_shape.element_type() == S8);
-  bool shapes_are_valid =
-      type_is_allowed &&
-      IsRank2(lhs_shape, dim_numbers.lhs_batch_dimensions_size()) &&
-      IsRank2(rhs_shape, dim_numbers.lhs_batch_dimensions_size()) &&
-      IsRank2(dot.shape(), dim_numbers.lhs_batch_dimensions_size()) &&
-      !ShapeUtil::IsZeroElementArray(lhs_shape) &&
-      !ShapeUtil::IsZeroElementArray(rhs_shape);
+  // Number of operands that have non-trivial non-contracting dimension.
+  int num_matrix_operands = 0;
+  for (int operand : {0, 1}) {
+    TF_ASSIGN_OR_RETURN(DotOperandDims dims,
+                        DotOperandDims::FromDot(&dot, operand));
+    // cuBLAS only supports single contracting dimension.
+    if (dims.DimensionCount(DotOperandDims::kContracting) != 1) {
+      return false;
+    }
+    // cuBLAS doesn't support minor batch dimension.
+    if (absl::c_any_of(dims.Indices(DotOperandDims::kBatch), [&](int64_t dim) {
+          return dim == dims.shape().dimensions().size() - 1;
+        })) {
+      return false;
+    }
+    // cuBLAS supports up to one non-contracting dimension.
+    const auto& nc_dims = dims.DimensionSizes(DotOperandDims::kNonContracting);
+    if (nc_dims.size() > 1) {
+      return false;
+    }
+    if (nc_dims.size() == 1) {
+      num_matrix_operands += (nc_dims[0] != 1);
+    }
+  }
 
-  return shapes_are_valid;
-}
-
-bool IsMatrixVectorMultiplication(const HloInstruction& dot) {
-  if (dot.opcode() != HloOpcode::kDot) {
+  if (num_matrix_operands == 0 ||
+      (num_matrix_operands == 1 && !allow_matrix_vector_multiplication)) {
     return false;
   }
-  const Shape& lhs_shape = dot.operand(0)->shape();
-  const Shape& rhs_shape = dot.operand(1)->shape();
-  const DotDimensionNumbers& dim_numbers = dot.dot_dimension_numbers();
 
-  PrimitiveType output_primitive_type = dot.shape().element_type();
-  bool type_is_allowed =
-      (output_primitive_type == F8E4M3FN || output_primitive_type == F8E5M2 ||
-       output_primitive_type == F16 || output_primitive_type == BF16 ||
-       output_primitive_type == F32 || output_primitive_type == F64 ||
-       output_primitive_type == C64 || output_primitive_type == C128) ||
-      (output_primitive_type == S32 && lhs_shape.element_type() == S8 &&
-       rhs_shape.element_type() == S8);
-
-  bool shapes_are_valid =
-      type_is_allowed &&
-      ((IsRank2(lhs_shape, dim_numbers.lhs_batch_dimensions_size()) &&
-        IsRank1(rhs_shape, dim_numbers.lhs_batch_dimensions_size())) ||
-       (IsRank1(lhs_shape, dim_numbers.lhs_batch_dimensions_size()) &&
-        IsRank2(rhs_shape, dim_numbers.lhs_batch_dimensions_size()))) &&
-      IsRank1(dot.shape(), dim_numbers.lhs_batch_dimensions_size()) &&
-      !ShapeUtil::IsZeroElementArray(lhs_shape) &&
-      !ShapeUtil::IsZeroElementArray(rhs_shape);
-
-  return shapes_are_valid;
+  switch (dot.shape().element_type()) {
+    // Types allowed for both matmul and matmul-vector.
+    case F8E4M3FN:
+    case F8E5M2:
+    case F16:
+    case BF16:
+    case F32:
+    case F64:
+    case C64:
+      return true;
+    case S32:
+      return (dot.operand(0)->shape().element_type() == S8 &&
+              dot.operand(1)->shape().element_type() == S8);
+    // Only allowed for matmul.
+    case F8E3M4:
+    case F8E4M3:
+    case F8E4M3FNUZ:
+    case F8E5M2FNUZ:
+    case C128:
+      return num_matrix_operands == 2;
+    default:
+      return false;
+  }
 }
-
 const char* const kCusolverCholeskyCallTarget = "__cusolver$cholesky";
 
 bool IsCustomCallToCusolver(const HloInstruction& hlo) {
@@ -213,152 +194,7 @@ bool IsContiguousSlice(const HloInstruction& instr) {
   return false;
 }
 
-// Helper function to emit call to AMDGPU shfl_down function.
-llvm::Value* EmitAMDGPUShflDown(llvm::Value* value, llvm::Value* offset,
-                                llvm::IRBuilder<>* b) {
-  llvm::Module* module = b->GetInsertBlock()->getModule();
-  CHECK_EQ(value->getType()->getPrimitiveSizeInBits(), 32);
-  auto* i32_ty = b->getInt32Ty();
-  llvm::FunctionCallee shfl_fn = module->getOrInsertFunction(
-      llvm_ir::AsStringRef("__ockl_readuplane_i32"),
-      llvm::FunctionType::get(/*Result=*/i32_ty, {i32_ty, i32_ty},
-                              /*isVarArg=*/false));
-  // AMDGPU device function requires first argument as i32.
-  llvm::Value* result =
-      b->CreateCall(shfl_fn, {b->CreateBitCast(value, i32_ty), offset});
-  // AMDGPU device function always returns an i32 type.
-  return b->CreateBitCast(result, value->getType());
-}
-
-llvm::Value* EmitAMDGPUShflDownSwizzle(llvm::Value* value, llvm::Value* offset,
-                                       llvm::IRBuilder<>* b) {
-  llvm::Module* module = b->GetInsertBlock()->getModule();
-  CHECK_EQ(value->getType()->getPrimitiveSizeInBits(), 32);
-  auto* i32_ty = b->getInt32Ty();
-
-  llvm::Function* intrinsic = llvm::cast<llvm::Function>(
-      module
-          ->getOrInsertFunction(
-              "llvm.amdgcn.ds.swizzle",
-              llvm::FunctionType::get(/*Result=*/i32_ty, {i32_ty, i32_ty},
-                                      /*isVarArg=*/false))
-          .getCallee());
-
-  // Ensure that the first argument to the AMDGPU intrinsic is i32.
-  llvm::Value* bitcast_value = b->CreateBitCast(value, i32_ty);
-
-  // Calculate the control value for the swizzle operation.
-  llvm::Value* control_value =
-      b->CreateAdd(b->CreateMul(offset, b->getInt32(0x20)), b->getInt32(0x1f));
-
-  // Create the call to the intrinsic function.
-  llvm::Value* result =
-      b->CreateCall(intrinsic, {bitcast_value, control_value});
-
-  // Bitcast the result back to the original type of the input value.
-  return b->CreateBitCast(result, value->getType());
-}
-
-// Helper function to emit call to NVPTX shfl_down intrinsic.
-llvm::Value* EmitNVPTXShflDown(llvm::Value* value, llvm::Value* offset,
-                               llvm::IRBuilder<>* b) {
-  llvm::Module* module = b->GetInsertBlock()->getModule();
-  llvm::Intrinsic::ID llvm_intrinsic_id;
-  CHECK_EQ(value->getType()->getPrimitiveSizeInBits(), 32);
-  if (value->getType()->isFloatTy()) {
-    llvm_intrinsic_id = llvm::Intrinsic::nvvm_shfl_sync_down_f32;
-  } else {
-    llvm_intrinsic_id = llvm::Intrinsic::nvvm_shfl_sync_down_i32;
-  }
-  llvm::Function* intrinsic =
-      llvm::Intrinsic::getDeclaration(module, llvm_intrinsic_id, {});
-  return b->CreateCall(
-      intrinsic, {b->getInt32(-1), value, offset, b->getInt32(WarpSize() - 1)});
-}
-
-// Helper function to emit call to SPIR shfl_down intrinsic.
-llvm::Value* EmitSPIRShflDown(llvm::Value* value, llvm::Value* offset,
-                              llvm::IRBuilder<>* b) {
-  CHECK_EQ(value->getType()->getPrimitiveSizeInBits(), 32);
-  if (value->getType()->isFloatTy()) {
-    return EmitDeviceFunctionCall(
-        "_Z34__spirv_GroupNonUniformShuffleDownffj",
-        {b->getInt32(3), value, offset}, {U32, F32, U32}, F32,
-        llvm::AttrBuilder(b->getContext())
-            .addAttribute(llvm::Attribute::NoUnwind)
-            .addAttribute(llvm::Attribute::Convergent),
-        b);
-  } else {
-    return EmitDeviceFunctionCall(
-        "_Z34__spirv_GroupNonUniformShuffleDownjjj",
-        {b->getInt32(3), value, offset}, {U32, U32, U32}, U32,
-        llvm::AttrBuilder(b->getContext())
-            .addAttribute(llvm::Attribute::NoUnwind)
-            .addAttribute(llvm::Attribute::Convergent),
-        b);
-  }
-}
-
-llvm::Value* EmitFullWarpShuffleDown(
-    llvm::Value* value, llvm::Value* offset, llvm::IRBuilder<>* builder,
-    const se::DeviceDescription& gpu_device_info) {
-  int bit_width = value->getType()->getPrimitiveSizeInBits();
-  llvm::Module* module = builder->GetInsertBlock()->getModule();
-  llvm::Triple target_triple = llvm::Triple(module->getTargetTriple());
-
-  // Special case for efficiency
-  if (value->getType()->isFloatTy() && bit_width == 32) {
-    if (target_triple.isNVPTX()) {
-      return EmitNVPTXShflDown(value, offset, builder);
-    } else if (target_triple.getArch() == llvm::Triple::amdgcn) {
-      if (gpu_device_info.rocm_compute_capability().gfx9_mi100_or_later()) {
-        return EmitAMDGPUShflDownSwizzle(value, offset, builder);
-      }
-      return EmitAMDGPUShflDown(value, offset, builder);
-    } else if (target_triple.isSPIR()) {
-      return EmitSPIRShflDown(value, offset, builder);
-    } else {
-      LOG(FATAL) << "Invalid triple " << target_triple.str();
-    }
-  }
-
-  // We must split values wider than 32 bits as the "shfl" instruction operates
-  // on 32-bit values.
-  int num_segments = CeilOfRatio(bit_width, 32);
-  llvm::Value* x = builder->CreateBitCast(
-      builder->CreateZExt(
-          builder->CreateBitCast(value, builder->getIntNTy(bit_width)),
-          builder->getIntNTy(32 * num_segments)),
-      llvm::VectorType::get(builder->getInt32Ty(), num_segments, false));
-  for (int i = 0; i < num_segments; ++i) {
-    llvm::Value* insert_val;
-    if (target_triple.isNVPTX()) {
-      insert_val = EmitNVPTXShflDown(builder->CreateExtractElement(x, i),
-                                     offset, builder);
-    } else if (target_triple.getArch() == llvm::Triple::amdgcn) {
-      if (gpu_device_info.rocm_compute_capability().gfx9_mi100_or_later()) {
-        insert_val = EmitAMDGPUShflDownSwizzle(
-            builder->CreateExtractElement(x, i), offset, builder);
-      } else {
-        insert_val = EmitAMDGPUShflDown(builder->CreateExtractElement(x, i),
-                                        offset, builder);
-      }
-    } else if (target_triple.isSPIR()) {
-      insert_val = EmitSPIRShflDown(builder->CreateExtractElement(x, i), offset,
-                                    builder);
-    } else {
-      LOG(FATAL) << "Invalid triple " << target_triple.str();
-    }
-    x = builder->CreateInsertElement(x, insert_val, i);
-  }
-  return builder->CreateBitCast(
-      builder->CreateTrunc(
-          builder->CreateBitCast(x, builder->getIntNTy(32 * num_segments)),
-          builder->getIntNTy(bit_width)),
-      value->getType());
-}
-
-llvm::Value* IsBlock0Thread0(llvm::IRBuilder<>* b) {
+llvm::Value* IsBlock0Thread0(llvm::IRBuilderBase* b) {
   llvm::Value* is_thread0 = b->CreateICmpEQ(
       b->getInt32(0),
       EmitCallToTargetIntrinsic(TargetIntrinsicID::kThreadIdx, {}, {}, b));
@@ -498,6 +334,9 @@ absl::StatusOr<bool> CanEmitFusedDynamicUpdateSliceInPlaceForGpu(
               user_start_indices != dus_start_indices) {
             return false;
           }
+        } else if (user != dus &&
+                   user.opcode() == HloOpcode::kDynamicUpdateSlice) {
+          return false;
         } else if (user != dus && !user.instruction().IsElementwise() &&
                    user.opcode() != HloOpcode::kBitcast &&
                    user.opcode() != HloOpcode::kTuple) {
@@ -540,115 +379,186 @@ absl::StatusOr<bool> CanEmitFusedDynamicUpdateSliceInPlaceForGpu(
   return true;
 }
 
-static std::optional<TransposeDescription> FindTiledTranspose(
-    const HloInstruction& instr) {
-  if (instr.opcode() != HloOpcode::kCopy) {
-    return std::nullopt;
-  }
-
-  absl::InlinedVector<int64_t, 3> permutation;
-  auto tr = ShapeUtil::GetNormalizedTransposeShape(instr.operand(0)->shape(),
-                                                   instr.shape(), permutation);
-  if (!tr.has_value()) {
-    return std::nullopt;
-  }
-  if (permutation == absl::InlinedVector<int64_t, 3>{0, 2, 1}) {
-    if ((tr->at(1) >= kMinDimensionToTransposeTiled &&
-         tr->at(2) >= kMinDimensionToTransposeTiled) ||
-        (tr->at(1) >= kMinDimensionToTransposeTiled2 &&
-         tr->at(2) >= kMinDimensionToTransposeTiled2 &&
-         tr->at(1) * tr->at(2) >= kMinTotalDimensionsToTransposeTiled)) {
-      return TransposeDescription{
-          &instr, *tr,
-          /*permutation=*/absl::InlinedVector<int64_t, 3>{0, 2, 1}};
-    }
-  } else if (permutation == absl::InlinedVector<int64_t, 3>{2, 1, 0}) {
-    if ((tr->at(0) >= kMinDimensionToTransposeTiled &&
-         tr->at(2) >= kMinDimensionToTransposeTiled) ||
-        (tr->at(0) >= kMinDimensionToTransposeTiled2 &&
-         tr->at(2) >= kMinDimensionToTransposeTiled2 &&
-         tr->at(0) * tr->at(2) >= kMinTotalDimensionsToTransposeTiled)) {
-      return TransposeDescription{
-          &instr, *tr,
-          /*permutation=*/absl::InlinedVector<int64_t, 3>{2, 1, 0}};
-    }
-  } else if (IsMlirTransposeEmitterEnabled(instr)) {
-    if (permutation == absl::InlinedVector<int64_t, 3>{1, 0, 2}) {
-      auto byte_width = primitive_util::ByteWidth(instr.shape().element_type());
-      if (byte_width * tr->at(2) <= kMaxBytesInMostMinorDimension &&
-          byte_width * tr->at(2) * std::min(tr->at(0), tr->at(1)) >=
-              kMinDimensionToTransposeTiled) {
-        return TransposeDescription{
-            &instr, *tr,
-            /*permutation=*/absl::InlinedVector<int64_t, 3>{1, 0, 2}};
-      }
+bool IsNormalized(const HloTransposeInstruction& transpose) {
+  const auto& permutation = transpose.dimensions();
+  for (int i = 0; i < permutation.size() - 1; ++i) {
+    if (permutation[i] + 1 == permutation[i + 1]) {
+      return false;
     }
   }
-  return std::nullopt;
+  return true;
 }
 
-// Find 021, 210 or 102 transpose in logical + physical transposition.
-static std::optional<TransposeDescription> FindTiledLogicalTranspose(
-    const HloInstruction& instr) {
-  if (instr.opcode() != HloOpcode::kTranspose) {
+bool CanEmitPackedTranspose(const HloTransposeInstruction& transpose) {
+  // Support only normalized transposes.
+  if (!IsNormalized(transpose)) {
+    return false;
+  }
+  const auto& spec = GetTransposeSpec(&transpose);
+  return GetPackedTransposeTileSizes(spec).ok();
+}
+
+std::optional<TransposeDescription> GetDescriptionForTiledTransposeEmitter(
+    const HloInstruction& hero) {
+  if (hero.opcode() != HloOpcode::kTranspose) {
     return std::nullopt;
   }
 
   // We can assume that TransposeDimensionGrouper pass has run, so no need to
   // call GetNormalizedLogicalTransposeShape here.
-  absl::InlinedVector<int64_t, 3> permutation(instr.dimensions().begin(),
-                                              instr.dimensions().end());
+  absl::InlinedVector<int64_t, 3> permutation(hero.dimensions().begin(),
+                                              hero.dimensions().end());
   // A real transpose needs at least 2 transpose dimensions.
   if (permutation.size() < 2) {
     return std::nullopt;
   }
-  absl::InlinedVector<int64_t, 3> dimensions(instr.shape().dimensions().begin(),
-                                             instr.shape().dimensions().end());
-  int64_t operand_most_minor_dim =
-      instr.operand(0)->shape().dimensions().back();
-  if (permutation == absl::InlinedVector<int64_t, 3>{0, 2, 1} ||
-      permutation == absl::InlinedVector<int64_t, 3>{2, 1, 0}) {
-    if ((dimensions.back() >= kMinDimensionToTransposeTiled &&
-         operand_most_minor_dim >= kMinDimensionToTransposeTiled) ||
-        (dimensions.back() >= kMinDimensionToTransposeTiled2 &&
-         operand_most_minor_dim >= kMinDimensionToTransposeTiled2 &&
-         dimensions.back() * operand_most_minor_dim >=
-             kMinTotalDimensionsToTransposeTiled)) {
-      return TransposeDescription{&instr, dimensions, permutation};
+  auto bit_width = GetBitwidth(hero.shape().element_type());
+  absl::InlinedVector<int64_t, 3> dimensions(hero.shape().dimensions().begin(),
+                                             hero.shape().dimensions().end());
+  int64_t operand_most_minor_dim = hero.operand(0)->shape().dimensions().back();
+  if (CanEmitPackedTranspose(*Cast<HloTransposeInstruction>(&hero))) {
+    int64_t vector_size =
+        kBankBitwidth / GetBitwidth(hero.shape().element_type());
+    int64_t shmem_usage_bytes =
+        kNumShmemBanks * (kBankBitwidth / 8) * kNumShmemBanks * vector_size;
+    return TransposeDescription{&hero, dimensions, permutation,
+                                shmem_usage_bytes};
+  }
+  if (permutation.back() == dimensions.size() - 1) {
+    operand_most_minor_dim =
+        hero.operand(0)->shape().dimensions(dimensions.size() - 2);
+    if (bit_width * dimensions.back() <= kMaxBitsInMostMinorDimension &&
+        bit_width * dimensions.back() *
+                std::min(operand_most_minor_dim,
+                         dimensions[dimensions.size() - 2]) >=
+            8 * kMinDimensionToTransposeTiled) {
+      // Tile size for transposition.
+      int64_t shmem_usage_bytes =
+          CeilOfRatio(kNumShmemBanks * (kNumShmemBanks + 1LL) * bit_width *
+                          dimensions.back(),
+                      8LL);
+      return TransposeDescription{&hero, dimensions, permutation,
+                                  shmem_usage_bytes};
     }
-  } else if (IsMlirTransposeEmitterEnabled(instr)) {
-    if (permutation.back() == dimensions.size() - 1) {
-      operand_most_minor_dim =
-          instr.operand(0)->shape().dimensions(dimensions.size() - 2);
-      auto byte_width = primitive_util::ByteWidth(instr.shape().element_type());
-      if (byte_width * dimensions.back() <= kMaxBytesInMostMinorDimension &&
-          byte_width * dimensions.back() *
-                  std::min(operand_most_minor_dim,
-                           dimensions[dimensions.size() - 2]) >=
-              kMinDimensionToTransposeTiled) {
-        return TransposeDescription{&instr, dimensions, permutation};
-      }
-    } else if ((operand_most_minor_dim >= kMinDimensionToTransposeTiled &&
-                dimensions.back() >= kMinDimensionToTransposeTiled) ||
-               (operand_most_minor_dim >= kMinDimensionToTransposeTiled2 &&
-                dimensions.back() >= kMinDimensionToTransposeTiled2 &&
-                operand_most_minor_dim * dimensions.back() >=
-                    kMinTotalDimensionsToTransposeTiled)) {
-      return TransposeDescription{&instr, dimensions, permutation};
+  } else if ((operand_most_minor_dim >= kMinDimensionToTransposeTiled &&
+              dimensions.back() >= kMinDimensionToTransposeTiled) ||
+             (operand_most_minor_dim >= kMinDimensionToTransposeTiled2 &&
+              dimensions.back() >= kMinDimensionToTransposeTiled2 &&
+              operand_most_minor_dim * dimensions.back() >=
+                  kMinTotalDimensionsToTransposeTiled)) {
+    // TODO(b/415741994): TransposeEmitter is regressing for S4 when the last
+    // dimension is being transposed. The issue seems to be related to bank
+    // conflicts but a proper investigation is needed.
+    if (bit_width == 4) {
+      return std::nullopt;
     }
+    int64_t shmem_usage_bytes =
+        CeilOfRatio(kNumShmemBanks * (kNumShmemBanks + 1LL) * bit_width, 8LL);
+    return TransposeDescription{&hero, dimensions, permutation,
+                                shmem_usage_bytes};
   }
   return std::nullopt;
 }
 
-std::optional<TransposeDescription> GetDescriptionForTiledTransposeEmitter(
-    const HloInstruction& hero) {
-  if (auto d1 = FindTiledTranspose(hero)) {
-    return d1;
+TransposeSpec GetTransposeSpec(const HloTransposeInstruction* transpose) {
+  auto inv_permutation = InversePermutation(transpose->dimensions());
+  auto& output_shape = transpose->shape();
+  llvm::SmallVector<int64_t, 3> canonical_output_shape =
+      llvm::to_vector<3>(output_shape.dimensions());
+  llvm::SmallVector<int64_t, 3> canonical_permutation =
+      llvm::to_vector<3>(transpose->dimensions());
+
+  // If the last dimension is transposed, add a size-1 B dimension.
+  if (canonical_permutation.back() != canonical_output_shape.size() - 1) {
+    canonical_permutation.push_back(output_shape.dimensions().size());
+    canonical_output_shape.push_back(1);
   }
-  if (auto d2 = FindTiledLogicalTranspose(hero)) {
-    return d2;
+  int64_t dim_t1 = -1;
+  int64_t dim_t2 = -1;
+  for (int64_t i = canonical_permutation.size() - 1; i >= 0; --i) {
+    if (canonical_permutation[i] != i) {
+      dim_t2 = canonical_permutation[i];
+      dim_t1 = i;
+      break;
+    }
   }
-  return std::nullopt;
+  // Insert size-1 A dimension if necessary.
+  auto rank = canonical_output_shape.size();
+  if (canonical_permutation[rank - 3] != rank - 3) {
+    canonical_output_shape.insert(canonical_output_shape.begin() + dim_t1, 1);
+    for (auto& p : canonical_permutation) {
+      if (p > rank - 3) p++;
+    }
+    canonical_permutation.insert(canonical_permutation.begin() + dim_t1,
+                                 dim_t1);
+  }
+  auto canonical_inv_permutation = InversePermutation(canonical_permutation);
+  auto canonical_input_shape =
+      Permute(canonical_output_shape, canonical_inv_permutation);
+  return TransposeSpec{
+      transpose,
+      llvm::to_vector<3>(transpose->dimensions()),
+      llvm::to_vector<3>(inv_permutation),
+      canonical_output_shape,
+      canonical_permutation,
+      llvm::to_vector<3>(canonical_inv_permutation),
+      llvm::to_vector<3>(canonical_input_shape),
+  };
+}
+
+std::string TransposeSpec::ToString() const {
+  return absl::Substitute(R"(
+transpose: $0
+canonical_input_shape: $1
+canonical_output_shape: $2
+canonical_permutation: $3
+canonical_inv_permutation: $4
+[T2, A, T1, B] = [$5, $6, $7, $8]
+)",
+                          transpose->ToString(),
+                          absl::StrJoin(canonical_input_shape, ","),
+                          absl::StrJoin(canonical_output_shape, ","),
+                          absl::StrJoin(canonical_permutation, ","),
+                          absl::StrJoin(canonical_inv_permutation, ","),
+                          dim_T2(), dim_A(), dim_T1(), dim_B());
+}
+
+absl::StatusOr<absl::InlinedVector<int64_t, 3>> GetPackedTransposeTileSizes(
+    const TransposeSpec& spec) {
+  // Check the side outputs, etc.
+  int64_t bits_per_element = GetBitwidth(spec.elem_type());
+  if (bits_per_element >= kBankBitwidth) {
+    return absl::InvalidArgumentError("Element type is too large");
+  }
+  absl::InlinedVector<int64_t, 3> tile_sizes(spec.canonical_rank(), 1);
+  int64_t vector_size = kBankBitwidth / bits_per_element;
+
+  // The shmem size is `shmem_dim x shmem_dim`.
+  int64_t shmem_dim = kNumShmemBanks * vector_size;
+  int64_t tile_size_T1 = std::min(spec.dim_T1(), shmem_dim);
+  int64_t tile_size_A = std::min(spec.dim_A(), shmem_dim / tile_size_T1);
+  int64_t tile_size_T2 = std::min(spec.dim_T2(), shmem_dim);
+  int64_t populated_shmem_rows = tile_size_T2;
+  int64_t populated_shmem_cols = tile_size_A * tile_size_T1;
+
+  // Do not use the packed transpose if there are not enough populated rows or
+  // columns in shmem.
+  const int64_t kNumMinPopulatedRowsOrColumns = 10 * vector_size;
+  if (populated_shmem_cols < kNumMinPopulatedRowsOrColumns ||
+      populated_shmem_rows < kNumMinPopulatedRowsOrColumns) {
+    return absl::InvalidArgumentError("Not enough rows or columns in shmem");
+  }
+
+  // These divisibility constrains are too strict, we can do better.
+  if (spec.dim_B() != 1 || populated_shmem_rows % vector_size != 0 ||
+      populated_shmem_cols % vector_size != 0 ||
+      spec.dim_T2() % tile_size_T2 % vector_size != 0) {
+    return absl::InvalidArgumentError("The shape is not supported");
+  }
+  tile_sizes[spec.dim_T1_output_id()] = tile_size_T1;
+  tile_sizes[spec.dim_T2_output_id()] = tile_size_T2;
+  tile_sizes[spec.dim_A_id()] = tile_size_A;
+  return tile_sizes;
 }
 
 bool IsIntermediate(const HloInstruction* instr, int allowed_operand_count) {
@@ -738,8 +648,7 @@ HloInstructionAdaptor FindNonTrivialHero(const HloInstructionAdaptor& instr) {
   // transpose and concat emitters also work if there are elementwise ops with
   // more than 1 operand on the path between root and the root op.
   auto is_transpose = [](const HloInstruction& node) {
-    return FindTiledLogicalTranspose(node).has_value() ||
-           FindTiledTranspose(node).has_value();
+    return GetDescriptionForTiledTransposeEmitter(node).has_value();
   };
   if (auto transpose = FindNonTrivialHero(hero, is_transpose)) {
     return *transpose;
@@ -775,7 +684,7 @@ void VerifyModule(const llvm::Module& module) {
 }
 
 llvm::Type* GetIndexTypeForKernel(const HloInstruction* hlo,
-                                  int64_t launch_size, llvm::IRBuilder<>* b) {
+                                  int64_t launch_size, llvm::IRBuilderBase* b) {
   // Find the unnested hlo instruction for which the kernel is generated for.
   const HloInstruction* unnested_hlo = hlo;
   const HloComputation* computation = hlo->parent();
@@ -827,14 +736,6 @@ llvm::Type* GetIndexTypeForKernel(const HloInstruction* hlo,
   return b->getInt32Ty();
 }
 
-bool IsAMDGPU(const llvm::Module* module) {
-  return llvm::Triple(module->getTargetTriple()).isAMDGPU();
-}
-
-bool IsSPIR(const llvm::Module* module) {
-  return llvm::Triple(module->getTargetTriple()).isSPIR();
-}
-
 absl::StatusOr<DenseDataIntermediate> LiteralToXlaFormat(
     const Literal& literal) {
   PrimitiveType element_type = literal.shape().element_type();
@@ -867,5 +768,248 @@ absl::StatusOr<std::string> GetProtoFingerprint(
   return absl::WebSafeBase64Escape(result);
 }
 
+std::optional<std::string> GetCustomFusionConfigName(
+    const HloInstruction* instr) {
+  if (instr->opcode() != HloOpcode::kFusion ||
+      instr->fusion_kind() != HloInstruction::FusionKind::kCustom) {
+    return std::nullopt;
+  }
+  absl::StatusOr<GpuBackendConfig> backend_config =
+      instr->backend_config<GpuBackendConfig>();
+  if (!backend_config.ok() || !backend_config->has_fusion_backend_config()) {
+    return std::nullopt;
+  }
+  const FusionBackendConfig& fusion_backend_config =
+      backend_config->fusion_backend_config();
+  if (!fusion_backend_config.has_custom_fusion_config()) {
+    return std::nullopt;
+  }
+  return fusion_backend_config.custom_fusion_config().name();
+}
+
+bool IsDynamicSliceFusion(const HloInstruction* instr) {
+  std::optional<std::string> name = GetCustomFusionConfigName(instr);
+  return name == kDynamicSliceFusionWithStaticAddressComputationConfigName ||
+         name == kDynamicSliceFusionWithDynamicAddressComputationConfigName;
+}
+
+bool IsDynamicMemcpyFusion(const HloInstruction* instr) {
+  absl::StatusOr<GpuBackendConfig> backend_config =
+      instr->backend_config<GpuBackendConfig>();
+  return backend_config.ok() &&
+         backend_config->fusion_backend_config().kind() ==
+             kDynamicMemcpyFusionKind;
+}
+
+namespace {
+
+// Whether the instruction is semantically a call.
+bool IsCallLike(const HloInstruction* caller) {
+  return caller->opcode() == HloOpcode::kFusion ||
+         caller->opcode() == HloOpcode::kAsyncStart ||
+         caller->opcode() == HloOpcode::kCall;
+}
+
+const HloInstruction* GetUniqueCallerOrNull(const HloComputation* callee) {
+  auto callers = callee->caller_instructions();
+  return callers.size() == 1 ? callers.front() : nullptr;
+}
+
+struct Dependencies {
+  absl::InlinedVector<const HloInstruction*, 2> parameters;
+  absl::InlinedVector<const HloInstruction*, 1> get_tuple_elements;
+};
+
+// Returns the leaf dependencies of `root`, in each frame of the call stack.
+// Here, leaves are parameters and GTEs. Returns nullopt if any dependencies
+// have side effects.
+std::optional<Dependencies> GetLeafDependencies(const HloInstruction* root) {
+  absl::flat_hash_set<const HloInstruction*> seen{root};
+  std::queue<const HloInstruction*> queue;
+  queue.push(root);
+
+  auto enqueue = [&](const HloInstruction* instr) {
+    if (seen.insert(instr).second) {
+      queue.push(instr);
+    }
+  };
+
+  Dependencies results;
+  while (!queue.empty()) {
+    const auto* instruction = queue.front();
+    VLOG(5) << "Visiting " << instruction->name() << ".";
+    queue.pop();
+
+    if (instruction->opcode() == HloOpcode::kCustomCall ||
+        instruction->HasSideEffect()) {
+      VLOG(5) << "Found an unsafe operation.";
+      return std::nullopt;
+    }
+
+    if (instruction->opcode() == HloOpcode::kParameter) {
+      results.parameters.push_back(instruction);
+      const HloInstruction* caller =
+          GetUniqueCallerOrNull(instruction->parent());
+      if (!caller) {
+        VLOG(5) << "Failed to determine unique caller, aborting traversal.";
+        return std::nullopt;
+      }
+
+      // If this is semantically a call, continue the traversal at the call
+      // site.
+      if (IsCallLike(caller)) {
+        int64_t index = instruction->parameter_number();
+        enqueue(caller->operand(index));
+      }
+    }
+
+    if (instruction->opcode() == HloOpcode::kGetTupleElement) {
+      results.get_tuple_elements.push_back(instruction);
+    }
+
+    for (auto* operand : instruction->operands()) {
+      enqueue(operand);
+    }
+  }
+  return results;
+}
+
+struct VerifiedLoop {
+  const HloInstruction* loop;
+  const HloInstruction* parameter;
+  int64_t induction_variable_index;
+};
+
+// Checks that `loop` is a while loop from which we can derive functional
+// dependencies.
+std::optional<VerifiedLoop> VerifyFunctionalDependencyLoop(
+    const HloInstruction* loop) {
+  if (!loop) {
+    VLOG(5) << "No loop found";
+    return std::nullopt;
+  }
+  auto config = loop->backend_config<xla::WhileLoopBackendConfig>();
+  if (!config.ok() || !config->has_known_induction_variable()) {
+    VLOG(5) << "The loop has no known induction variable.";
+    return std::nullopt;
+  }
+  return VerifiedLoop{loop, loop->while_body()->parameter_instruction(0),
+                      config->known_induction_variable().tuple_index()};
+}
+
+// Returns true if `hlo` is a GTE for a loop carried variable of `loop`.
+bool IsLoopCarriedVariable(const HloInstruction* hlo,
+                           const VerifiedLoop& loop) {
+  return hlo->opcode() == HloOpcode::kGetTupleElement &&
+         hlo->operand(0) == loop.parameter;
+}
+
+// Returns true if `maybe_variable` is `loop`'s induction variable.
+bool IsInductionVariable(const HloInstruction* maybe_variable,
+                         const VerifiedLoop& loop) {
+  return IsLoopCarriedVariable(maybe_variable, loop) &&
+         maybe_variable->tuple_index() == loop.induction_variable_index;
+}
+
+// Attempts to find the induction variable of `loop` in `dependencies`. If there
+// are any dependencies on non-induction variable loop-carried variables,
+// returns nullopt.
+std::optional<const HloInstruction*> VerifyInductionVariable(
+    const Dependencies& dependencies, const VerifiedLoop& loop) {
+  const HloInstruction* induction_var = nullptr;
+  for (const HloInstruction* gte : dependencies.get_tuple_elements) {
+    if (IsInductionVariable(gte, loop)) {
+      if (induction_var) {
+        // This should never happen.
+        VLOG(5) << "Found non-unique GTEs for the induction variable. Did "
+                   "HloCSE run?";
+        return std::nullopt;
+      }
+      induction_var = gte;
+    } else if (IsLoopCarriedVariable(gte, loop)) {
+      // Other dependencies on loop-carried variables are not allowed.
+      VLOG(5) << "Found illegal dependency on loop-carried variable.";
+      return std::nullopt;
+    }
+    // Other GTEs are OK, as long as their tuples are ultimately just derived
+    // from the loop's induction variable. We already verified that there are no
+    // side-effecting dependencies in GetLeafDependencies.
+  }
+  if (!induction_var) {
+    VLOG(5) << "Did not find an induction variable.";
+    return std::nullopt;
+  }
+  return induction_var;
+}
+
+}  // namespace
+
+std::optional<InductionVariableFunctionalDependency>
+ResolveFunctionalDependencyOnInductionVariable(const HloInstruction* instr) {
+  VLOG(5) << "Looking for defining while loop of " << instr->name();
+
+  auto dependencies = GetLeafDependencies(instr);
+  // If there is a side effect in the dependencies, the result will be nullopt.
+  if (!dependencies) {
+    return std::nullopt;
+  }
+
+  // In the dependencies, there should be exactly one parameter of a while loop,
+  // and exactly one GTE for that parameter. We already verified that there are
+  // no side-effecting dependencies.
+  InductionVariableFunctionalDependency result{};
+  for (const HloInstruction* param : dependencies->parameters) {
+    const HloComputation* callee = param->parent();
+    const HloInstruction* caller = GetUniqueCallerOrNull(callee);
+    if (caller && IsCallLike(caller)) {
+      // Register the parameter as a required intermediate value.
+      auto& required = result.required_parameters[callee];
+      if (required.empty()) {
+        required.resize(callee->num_parameters());
+      }
+      required[param->parameter_number()] = true;
+    } else if (caller && caller->opcode() == HloOpcode::kWhile) {
+      if (result.loop) {
+        LOG(WARNING) << "While loop not unique. This should never happen.";
+        return std::nullopt;
+      }
+      result.loop = caller;
+    } else {
+      // We arrived at an unexpected parameter. This likely means we're not in
+      // a while loop, or there's an unsupported instruction between the while
+      // loop and `instr`.
+      VLOG(5) << "Unsupported parameter: " << param->name() << ".";
+      return std::nullopt;
+    }
+  }
+
+  auto verified_loop = VerifyFunctionalDependencyLoop(result.loop);
+  if (!verified_loop) {
+    return std::nullopt;
+  }
+
+  auto induction_var = VerifyInductionVariable(*dependencies, *verified_loop);
+  if (induction_var) {
+    result.induction_var = *induction_var;
+  } else {
+    return std::nullopt;
+  }
+
+  VLOG(5) << "While loop for " << instr->name() << ": " << result.loop->name();
+  return result;
+}
+
+DenseDataIntermediateProto DenseDataIntermediate::ToProto() const {
+  DenseDataIntermediateProto proto;
+  absl::Span<const uint8_t> data = span();
+  proto.mutable_data()->assign(data.begin(), data.end());
+  return proto;
+}
+DenseDataIntermediate DenseDataIntermediate::FromProto(
+    const DenseDataIntermediateProto& proto) {
+  const std::string& data = proto.data();
+  return DenseDataIntermediate::Own(
+      std::vector<uint8_t>(data.begin(), data.end()));
+}
 }  // namespace gpu
 }  // namespace xla

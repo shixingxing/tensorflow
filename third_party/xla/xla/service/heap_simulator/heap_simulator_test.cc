@@ -29,35 +29,37 @@ limitations under the License.
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
 #include "xla/comparison_util.h"
+#include "xla/hlo/analysis/hlo_alias_analysis.h"
+#include "xla/hlo/analysis/hlo_dataflow_analysis.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/ir/hlo_schedule.h"
+#include "xla/hlo/parser/hlo_parser.h"
+#include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
 #include "xla/literal_util.h"
 #include "xla/service/buffer_value.h"
 #include "xla/service/heap_simulator/allocation_block.h"
-#include "xla/service/hlo_alias_analysis.h"
-#include "xla/service/hlo_dataflow_analysis.h"
 #include "xla/service/hlo_module_config.h"
-#include "xla/service/hlo_parser.h"
 #include "xla/service/hlo_value.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
-#include "xla/tests/hlo_test_base.h"
 #include "xla/tsl/lib/core/status_test_util.h"
-#include "tsl/platform/logging.h"
-#include "tsl/platform/statusor.h"
-#include "tsl/platform/test.h"
+#include "xla/tsl/platform/logging.h"
+#include "xla/tsl/platform/statusor.h"
+#include "xla/tsl/platform/test.h"
+#include "xla/xla_data.pb.h"
 
 namespace xla {
 namespace {
 
 using ::testing::ContainerEq;
+using ::testing::ElementsAreArray;
 using ::testing::HasSubstr;
 using ::testing::StrEq;
 
-class MinimumMemoryForSequenceTest : public HloTestBase {};
+class MinimumMemoryForSequenceTest : public HloHardwareIndependentTestBase {};
 
 TEST_F(MinimumMemoryForSequenceTest, MultiComputation) {
   auto module = CreateNewVerifiedModule();
@@ -420,7 +422,7 @@ class HeapSimulatorTracker {
   HeapSimulator::Result<HloValue> result_;
 };
 
-class HeapSimulatorTest : public HloTestBase {
+class HeapSimulatorTest : public HloHardwareIndependentTestBase {
  protected:
   HeapSimulatorTest() {}
   ~HeapSimulatorTest() override {}
@@ -1861,10 +1863,16 @@ TEST_F(IntervalTreeTest, InsertAndRemoveTwoLevelsLeft) {
   BufferIntervalTree tree;
   tree.Add(20, 36, chunk);
   tree.Add(1, 45, chunk);
+  EXPECT_EQ(tree.NumChunksOverlappingInTime(10, 25), 2);
+  EXPECT_EQ(tree.NumChunksOverlappingInTime(5, 15), 1);
   EXPECT_TRUE(tree.Remove(1, 45, chunk));
+  EXPECT_EQ(tree.NumChunksOverlappingInTime(10, 25), 1);
+  EXPECT_EQ(tree.NumChunksOverlappingInTime(5, 15), 0);
   EXPECT_EQ(tree.GetRoot()->subtree_end, 36);
   EXPECT_TRUE(tree.Remove(20, 36, chunk));
   ASSERT_EQ(tree.GetRoot(), nullptr);
+  EXPECT_EQ(tree.NumChunksOverlappingInTime(10, 25), 0);
+  EXPECT_EQ(tree.NumChunksOverlappingInTime(5, 15), 0);
 }
 
 TEST_F(IntervalTreeTest, InsertAndRemoveTwoLevelsRight) {
@@ -2079,6 +2087,21 @@ TEST_F(IntervalTreeTest, BufferIntervalTreeMemoryUsedInInterval) {
       /*start=*/18, /*end=*/23);
   std::vector<int64_t> expected_memory_used_by_time = {48, 48, 48, 48, 48, 16};
   EXPECT_THAT(memory_used_by_time, ContainerEq(expected_memory_used_by_time));
+}
+
+TEST_F(IntervalTreeTest, BufferIntervalTreeHeapSize) {
+  // Buffer 1: memory block [0, 16), time interval [15, 26]
+  // Buffer 2: memory block [16, 48), time interval [17, 24]
+  // Buffer 3: memory block [32, 64), time interval [20, 22]
+  BufferIntervalTree tree;
+  tree.Add(15, 26, HeapSimulator::Chunk::FromOffsetEnd(0, 16));
+  tree.Add(17, 24, HeapSimulator::Chunk::FromOffsetEnd(16, 48));
+  tree.Add(20, 22, HeapSimulator::Chunk::FromOffsetEnd(32, 64));
+  EXPECT_THAT(tree.HeapSizeInInterval(15, 16), 16);
+  EXPECT_THAT(tree.HeapSizeInInterval(15, 19), 48);
+  EXPECT_THAT(tree.HeapSizeInInterval(15, 22), 64);
+  EXPECT_THAT(tree.HeapSizeInInterval(23, 24), 48);
+  EXPECT_THAT(tree.HeapSizeInInterval(25, 26), 16);
 }
 
 class SlicedBufferIntervalTest : public ::testing::Test {
@@ -3753,6 +3776,32 @@ TEST_F(SliceTimePermutationIteratorTest, Repacks) {
   for (const RepackTestCase& test_case : test_cases) {
     test_case.Test();
   }
+}
+
+class BreadthFirstMidpointIteratorTest : public ::testing::Test {
+ protected:
+  static void RunTest(int start, int end, std::vector<int> expected_order) {
+    std::vector<int> actual;
+    for (BreadthFirstMidpointIterator iterator(start, end); !iterator.End();
+         iterator.Next()) {
+      actual.push_back(iterator.value());
+    }
+    EXPECT_THAT(actual, ElementsAreArray(expected_order));
+  }
+};
+
+TEST_F(BreadthFirstMidpointIteratorTest, NoValues) { RunTest(1, 0, {}); }
+
+TEST_F(BreadthFirstMidpointIteratorTest, OneValue) { RunTest(1, 1, {1}); }
+
+TEST_F(BreadthFirstMidpointIteratorTest, TwoValues) { RunTest(1, 2, {2, 1}); }
+
+TEST_F(BreadthFirstMidpointIteratorTest, General1) {
+  RunTest(1, 5, {3, 2, 5, 1, 4});
+}
+
+TEST_F(BreadthFirstMidpointIteratorTest, General2) {
+  RunTest(0, 10, {5, 2, 8, 1, 4, 7, 10, 0, 3, 6, 9});
 }
 
 }  // namespace

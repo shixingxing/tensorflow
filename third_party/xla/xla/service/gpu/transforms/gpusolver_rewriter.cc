@@ -17,11 +17,16 @@ limitations under the License.
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <utility>
 #include <vector>
 
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/functional/any_invocable.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "xla/comparison_util.h"
 #include "xla/hlo/ir/hlo_computation.h"
@@ -30,16 +35,15 @@ limitations under the License.
 #include "xla/layout_util.h"
 #include "xla/literal.h"
 #include "xla/literal_util.h"
-#include "xla/service/gpu/cusolver_context.h"
 #include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/stream_executor/blas.h"
+#include "xla/stream_executor/gpu_solver_context.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/statusor.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/logging.h"
-#include "tsl/platform/statusor.h"
 
 namespace xla {
 namespace gpu {
@@ -48,20 +52,19 @@ namespace {
 
 void SetFortranLayout(Shape* shape) {
   LayoutUtil::SetToDefaultLayout(shape);
-  int n = shape->mutable_layout()->minor_to_major_size();
+  int n = shape->mutable_layout()->minor_to_major().size();
   CHECK_GE(n, 2);
   std::swap(shape->mutable_layout()->mutable_minor_to_major()->at(0),
             shape->mutable_layout()->mutable_minor_to_major()->at(1));
 }
 
-absl::StatusOr<HloInstruction*> CreateCholesky(GpuSolverContext* context,
-                                               HloInstruction* operand,
-                                               const CholeskyOptions& options,
-                                               const OpMetadata& metadata) {
+absl::StatusOr<HloInstruction*> CreateCholesky(
+    stream_executor::GpuSolverContext* context, HloInstruction* operand,
+    const CholeskyOptions& options, const OpMetadata& metadata) {
   HloComputation* computation = operand->parent();
 
   Shape a_shape = operand->shape();
-  int ndim = a_shape.dimensions_size();
+  int ndim = a_shape.dimensions().size();
   CHECK_GE(ndim, 2);
   int64_t n = a_shape.dimensions(ndim - 1);
 
@@ -137,9 +140,9 @@ absl::StatusOr<HloInstruction*> CreateCholesky(GpuSolverContext* context,
 }
 
 // Tries to rewrite a single convolution into a call to cudnn.
-absl::StatusOr<bool> RunOnInstruction(GpuSolverContext* context,
-                                      HloInstruction* instruction) {
-  if (instruction->opcode() != HloOpcode::kCholesky) {
+absl::StatusOr<bool> RunOnInstruction(
+    stream_executor::GpuSolverContext* context, HloInstruction* instruction) {
+  if (HloPredicateIsNotOp<HloOpcode::kCholesky>(instruction)) {
     return false;
   }
 
@@ -164,7 +167,7 @@ absl::StatusOr<bool> GpusolverRewriter::RunOnComputation(
     HloComputation* computation) {
   std::vector<HloInstruction*> cusolver_calls;
   for (auto* hlo : computation->instructions()) {
-    if (hlo->opcode() == HloOpcode::kCholesky) {
+    if (HloPredicateIsOp<HloOpcode::kCholesky>(hlo)) {
       cusolver_calls.push_back(hlo);
     }
   }
@@ -173,17 +176,22 @@ absl::StatusOr<bool> GpusolverRewriter::RunOnComputation(
     return false;
   }
 
-  TF_ASSIGN_OR_RETURN(GpuSolverContext context, GpuSolverContext::Create());
+  TF_ASSIGN_OR_RETURN(auto context, solver_context_creator_());
 
   bool changed = false;
   for (HloInstruction* instruction : cusolver_calls) {
-    TF_ASSIGN_OR_RETURN(bool result, RunOnInstruction(&context, instruction));
+    TF_ASSIGN_OR_RETURN(bool result,
+                        RunOnInstruction(context.get(), instruction));
     changed |= result;
   }
   return changed;
 }
 
-GpusolverRewriter::GpusolverRewriter() = default;
+GpusolverRewriter::GpusolverRewriter(
+    absl::AnyInvocable<
+        absl::StatusOr<std::unique_ptr<stream_executor::GpuSolverContext>>()>
+        solver_context_creator)
+    : solver_context_creator_(std::move(solver_context_creator)) {}
 
 absl::StatusOr<bool> GpusolverRewriter::Run(
     HloModule* module,

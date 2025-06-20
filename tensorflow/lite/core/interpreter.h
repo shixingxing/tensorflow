@@ -40,6 +40,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "tensorflow/compiler/mlir/lite/allocation.h"
 #include "tensorflow/compiler/mlir/lite/experimental/remat/metadata_util.h"
 #include "tensorflow/lite/allocation.h"
 #include "tensorflow/lite/core/api/error_reporter.h"
@@ -76,6 +77,11 @@ class TestDelegation;  // Class for friend declarations.
 namespace interpreter_wrapper {
 class InterpreterWrapper;  // Class for friend declarations.
 }  // namespace interpreter_wrapper
+
+namespace model_builder {
+class ModelBuilder;
+}  // namespace model_builder
+
 #endif  // DOXYGEN_SKIP
 
 /// An interpreter for a graph of nodes that input and output from tensors.
@@ -121,6 +127,8 @@ class InterpreterBuilder;  // Class for friend declarations.
 
 class Interpreter {
  public:
+  using Ptr = std::unique_ptr<Interpreter>;
+
   // Instantiate an interpreter. All errors associated with reading and
   // processing this model will be forwarded to the error_reporter object.
   //
@@ -272,27 +280,41 @@ class Interpreter {
     return primary_subgraph().execution_plan();
   }
 
-  /// Get a mutable tensor data structure.
-  // TODO(aselle): Create a safe ArrayHandle interface to avoid exposing this
-  // read/write access to structure
+  // Returns a mutable tensor.
+  //
+  // Warning: No guarantee is given about address stability. Operations
+  // (including but not limited to: `Invoke`, `AddTensors`) may invalidate the
+  // pointer returned by this function.
   TfLiteTensor* tensor(int tensor_index) {
     return primary_subgraph().tensor(tensor_index);
   }
 
-  /// Get an immutable tensor data structure.
+  // Returns an immutable tensor.
+  //
+  // Warning: No guarantee is given about address stability. Operations
+  // (including but not limited to: `Invoke`, `AddTensors`) may invalidate the
+  // pointer returned by this function.
   const TfLiteTensor* tensor(int tensor_index) const {
     return primary_subgraph().tensor(tensor_index);
   }
 
-  /// Returns a pointer to an operation and registration data structure if in
-  /// bounds from the primary subgraph(subgraph_[0]).
+  // Returns a pointer to an operation and registration data structure if in
+  // bounds from the primary subgraph(subgraph_[0]).
+  //
+  // Warning: No guarantee is given about address stability. Operations
+  // (including but not limited to: `Invoke`, `ModifyGraphWithDelegate`) may
+  // invalidate the pointer returned by this function.
   const std::pair<TfLiteNode, TfLiteRegistration>* node_and_registration(
       int node_index) const {
     return primary_subgraph().node_and_registration(node_index);
   }
 
-  /// Returns a pointer to an operation and registration data structure if in
-  /// bounds.
+  // Returns a pointer to an operation and registration data structure if in
+  // bounds.
+  //
+  // Warning: No guarantee is given about address stability. Operations
+  // (including but not limited to: `Invoke`, `ModifyGraphWithDelegate`) may
+  // invalidate the pointer returned by this function.
   const std::pair<TfLiteNode, TfLiteRegistration>* node_and_registration(
       int subgraph_index, int node_index) const {
     return subgraph(subgraph_index)->node_and_registration(node_index);
@@ -336,24 +358,28 @@ class Interpreter {
 
   /// \brief Returns a pointer to the SignatureRunner instance to run the part
   /// of the graph identified by a SignatureDef.  If the model does not have any
-  /// signature defs, pass nullptr as signature_key and a SignatureRunner will
-  /// be created using the primary subgraph (0).  A nullptr is returned if the
-  /// given signature_key is not valid.  Note, the returned SignatureRunner
-  /// instance is owned by and has the same lifetime as the Interpreter object;
-  /// additionally, class SignatureRunner is *not* thread-safe.
+  /// signature defs, passing nullptr as signature_key will also default to
+  /// creating runner for primary subgraph.  A nullptr is returned if the given
+  /// signature_key is not valid.
+  /// NOTE: The returned SignatureRunner instance is owned by and has the same
+  /// lifetime as the Interpreter object; additionally, class SignatureRunner is
+  /// *not* thread-safe.
   /// If you need to specify delegates, you have to do that before calling this
   /// function. This function will additionally apply default delegates. Thus,
   /// applying delegates after that might lead to undesirable behaviors.
+  /// If you need `SignatureRunner` without applying default delegates,
+  /// use `BuiltinOpResolverWithoutDefaultDelegates`.
   SignatureRunner* GetSignatureRunner(const char* signature_key);
 
-  /// \warning Experimental interface, subject to change. \n \brief Returns a
-  /// pointer to the AsyncSignatureRunner instance to run the part of the graph
-  /// identified by a SignatureDef.  If the model does not have any signature
-  /// defs, pass nullptr as signature_key and an AsyncSignatureRunner will be
-  /// created using the primary subgraph (0).  A nullptr is returned if the
-  /// given signature_key is not valid.  Note, the returned AsyncSignatureRunner
-  /// instance is owned by and has the same lifetime as the Interpreter object;
-  /// additionally, class AsyncSignatureRunner is *not* thread-safe.
+  /// \warning Experimental interface, subject to change.
+  /// \brief Returns a pointer to the AsyncSignatureRunner instance to run the
+  /// part of the graph identified by a SignatureDef.  If the model does not
+  /// have any signature defs, passing nullptr as signature_key will also
+  /// default to creating runner for primary subgraph.  A nullptr is returned if
+  /// the given signature_key is not valid.
+  /// NOTE: The returned AsyncSignatureRunner instance is owned by and has the
+  /// same lifetime as the Interpreter object; additionally, class
+  /// AsyncSignatureRunner is *not* thread-safe.
   /// The async delegate should be applied before calling this function.
   async::AsyncSignatureRunner* GetAsyncSignatureRunner(
       const char* signature_key);
@@ -397,9 +423,14 @@ class Interpreter {
     return *default_empty_list;
   }
 
-  /// \brief Returns the input tensor identified by 'signature_input_name' in
-  /// the signature identified by 'signature_key'.
-  /// Returns nullptr if not found.
+  // Returns the input tensor identified by 'signature_input_name' in the
+  // signature identified by 'signature_key'.
+  //
+  // Returns nullptr if not found.
+  //
+  // Warning: No guarantee is given about address stability. Operations
+  // (including but not limited to: `Invoke`, `AddTensors`) may invalidate the
+  // pointer returned by this function.
   TfLiteTensor* input_tensor_by_signature(const char* signature_input_name,
                                           const char* signature_key) {
     const int subgraph_index = GetSubgraphIndexFromSignature(signature_key);
@@ -410,9 +441,14 @@ class Interpreter {
     return subgraph(subgraph_index)->tensor(tensor_index);
   }
 
-  /// \brief Returns the output tensor identified by 'signature_output_name' in
-  /// the signature identified by 'signature_key'.
-  /// Returns nullptr if not found.
+  // Returns the output tensor identified by 'signature_output_name' in the
+  // signature identified by 'signature_key'.
+  //
+  // Returns `nullptr` if not found.
+  //
+  // Warning: No guarantee is given about address stability. Operations
+  // (including but not limited to: `Invoke`, `AddTensors`) may invalidate the
+  // pointer returned by this function.
   const TfLiteTensor* output_tensor_by_signature(
       const char* signature_output_name, const char* signature_key) const {
     const int subgraph_index = GetSubgraphIndexFromSignature(signature_key);
@@ -423,49 +459,89 @@ class Interpreter {
     return subgraph(subgraph_index)->tensor(tensor_index);
   }
 
-  /// Return a mutable pointer to the given input tensor. The given index must
-  /// be between 0 and inputs().size().
+  // Returns a mutable pointer to the `index`th input tensor.
+  //
+  // `index` must be between 0 and inputs().size().
+  //
+  // Warning: No guarantee is given about address stability. Operations
+  // (including but not limited to: `Invoke`, `AddTensors`) may invalidate the
+  // pointer returned by this function.
   TfLiteTensor* input_tensor(size_t index) { return tensor(inputs()[index]); }
 
-  /// Return an immutable pointer to the given input tensor. The given index
-  /// must be between 0 and inputs().size().
+  // Returns an immutable pointer to the `index`th input tensor.
+  //
+  // `index` must be between 0 and `inputs().size()`.
+  //
+  // Warning: No guarantee is given about address stability. Operations
+  // (including but not limited to: `Invoke`, `AddTensors`) may invalidate the
+  // pointer returned by this function.
   const TfLiteTensor* input_tensor(size_t index) const {
     return tensor(inputs()[index]);
   }
 
-  /// Return a mutable pointer into the data of a given input tensor. The given
-  /// index must be between 0 and inputs().size().
+  // Returns a mutable pointer into the data of the `index`th input tensor.
+  //
+  // `index` must be between 0 and `inputs().size()`.
+  //
+  // Warning: No guarantee is given about address stability. Operations
+  // (including but not limited to: `AllocateTensors`) may invalidate the
+  // pointer returned by this function.
   template <class T>
   T* typed_input_tensor(int index) {
     return typed_tensor<T>(inputs()[index]);
   }
 
-  /// Return an immutable pointer into the data of a given input tensor. The
-  /// given index must be between 0 and inputs().size().
+  // Returns a mutable pointer into the data of the `index`th input tensor.
+  //
+  // `index` must be between 0 and `inputs().size()`.
+  //
+  // Warning: No guarantee is given about address stability. Operations
+  // (including but not limited to: `AllocateTensors`) may invalidate the
+  // pointer returned by this function.
   template <class T>
   const T* typed_input_tensor(int index) const {
     return typed_tensor<T>(inputs()[index]);
   }
 
-  /// Return a mutable pointer to the given output tensor. The given index must
-  /// be between 0 and outputs().size().
+  // Returns a mutable pointer to the `index`th output tensor.
+  //
+  // The given index must be between 0 and `outputs().size()`.
+  //
+  // Warning: No guarantee is given about address stability. Operations
+  // (including but not limited to: `Invoke`, `AddTensors`) may invalidate the
+  // pointer returned by this function.
   TfLiteTensor* output_tensor(size_t index) { return tensor(outputs()[index]); }
 
-  /// Return an immutable pointer to the given output tensor. The given index
-  /// must be between 0 and outputs().size().
+  // Returns a mutable pointer to the `index`th output tensor.
+  //
+  // The given index must be between 0 and `outputs().size()`.
+  //
+  // Warning: No guarantee is given about address stability. Operations
+  // (including but not limited to: `Invoke`, `AddTensors`) may invalidate the
+  // pointer returned by this function.
   const TfLiteTensor* output_tensor(size_t index) const {
     return tensor(outputs()[index]);
   }
 
-  /// Return a mutable pointer into the data of a given output tensor. The given
-  /// index must be between 0 and outputs().size().
+  // Returns a mutable pointer into the data of the `index`th output tensor.
+  //
+  // `index` must be between 0 and `outputs().size()`.
+  //
+  // Warning: No guarantee is given about address stability. Operations
+  // (including but not limited to: `AllocateTensors`) may invalidate the
+  // pointer returned by this function.
   template <class T>
   T* typed_output_tensor(int index) {
     return typed_tensor<T>(outputs()[index]);
   }
 
-  /// Return an immutable pointer into the data of a given output tensor. The
-  /// given index must be between 0 and outputs().size().
+  // Returns a mutable pointer into the data of the `index`th output tensor.
+  //
+  // `index` must be between 0 and `outputs().size()`.
+  //
+  // Warning: No guarantee is given about address stability. Operations
+  // (including but not limited to: `AllocateTensors`) may invalidate the
+  // pointer returned by this function.
   template <class T>
   const T* typed_output_tensor(int index) const {
     return typed_tensor<T>(outputs()[index]);
@@ -559,7 +635,7 @@ class Interpreter {
 
   /// \warning This is an experimental API and subject to change. \n
   /// \brief  Attempts to cancel in flight invocation if any.
-  /// This will not affect `Invoke`s that happends after the cancellation.
+  /// This will not affect `Invoke`s that happen after the cancellation.
   /// Non blocking. Thread safe.
   /// Returns kTfLiteError if cancellation is not enabled, otherwise returns
   /// kTfLiteOk.
@@ -691,13 +767,14 @@ class Interpreter {
   /// \brief Gets the profiler used for op tracing.
   Profiler* GetProfiler();
 
-  // The default capacity of `tensors_` vector.
-  static constexpr int kTensorsReservedCapacity = 128;
-  /// The capacity headroom of `tensors_` vector before calling ops'
-  /// `prepare` and `invoke` function. In these functions, it's guaranteed
-  /// allocating up to `kTensorsCapacityHeadroom` more tensors won't invalidate
+  /// The default capacity of the tensors vector.
+  static const int& kTensorsReservedCapacity;
+
+  /// The capacity headroom of the tensors vector before calling ops'
+  /// `prepare` and `invoke` function. In those functions, it's guaranteed
+  /// allocating up to this many more tensors won't invalidate
   /// pointers to existing tensors.
-  static constexpr int kTensorsCapacityHeadroom = 16;
+  static const int& kTensorsCapacityHeadroom;
 
   /// \warning This is an experimental API and subject to change. \n
   /// \brief Set if buffer handle output is allowed.
@@ -800,6 +877,7 @@ class Interpreter {
   friend class tflite::impl::InterpreterBuilder;
 #ifndef DOXYGEN_SKIP
   friend class tflite::InterpreterTest;
+  friend class tflite::model_builder::ModelBuilder;
   friend class tflite::SingleOpModel;
   friend class tflite::delegates::InterpreterUtils;
   friend class tflite::delegates::test_utils::TestDelegation;
@@ -910,6 +988,9 @@ class Interpreter {
   TfLiteStatus ApplyOptionsImpl(InterpreterOptions* options);
 
   std::unique_ptr<internal::SignatureDef> CreatePlaceholderSignatureDef();
+  // Given an input signature key, return a pair where the first field is a
+  // possibly replaced signature key and the second field indicates if the
+  // returned signature key was replaced.
   std::pair<const char*, bool> ReplaceWithPlaceholderSignatureKeyIfNeeded(
       const char* signature_key);
 

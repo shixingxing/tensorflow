@@ -91,8 +91,12 @@ class CuptiWrapper : public xla::profiler::CuptiInterface {
 
   CUptiResult GetGraphId(CUgraph graph, uint32_t* graph_id) override;
 
+  CUptiResult GetGraphNodeId(CUgraphNode node, uint64_t* nodeId) override;
+
   CUptiResult GetGraphExecId(CUgraphExec graph_exec,
                              uint32_t* graph_id) override;
+
+  CUptiResult SetThreadIdType(CUpti_ActivityThreadIdType type) override;
 
   void CleanUp() override {}
   bool Disabled() const override { return false; }
@@ -170,8 +174,12 @@ class CuptiWrapperStub : public xla::profiler::CuptiInterface {
 
   CUptiResult GetGraphId(CUgraph graph, uint32_t* graph_id) override;
 
+  CUptiResult GetGraphNodeId(CUgraphNode node, uint64_t* nodeId) override;
+
   CUptiResult GetGraphExecId(CUgraphExec graph_exec,
                              uint32_t* graph_id) override;
+
+  CUptiResult SetThreadIdType(CUpti_ActivityThreadIdType type) override;
 
   void CleanUp() override {}
   bool Disabled() const override { return false; }

@@ -1,7 +1,13 @@
 """Helper rules for writing LIT tests."""
 
 load("@bazel_skylib//lib:paths.bzl", "paths")
-load("//xla/tsl:tsl.bzl", "if_hermetic_cuda_tools", "if_oss")
+load("@rules_python//python:defs.bzl", "py_binary")
+load("//xla/tsl:package_groups.bzl", "DEFAULT_LOAD_VISIBILITY")
+load("//xla/tsl:tsl.bzl", "if_google", "if_oss")
+load("//xla/tsl:tsl.default.bzl", "if_cuda_tools")
+load("//xla/tsl/platform/default:cuda_build_defs.bzl", "if_cuda_is_configured")
+
+visibility(DEFAULT_LOAD_VISIBILITY)
 
 def enforce_glob(files, **kwargs):
     """A utility to enforce that a list matches a glob expression.
@@ -51,6 +57,8 @@ def lit_test_suite(
         default_tags = None,
         tags_override = None,
         hermetic_cuda_data_dir = None,
+        exec_properties = {},
+        tags = [],
         **kwargs):
     """Creates one lit test per source file and a test suite that bundles them.
 
@@ -62,7 +70,9 @@ def lit_test_suite(
         of `srcs`.
       tools: label list. Tools invoked in the lit RUN lines. These binaries will
         be symlinked into a directory which is on the path. They must therefore
-        have unique basenames.
+        have unique basenames. Note that tools that are xla_cc_binary targets
+        will also need to have linkopts = ["-Wl,-rpath,$$ORIGIN/../lit_lib"],
+        otherwise they will not work properly with hermetic cuda.
       args: string list. Additional arguments to pass to lit. Note that the test
         file, `-v`, and a `--path` argument for the directory to which `tools`
         are symlinked are added automatically.
@@ -77,6 +87,9 @@ def lit_test_suite(
       tags_override: string_dict. Tags applied in addition to only select tests.
       hermetic_cuda_data_dir: string. If set, the tests will be run with a
         `--xla_gpu_cuda_data_dir` flag set to the hermetic CUDA data directory.
+      tags: string list. Tags applied to all tests and the test suite.
+      exec_properties: string_dict. Properties to pass to the test rule, e.g.
+        requirement to run on a GPU.
       **kwargs: additional keyword arguments to pass to all generated rules.
 
     See https://llvm.org/docs/CommandGuide/lit.html for details on lit
@@ -107,14 +120,16 @@ def lit_test_suite(
             visibility = visibility,
             env = env,
             timeout = timeout,
-            tags = default_tags + tags_override.get(test_file, []),
+            tags = tags + default_tags + tags_override.get(test_file, []),
             hermetic_cuda_data_dir = hermetic_cuda_data_dir,
+            exec_properties = exec_properties,
             **kwargs
         )
 
     native.test_suite(
         name = name,
         tests = tests,
+        tags = tags,
         **kwargs
     )
 
@@ -128,7 +143,7 @@ def lit_script_with_xla_gpu_cuda_data_dir(
         name = name,
         srcs = [input_file],
         outs = [output_file],
-        cmd = if_hermetic_cuda_tools(
+        cmd = if_cuda_tools(
             """echo -e '// RUN: export XLA_FLAGS=\"--xla_gpu_cuda_data_dir={}\"' > $@;
 cat $< >> $@;""".format(xla_gpu_cuda_data_dir),
             "cat $< >> $@;",
@@ -146,6 +161,7 @@ def lit_test(
         env = None,
         timeout = None,
         hermetic_cuda_data_dir = None,
+        exec_properties = {},
         **kwargs):
     """Runs a single test file with LLVM's lit tool.
 
@@ -157,7 +173,9 @@ def lit_test(
         `test_file`.
       tools: label list. Tools invoked in the lit RUN lines. These binaries will
         be symlinked into a directory which is on the path. They must therefore
-        have unique basenames.
+        have unique basenames. Note that tools that are xla_cc_binary targets
+        will also need to have linkopts = ["-Wl,-rpath,$$ORIGIN/../lit_lib"],
+        otherwise they will not work properly with hermetic cuda.
       args: string list. Additional arguments to pass to lit. Note that the test
         file, `-v`, and a `--path` argument for the directory to which `tools`
         are symlinked are added automatically.
@@ -170,6 +188,8 @@ def lit_test(
       timeout: bazel test timeout string, as per common bazel definitions.
       hermetic_cuda_data_dir: string. If set, the tests will be run with a
         `--xla_gpu_cuda_data_dir` flag set to the hermetic CUDA data directory.
+      exec_properties: string_dict. Properties to pass to the test rule, e.g.
+        requirement to run on a GPU.
       **kwargs: additional keyword arguments to pass to all generated rules.
 
     See https://llvm.org/docs/CommandGuide/lit.html for details on lit
@@ -206,15 +226,21 @@ def lit_test(
         srcs = tools,
         bin_dir = bin_dir,
         lib_dir = lib_dir,
-        deps = ["//xla/stream_executor/cuda:all_runtime"],
+        deps = if_cuda_is_configured(
+            [
+                "//xla/stream_executor/cuda:all_runtime",
+            ],
+        ),
         visibility = ["//visibility:private"],
         **kwargs
     )
     lit_name = "//third_party/py/lit:lit"
 
+    _ = py_binary  # @unused
+
     # copybara:comment_begin(oss-only)
     lit_name = "lit_custom_" + name
-    native.py_binary(
+    py_binary(
         name = lit_name,
         main = "@llvm-project//llvm:utils/lit/lit.py",
         srcs = ["@llvm-project//llvm:utils/lit/lit.py"],
@@ -248,17 +274,21 @@ def lit_test(
             "$(location {})".format(test_file),
         ] + args,
         data = [
-            lit_name,
-            test_file,
+                   lit_name,
+                   test_file,
 
-            # TODO(cheshire): Config is not passed properly when it's not
-            # called lit.cfg.py
-            cfg,
-            tools_on_path_target_name,
-        ] + data + if_oss(["@pypi_lit//:pkg"]),
+                   # TODO(cheshire): Config is not passed properly when it's not
+                   # called lit.cfg.py
+                   cfg,
+                   tools_on_path_target_name,
+               ] + data + if_oss(["@pypi_lit//:pkg"]) +
+               if_google([
+                   "//xla:lit_google_cfg.py",
+               ]),
         visibility = visibility,
         env = env,
         timeout = timeout,
+        exec_properties = exec_properties,
         **kwargs
     )
 

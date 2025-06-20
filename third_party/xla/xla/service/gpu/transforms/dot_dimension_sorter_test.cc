@@ -23,6 +23,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/service/gpu/tests/gpu_codegen_test.h"
+#include "xla/xla.pb.h"
 #include "tsl/platform/statusor.h"
 
 namespace xla {
@@ -31,7 +32,7 @@ namespace {
 
 class WithoutDotDimensionSorterTest : public GpuCodegenTest {
  public:
-  DebugOptions GetDebugOptionsForTest() override {
+  DebugOptions GetDebugOptionsForTest() const override {
     DebugOptions debug_options = GpuCodegenTest::GetDebugOptionsForTest();
     // The pass is disabled here to preserve suboptimal dimension order in
     // 1) UnsortedDimsCreateTransposes to reveal the transposes.

@@ -16,17 +16,25 @@ limitations under the License.
 #include "xla/service/gpu/transforms/windowed_einsum_handler.h"
 
 #include <cstdint>
+#include <string>
 #include <utility>
 #include <vector>
 
+#include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "xla/hlo/ir/dfs_hlo_visitor_with_default.h"
+#include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/transforms/simplifiers/algebraic_simplifier.h"
+#include "xla/hlo/transforms/simplifiers/hlo_constant_folding.h"
 #include "xla/hlo/utils/hlo_query.h"
 #include "xla/literal.h"
 #include "xla/literal_util.h"
@@ -34,6 +42,9 @@ limitations under the License.
 #include "xla/service/hlo_creation_utils.h"
 #include "xla/service/pattern_matcher.h"
 #include "xla/service/shape_inference.h"
+#include "xla/service/while_loop_unroller.h"
+#include "xla/shape.h"
+#include "xla/shape_util.h"
 #include "xla/util.h"
 #include "xla/xla_data.pb.h"
 #include "tsl/platform/errors.h"
@@ -50,24 +61,41 @@ namespace m = match;
 // and type conversions of FP8 operands into the bodies of their while loops,
 // i.e. rewrites
 //
-//   inputs --> dequant --> while loop {collective-permute/dot/etc}
+//   inputs --> dequant --> (unary) --> while loop {collective-permute/dot/etc}
 //
 // into
 //
-//   inputs --> while loop {dequant --> collective-permute/dot/etc}.
-absl::Status ShiftDequantizationF8(HloComputation* while_body) {
-  HloInstruction* while_instr = while_body->WhileCallInstruction();
+//   inputs --> (unary) --> while loop {dequant --> collective-permute/dot/etc}.
+//
+// Unary bitcast, broadcast, copy, reshape and transpose ops are allowed between
+// dequantization and while loop. Returns the new while loop if the computation
+// was changed.
+absl::StatusOr<HloInstruction*> ShiftDequantizationF8(
+    HloComputation* while_body) {
+  auto maybe_while = while_body->GetUniqueCaller(HloOpcode::kWhile);
   // The input of the while loop will be modified and must have no other users.
-  if (!while_instr || while_instr->operand(0)->user_count() != 1) {
-    return absl::OkStatus();
+  if (!maybe_while || (*maybe_while)->operand(0)->user_count() != 1) {
+    return absl::InvalidArgumentError("Expected body to be a loop.");
   }
+  HloInstruction* while_instr = *maybe_while;
 
   // Identify the scalings and type conversions applied to the inputs of the
   // while loop.
   HloInstruction* param_tuple = while_instr->mutable_operand(0);
   std::array<HloInstruction*, 2> binaries, operands, scales;
+  std::array<std::vector<HloInstruction*>, 2> unaries;
   for (int k = 0; k < 2; ++k) {
-    if (!Match(param_tuple->mutable_operand(k),
+    HloInstruction* operand = param_tuple->mutable_operand(k);
+    // Capture bitcast, broadcast, copy, reshape and transpose ops between
+    // dequantization and the loop.
+    while (HloPredicateIsOp<HloOpcode::kBitcast, HloOpcode::kBroadcast,
+                            HloOpcode::kCopy, HloOpcode::kReshape,
+                            HloOpcode::kTranspose>(operand)) {
+      unaries[k].push_back(operand);
+      operand = operand->mutable_operand(0);
+    }
+    std::reverse(unaries[k].begin(), unaries[k].end());
+    if (!Match(operand,
                m::AnyOf<HloInstruction>(
                    m::Divide(&binaries[k], m::Convert(m::Op(&operands[k])),
                              m::Broadcast(m::Op(&scales[k]))),
@@ -75,7 +103,7 @@ absl::Status ShiftDequantizationF8(HloComputation* while_body) {
                                        m::Convert(m::Op(&operands[k])),
                                        m::Broadcast(m::Op(&scales[k])))))) {
       VLOG(5) << "Unable to identify FP8 dequantization pattern.";
-      return absl::OkStatus();
+      return nullptr;
     }
   }
 
@@ -87,7 +115,7 @@ absl::Status ShiftDequantizationF8(HloComputation* while_body) {
         (operand_types[0] == F8E4M3FN && operand_types[1] == F8E5M2) ||
         (operand_types[0] == F8E5M2 && operand_types[1] == F8E4M3FN))) {
     VLOG(5) << "Unsupported types.";
-    return absl::OkStatus();
+    return nullptr;
   }
 
   // The dequantized types must be BF16, FP16 or FP32.
@@ -96,7 +124,7 @@ absl::Status ShiftDequantizationF8(HloComputation* while_body) {
         binaries[k]->shape().element_type() != F16 &&
         binaries[k]->shape().element_type() != F32) {
       VLOG(5) << "Unsupported types.";
-      return absl::OkStatus();
+      return nullptr;
     }
   }
 
@@ -104,7 +132,7 @@ absl::Status ShiftDequantizationF8(HloComputation* while_body) {
   if (!ShapeUtil::IsScalar(scales[0]->shape()) ||
       !ShapeUtil::IsScalar(scales[1]->shape())) {
     VLOG(5) << "Scaling factors must be scalars.";
-    return absl::OkStatus();
+    return nullptr;
   }
 
   // Identify the dot, get-tuple-element and collective-permute or dynamic-slice
@@ -146,7 +174,23 @@ absl::Status ShiftDequantizationF8(HloComputation* while_body) {
     VLOG(5) << "Identified reduce-scatter windowed einsum pattern.";
   } else {
     VLOG(5) << "Unable to identify valid windowed einsum pattern.";
-    return absl::OkStatus();
+    return nullptr;
+  }
+
+  // Replace any dequantized bitcast, broadcast, copy, reshape and transpose ops
+  // before the while loop with FP8 unary ops.
+  for (int k = 0; k < 2; ++k) {
+    for (HloInstruction* unary : unaries[k]) {
+      Shape new_shape = ShapeUtil::MakeShapeWithDenseLayout(
+          operands[k]->shape().element_type(), unary->shape().dimensions(),
+          unary->shape().layout().minor_to_major());
+
+      operands[k] = unary->AddInstruction(unary->CloneWithNewOperands(
+          ShapeUtil::MakeShapeWithDenseLayout(
+              operands[k]->shape().element_type(), unary->shape().dimensions(),
+              unary->shape().layout().minor_to_major()),
+          {operands[k]}));
+    }
   }
 
   // Replace the dequantized dot operands in the parameter tuple used by while
@@ -187,7 +231,7 @@ absl::Status ShiftDequantizationF8(HloComputation* while_body) {
     TF_ASSIGN_OR_RETURN(
         HloInstruction * operand_scale,
         MakeGetTupleElementHlo(
-            body_param, body_param->shape().tuple_shapes_size() - 2 + k));
+            body_param, body_param->shape().tuple_shapes().size() - 2 + k));
 
     // Also add the scaling factor to the output tuple of the while body.
     while_root->AppendOperand(operand_scale);
@@ -252,7 +296,6 @@ absl::Status ShiftDequantizationF8(HloComputation* while_body) {
       while_instr->CloneWithNewShape(while_root->shape()));
   TF_RETURN_IF_ERROR(
       while_instr->ReplaceAllUsesWithDifferentShape(new_while_instr));
-  while_instr->while_body()->SetWhileCallInstruction(new_while_instr);
   TF_RETURN_IF_ERROR(while_instr->parent()->RemoveInstruction(while_instr));
 
   if (coll_perms[0]) {
@@ -263,7 +306,7 @@ absl::Status ShiftDequantizationF8(HloComputation* while_body) {
   TF_RETURN_IF_ERROR(while_body->RemoveInstruction(gtes[1]));
 
   VLOG(5) << "FP8 dequantization moved into while loop.";
-  return absl::OkStatus();
+  return new_while_instr;
 }
 
 int64_t NumberOfInstructionsInComp(const HloComputation* comp, HloOpcode op) {
@@ -282,7 +325,10 @@ absl::Status UpdateDotAndConsumerConfig(HloInstruction* dot,
   HloInstruction* updater = dot->users()[0];
   auto updater_gpu_config = updater->backend_config<gpu::GpuBackendConfig>();
   dot_gpu_config->set_operation_queue_id(stream_id);
-  updater_gpu_config->mutable_wait_on_operation_queues()->Add(stream_id);
+  if (!absl::c_linear_search(updater_gpu_config->wait_on_operation_queues(),
+                             stream_id)) {
+    updater_gpu_config->mutable_wait_on_operation_queues()->Add(stream_id);
+  }
 
   TF_RETURN_IF_ERROR(dot->set_backend_config(dot_gpu_config.value()));
   TF_RETURN_IF_ERROR(updater->set_backend_config(updater_gpu_config.value()));
@@ -299,87 +345,50 @@ absl::Status SetForceDelayForInstruction(HloInstruction* instr,
   return absl::OkStatus();
 }
 
-absl::StatusOr<bool> HandleRsWindowedEinsumLoop(HloComputation* comp,
-                                                int64_t stream_id) {
-  bool changed = false;
-  // If we have a einsum loop with only 1 dot, this means either
-  // the loop is not unrolled or only 1 partition is available.
-  // It's a no-op in either case.
-  if (NumberOfInstructionsInComp(comp, HloOpcode::kDot) <= 1) {
-    return changed;
-  }
-  for (auto inst : comp->MakeInstructionPostOrder()) {
-    // The dot we'd like to parallelize is consuming the second loop input
-    // as RHS.
-    if (Match(inst, m::Dot())) {
-      // Dispatch the dot to additional compute stream.
-      TF_RETURN_IF_ERROR(UpdateDotAndConsumerConfig(inst, stream_id));
-      ++stream_id;
-      changed = true;
-    }
-
-    // We need to enforce the first collective-permute to be always scheduled
-    // at the beginning of the loop.
-    HloInstruction* matched_cp;
-    if (Match(inst, m::CollectivePermute(
-                        &matched_cp, m::GetTupleElement(m::Parameter(), 2)))) {
-      TF_RETURN_IF_ERROR(
-          SetForceDelayForInstruction(matched_cp, /*force_delay=*/true));
-      changed = true;
-    }
-  }
-  // If present, move the dequantization of FP8 operands of the dot into the
-  // while loop to allow e.g. gemm_rewriter.cc to fuse the dequantization and
-  // dot into an FP8 GEMM.
-  TF_RETURN_IF_ERROR(ShiftDequantizationF8(comp));
-  return changed;
-}
-
-absl::StatusOr<bool> HandleAgWindowedEinsumLoop(HloComputation* comp,
-                                                int64_t stream_id) {
-  bool changed = false;
-  // If we have a einsum loop with only 1 dot, this means either
-  // the loop is not unrolled or only 1 partition is available.
-  // It's a no-op in either case.
-  if (NumberOfInstructionsInComp(comp, HloOpcode::kDot) <= 1) {
-    return changed;
-  }
-  for (auto inst : comp->MakeInstructionPostOrder()) {
-    // The dot we'd like to parallelize is consuming the second loop input
-    // as RHS and first loop input as LHS.
-    if (Match(inst, m::Dot(m::GetTupleElement(m::Parameter(), 0),
-                           m::GetTupleElement(m::Parameter(), 1)))) {
-      // Dispatch the dot to additional compute stream.
-      TF_RETURN_IF_ERROR(UpdateDotAndConsumerConfig(inst, stream_id));
-      ++stream_id;
-      TF_RETURN_IF_ERROR(
-          SetForceDelayForInstruction(inst, /*force_delay=*/true));
-      changed = true;
-    }
-
-    // We need to enforce the first collective-permute to be always scheduled
-    // at the beginning of the loop.
-    HloInstruction* matched_cp;
-    if (Match(inst, m::CollectivePermute(
-                        &matched_cp, m::GetTupleElement(m::Parameter(), 0)))) {
-      TF_RETURN_IF_ERROR(
-          SetForceDelayForInstruction(matched_cp, /*force_delay=*/true));
-      changed = true;
-    }
-  }
-  // If present, move the dequantization of FP8 operands of the dot into the
-  // while loop to allow e.g. gemm_rewriter.cc to fuse the dequantization and
-  // dot into an FP8 GEMM.
-  TF_RETURN_IF_ERROR(ShiftDequantizationF8(comp));
-
-  return changed;
-}
-
 static int64_t GetAgActivationCacheIndex(const HloInstruction* while_loop) {
   const HloInstruction* loop_tuple = while_loop->operand(0);
   const Shape& tuple_shape = loop_tuple->shape();
   CHECK(tuple_shape.IsTuple());
-  return tuple_shape.tuple_shapes_size() - 1;
+  return tuple_shape.tuple_shapes().size() - 1;
+}
+
+bool FindDusSliceForCachedActivation(HloInstruction* inst,
+                                     HloInstruction** dus_boundary_constant,
+                                     HloInstruction** slice_indices,
+                                     bool is_first_slice) {
+  // We are only interested in DUS in the loop body.
+  if (HloPredicateIsNotOp<HloOpcode::kDynamicUpdateSlice>(inst)) {
+    return false;
+  }
+  // Check that the first operand of DUS is a:
+  // 1. GTE of loop input param in case of the first slice of data
+  // 2. DUS in case of the second slice of data from unrolled loop.
+  HloInstruction* dus_destination = inst->mutable_operand(0);
+  if (is_first_slice &&
+      !Match(dus_destination, m::GetTupleElement(m::Parameter()))) {
+    return false;
+  }
+  if (!is_first_slice && !Match(dus_destination, m::DynamicUpdateSlice())) {
+    return false;
+  }
+  HloInstruction* dus_constant = nullptr;
+  HloInstruction* dus_slice_index = nullptr;
+  // Now we loop through all the index operands to find boundary and slice
+  // index.
+  for (int64_t i = 2; i < inst->operand_count(); i++) {
+    if (!Match(inst->mutable_operand(i), m::Constant(&dus_constant)) &&
+        !Match(
+            inst->mutable_operand(i),
+            m::Reshape(m::DynamicSlice(&dus_slice_index, m::Op(), m::Op())))) {
+      return false;
+    }
+  }
+  if (!dus_constant || !dus_slice_index) {
+    return false;
+  }
+  *dus_boundary_constant = dus_constant;
+  *slice_indices = dus_slice_index;
+  return true;
 }
 
 absl::Status ProcessWindowedEinsumLoopForActivationCaching(
@@ -415,21 +424,19 @@ absl::Status ProcessWindowedEinsumLoopForActivationCaching(
   // collective-permute
   HloInstruction* first_cp_output;
   for (HloInstruction* gte_user : input_gte->users()) {
-    if (gte_user->opcode() == HloOpcode::kCollectivePermute) {
+    if (HloPredicateIsOp<HloOpcode::kCollectivePermute>(gte_user)) {
       first_cp_output = gte_user;
       break;
     }
   }
+
   for (HloInstruction* inst : while_body->MakeInstructionPostOrder()) {
     HloInstruction* slice_indices;
     // If we have a DUS(PARAM,DS) pattern, we need to update the output
     // buffer with the first slice.
-    if (Match(inst,
-              m::DynamicUpdateSlice(
-                  m::GetTupleElement(m::Parameter()), m::Op(),
-                  m::Constant(&dus_boundary_constant),
-                  m::Reshape(m::DynamicSlice(&slice_indices, m::Op(), m::Op())),
-                  m::Op()))) {
+    if (FindDusSliceForCachedActivation(inst, &dus_boundary_constant,
+                                        &slice_indices,
+                                        /*is_first_slice=*/true)) {
       slice_indices = while_body->AddInstruction(HloInstruction::CreateReshape(
           dus_boundary_constant->shape(), slice_indices));
       VLOG(5) << "Created slice op for first slice: "
@@ -444,11 +451,9 @@ absl::Status ProcessWindowedEinsumLoopForActivationCaching(
     // unrolled, we need to update the output buffer again with the
     // second slice. Since the second slice will have different indices,
     // we need to re-capture slice_indices.
-    if (Match(inst,
-              m::DynamicUpdateSlice(
-                  m::DynamicUpdateSlice(), m::Op(), m::Constant(),
-                  m::Reshape(m::DynamicSlice(&slice_indices, m::Op(), m::Op())),
-                  m::Op()))) {
+    if (FindDusSliceForCachedActivation(inst, &dus_boundary_constant,
+                                        &slice_indices,
+                                        /*is_first_slice=*/false)) {
       slice_indices = while_body->AddInstruction(HloInstruction::CreateReshape(
           dus_boundary_constant->shape(), slice_indices));
       VLOG(5) << "Created slice op for second slice: "
@@ -534,6 +539,179 @@ bool ShouldAddToChain(const HloInstruction* inst) {
   }
 }
 
+HloComputation* MakeSumComputation(PrimitiveType type, HloModule* module) {
+  HloComputation::Builder sum_b("add");
+  auto x = sum_b.AddInstruction(HloInstruction::CreateParameter(
+      /*parameter_number=*/0, ShapeUtil::MakeShape(type, {}), "x"));
+  auto y = sum_b.AddInstruction(HloInstruction::CreateParameter(
+      /*parameter_number=*/1, ShapeUtil::MakeShape(type, {}), "y"));
+  sum_b.AddInstruction(HloInstruction::CreateBinary(
+      ShapeUtil::MakeShape(type, {}), HloOpcode::kAdd, x, y));
+  HloComputation* reduction = module->AddEmbeddedComputation(sum_b.Build());
+  return reduction;
+}
+
+// Transform partial accumulations into a reduction on a contiguous buffer.
+// Partial accumulations will impact the overlap between dots because the
+// dot+add pattern will be fused into a single gemm later in gemm rewriter
+// which adds data dependencies between gemms. Instead we write all
+// intermediate results into a larger buffer and perform a one-shot reduction.
+// The high-level transformation is:
+//
+// 'prev_res' is previously partially accumulated result.
+//
+// shape(x,y) prev_res   shape(x,y) dot0
+//          \            /
+//           \         /
+//     shape(x,y) add0    shape(x,y) dot1
+//             \                /
+//              \              /
+//             shape(x,y) add1
+//                     |
+//        shape(x,y) loop output
+//
+// transformed into:
+// shape(x,y) prev_res         shape(x,y) dot0    shape(x,y) dot1
+//    \                        /                   /
+//     \                      /                   /
+//     shape(n,x,y) concatenate on first axis, n is the number of partitions
+//                        |
+//             shape(n,x,y) loop output
+//                        |
+//             shape(x,y) reduction on first axis
+//
+// The final reduction is pulled outside of the loop to overlap with other
+// collectives.
+absl::Status MoveAccumulationOutsideLoop(
+    std::vector<HloInstruction*>& partial_accumulations,
+    HloComputation* while_body, HloInstruction* loop) {
+  // The input of the while loop will be modified and must have no other users.
+  if (!loop || loop->operand(0)->user_count() != 1) {
+    return absl::OkStatus();
+  }
+
+  std::vector<HloInstruction*> partials_to_concat;
+
+  // We reshape it to a N+1 dimensioned tensor with left-most dim being 1.
+  Shape shape = partial_accumulations[0]->shape();
+  shape = ShapeUtil::PrependMajorDimension(1, shape);
+
+  for (auto& inst : partial_accumulations) {
+    HloInstruction* reshaped_partial =
+        while_body->AddInstruction(HloInstruction::CreateReshape(shape, inst));
+    partials_to_concat.push_back(reshaped_partial);
+  }
+  Shape concat_shape = partial_accumulations[0]->shape();
+  concat_shape = ShapeUtil::PrependMajorDimension(partial_accumulations.size(),
+                                                  concat_shape);
+
+  HloInstruction* concat = while_body->AddInstruction(
+      HloInstruction::CreateConcatenate(concat_shape, partials_to_concat, 0));
+
+  HloComputation* comp = loop->parent();
+  HloInstruction* windowed_lhs = loop->mutable_operand(0)->mutable_operand(0);
+  // Add a broadcasted zero of the same type as windowed_lhs. This holds all
+  // the partial accumulations and will be fed to a global reduction after
+  // this windowed einsum loop. We move the reduction outside of the loop so
+  // it can be fused or overlap with other instructions in the main
+  // computation.
+  Literal zero_literal =
+      LiteralUtil::Zero(windowed_lhs->shape().element_type());
+  HloInstruction* zero = comp->AddInstruction(
+      HloInstruction::CreateConstant(std::move(zero_literal)));
+  Shape zero_bcast_shape = ShapeUtil::ChangeElementType(
+      concat_shape, windowed_lhs->shape().element_type());
+  HloInstruction* zero_bcast = MakeBroadcastHlo(zero, {}, zero_bcast_shape);
+  loop->mutable_operand(0)->AppendOperand(zero_bcast);
+  ShapeUtil::AppendShapeToTuple(zero_bcast->shape(),
+                                loop->mutable_operand(0)->mutable_shape());
+
+  // Update the parameter tuples of while's body and condition
+  // computations.
+  for (HloComputation* while_comp : {while_body, loop->while_condition()}) {
+    while_comp->ReplaceParameter(
+        0, HloInstruction::CreateParameter(
+               0, loop->mutable_operand(0)->shape(),
+               while_comp->parameter_instruction(0)->name()));
+  }
+  HloInstruction* root = while_body->root_instruction();
+  std::vector<HloInstruction*> original_operands(root->operands().begin(),
+                                                 root->operands().end());
+  original_operands.push_back(concat);
+  HloInstruction* new_output_tuple = while_body->AddInstruction(
+      HloInstruction::CreateTuple(original_operands));
+  TF_RETURN_IF_ERROR(
+      while_body->ReplaceInstructionWithDifferentShape(root, new_output_tuple));
+
+  // Update the shape of the while loop instruction.
+  *loop->mutable_shape() = loop->operand(0)->shape();
+
+  // The final reduction
+  HloInstruction* concat_result_gte =
+      comp->AddInstruction(HloInstruction::CreateGetTupleElement(
+          loop, (loop->operand(0)->shape().tuple_shapes().size() - 1)));
+  HloInstruction* reduced_result =
+      comp->AddInstruction(HloInstruction::CreateReduce(
+          partial_accumulations[0]->shape(), concat_result_gte, zero, {0},
+          MakeSumComputation(shape.element_type(), loop->GetModule())));
+
+  // Replace the original output if present.
+  HloInstruction* original_output_gte;
+  auto it = absl::c_find_if(loop->users(), [&](HloInstruction* instr) {
+    // Index of the original output. It's fixed to be the third element in the
+    // tuple.
+    return instr->tuple_index() == 2;
+  });
+  if (it != loop->users().end()) {
+    original_output_gte = *it;
+    TF_RETURN_IF_ERROR(original_output_gte->ReplaceAllUsesWith(reduced_result));
+  }
+  return absl::OkStatus();
+}
+absl::Status PostProcessUnrolledLoop(HloInstruction* loop, int64_t stream_id) {
+  HloComputation* while_body = loop->while_body();
+  // This is to set force delay for the first collective permute so it can
+  // be scheduled always at the top of computation. The GTE index it's consuming
+  // is 2 for RS loop; 0 for AG loop.
+  int64_t force_delay_cp_gte_index =
+      while_body->name().find(
+          WindowedEinsumHandler::kWindowedEinsumRsLoopName) == 0
+          ? 2
+          : 0;
+  std::vector<HloInstruction*> partial_accumulations;
+  for (HloInstruction* inst : while_body->MakeInstructionPostOrder()) {
+    HloInstruction* matched_cp;
+    if (Match(inst,
+              m::CollectivePermute(
+                  &matched_cp, m::GetTupleElement(m::Parameter(),
+                                                  force_delay_cp_gte_index)))) {
+      TF_RETURN_IF_ERROR(
+          SetForceDelayForInstruction(matched_cp, /*force_delay=*/true));
+    }
+
+    if (HloPredicateIsOp<HloOpcode::kDot>(inst)) {
+      // Dispatch the dot to additional compute stream.
+      TF_RETURN_IF_ERROR(UpdateDotAndConsumerConfig(inst, stream_id));
+      ++stream_id;
+    }
+    // If dot's result is accumulated, this means we found a loop with
+    // contracting dim sharded.
+    HloInstruction* partial_dot;
+    if (Match(inst, m::AddAnyOrder(m::Op(),
+                                   m::Dot(&partial_dot, m::Op(), m::Op())))) {
+      partial_accumulations.push_back(partial_dot);
+    }
+  }
+  if (partial_accumulations.size() > 0 &&
+      while_body->name().find(
+          WindowedEinsumHandler::kWindowedEinsumAgLoopName) !=
+          std::string::npos) {
+    TF_RETURN_IF_ERROR(
+        MoveAccumulationOutsideLoop(partial_accumulations, while_body, loop));
+  }
+  return absl::OkStatus();
+}
+
 struct MatchedGemmA2aResult {
   HloInstruction* producer_gemm;
   HloInstruction* lhs;
@@ -567,7 +745,7 @@ class WindowedEinsumVisitor : public DfsHloRewriteVisitor {
         allowed_intermediate_ops.insert(allowed_intermediate_ops.end(),
                                         std::begin(curr->operands()),
                                         std::end(curr->operands()));
-      } else if (curr->opcode() == HloOpcode::kAllToAll &&
+      } else if (HloPredicateIsOp<HloOpcode::kAllToAll>(curr) &&
                  curr->user_count() == 1) {
         matched_a2a = DynCast<HloAllToAllInstruction>(curr);
         allowed_intermediate_ops.pop_back();
@@ -588,7 +766,7 @@ class WindowedEinsumVisitor : public DfsHloRewriteVisitor {
     int64_t split_dimension = *matched_a2a->split_dimension();
     for (int64_t i = allowed_intermediate_ops.size() - 1; i >= 0; i--) {
       HloInstruction* current_op = allowed_intermediate_ops[i];
-      if (current_op->opcode() == HloOpcode::kReshape) {
+      if (HloPredicateIsOp<HloOpcode::kReshape>(current_op)) {
         std::vector<std::pair<int64_t, int64_t>> unmodified_dims =
             ShapeUtil::DimensionsUnmodifiedByReshape(
                 current_op->operand(0)->shape(), current_op->shape());
@@ -607,7 +785,7 @@ class WindowedEinsumVisitor : public DfsHloRewriteVisitor {
         }
         // Assign the new split dim.
         split_dimension = it->second;
-      } else if (current_op->opcode() == HloOpcode::kTranspose) {
+      } else if (HloPredicateIsOp<HloOpcode::kTranspose>(current_op)) {
         const auto& transpose_dims = current_op->dimensions();
         for (int64_t j = 0; j < transpose_dims.size(); j++) {
           if ((int64_t)transpose_dims[j] == split_dimension) {
@@ -782,6 +960,12 @@ class WindowedEinsumVisitor : public DfsHloRewriteVisitor {
     // Rewrites an all-to-all+gemm into multiple independent partial a2a+gemms
     // to minimize communication overhead. To do this, the original input will
     // be sliced into replica_group size and perform all-to-all+gemm.
+    if (!dot->GetModule()
+             ->config()
+             .debug_options()
+             .xla_gpu_experimental_enable_alltoall_windowed_einsum()) {
+      return absl::OkStatus();
+    }
     HloInstruction* lhs;
     HloInstruction* rhs;
     std::vector<xla::ReplicaGroup> replica_groups;
@@ -825,13 +1009,15 @@ class WindowedEinsumVisitor : public DfsHloRewriteVisitor {
 
       // Each split is sliced out of the input buffer, we need to determine the
       // slice sizes and increments.
-      std::vector<int64_t> lhs_slice_sizes(a2a->shape().rank(), 0);
-      std::vector<int64_t> lhs_slice_increments(a2a->shape().rank(), 1);
+      std::vector<int64_t> lhs_slice_sizes(a2a->shape().dimensions().size(), 0);
+      std::vector<int64_t> lhs_slice_increments(
+          a2a->shape().dimensions().size(), 1);
       std::vector<int64_t> lhs_slice_max_range(
           a2a->shape().dimensions().begin(), a2a->shape().dimensions().end());
 
-      std::vector<int64_t> rhs_slice_sizes(rhs->shape().rank(), 0);
-      std::vector<int64_t> rhs_slice_increments(rhs->shape().rank(), 1);
+      std::vector<int64_t> rhs_slice_sizes(rhs->shape().dimensions().size(), 0);
+      std::vector<int64_t> rhs_slice_increments(
+          rhs->shape().dimensions().size(), 1);
       std::vector<int64_t> rhs_slice_max_range(
           rhs->shape().dimensions().begin(), rhs->shape().dimensions().end());
 
@@ -941,7 +1127,8 @@ class WindowedEinsumVisitor : public DfsHloRewriteVisitor {
         allowed_intermediate_ops.insert(allowed_intermediate_ops.end(),
                                         std::begin(curr->operands()),
                                         std::end(curr->operands()));
-      } else if (curr->opcode() == HloOpcode::kDot && curr->user_count() == 1) {
+      } else if (HloPredicateIsOp<HloOpcode::kDot>(curr) &&
+                 curr->user_count() == 1) {
         matched_dot = curr;
         allowed_intermediate_ops.pop_back();
         break;
@@ -957,7 +1144,7 @@ class WindowedEinsumVisitor : public DfsHloRewriteVisitor {
     int64_t split_dimension = *a2a->split_dimension();
     for (int64_t i = 0; i < allowed_intermediate_ops.size(); i++) {
       HloInstruction* current_op = allowed_intermediate_ops[i];
-      if (current_op->opcode() == HloOpcode::kReshape) {
+      if (HloPredicateIsOp<HloOpcode::kReshape>(current_op)) {
         std::vector<std::pair<int64_t, int64_t>> unmodified_dims =
             ShapeUtil::DimensionsUnmodifiedByReshape(
                 current_op->operand(0)->shape(), current_op->shape());
@@ -976,7 +1163,7 @@ class WindowedEinsumVisitor : public DfsHloRewriteVisitor {
         }
         // Assign the new split dim.
         split_dimension = it->first;
-      } else if (current_op->opcode() == HloOpcode::kTranspose) {
+      } else if (HloPredicateIsOp<HloOpcode::kTranspose>(current_op)) {
         const auto& transpose_dims = current_op->dimensions();
         split_dimension = transpose_dims[split_dimension];
       }
@@ -1005,6 +1192,12 @@ class WindowedEinsumVisitor : public DfsHloRewriteVisitor {
   absl::Status HandleAllToAll(HloInstruction* inst) override {
     CHECK_EQ(inst->opcode(), HloOpcode::kAllToAll);
     HloComputation* comp = inst->parent();
+    if (!inst->GetModule()
+             ->config()
+             .debug_options()
+             .xla_gpu_experimental_enable_alltoall_windowed_einsum()) {
+      return absl::OkStatus();
+    }
     // Rewrites a gemm+alltoall into multiple independent partial gemm+a2as
     // to minimize communication overhead.
     std::vector<xla::ReplicaGroup> replica_groups;
@@ -1054,18 +1247,18 @@ class WindowedEinsumVisitor : public DfsHloRewriteVisitor {
           matched_result.rhs->shape().dimensions()[rhs_contracting_dim];
       // Each split is sliced out of the input buffer, we need to determine the
       // slice sizes and increments.
-      std::vector<int64_t> lhs_slice_sizes(matched_result.lhs->shape().rank(),
-                                           0);
+      std::vector<int64_t> lhs_slice_sizes(
+          matched_result.lhs->shape().dimensions().size(), 0);
       std::vector<int64_t> lhs_slice_increments(
-          matched_result.lhs->shape().rank(), 1);
+          matched_result.lhs->shape().dimensions().size(), 1);
       std::vector<int64_t> lhs_slice_max_range(
           matched_result.lhs->shape().dimensions().begin(),
           matched_result.lhs->shape().dimensions().end());
 
-      std::vector<int64_t> rhs_slice_sizes(matched_result.rhs->shape().rank(),
-                                           0);
+      std::vector<int64_t> rhs_slice_sizes(
+          matched_result.rhs->shape().dimensions().size(), 0);
       std::vector<int64_t> rhs_slice_increments(
-          matched_result.rhs->shape().rank(), 1);
+          matched_result.rhs->shape().dimensions().size(), 1);
       std::vector<int64_t> rhs_slice_max_range(
           matched_result.rhs->shape().dimensions().begin(),
           matched_result.rhs->shape().dimensions().end());
@@ -1163,19 +1356,37 @@ absl::StatusOr<bool> WindowedEinsumHandler::Run(
       5, "WindowedEinsumHandler::Run(), before:\n" + module->ToString());
   bool changed = false;
   int64_t stream_id = hlo_query::NextChannelId(*module);
-
+  std::vector<HloInstruction*> all_windowed_einsum_loops;
   for (HloComputation* comp :
        module->MakeNonfusionComputations(execution_threads)) {
-    if (comp->name().find(kWindowedEinsumRsLoopName) == 0) {
+    // If we have a einsum loop with less than 1 dot, it's not
+    // a loop of interest.
+    if (NumberOfInstructionsInComp(comp, HloOpcode::kDot) <= 1) {
+      continue;
+    }
+    if (comp->name().find(kWindowedEinsumRsLoopName) == 0 ||
+        comp->name().find(kWindowedEinsumAgLoopName) == 0) {
       VLOG(5) << "Processing computation: " << comp->name();
-      TF_ASSIGN_OR_RETURN(bool comp_result,
-                          HandleRsWindowedEinsumLoop(comp, stream_id));
-      changed = comp_result;
-    } else if (comp->name().find(kWindowedEinsumAgLoopName) == 0) {
-      VLOG(5) << "Processing computation: " << comp->name();
-      TF_ASSIGN_OR_RETURN(changed, HandleAgWindowedEinsumLoop(comp, stream_id));
-      all_ag_loops_.push_back(
-          WindowedEinsumAgLoops(comp->WhileCallInstruction()));
+      // If present, move the dequantization of FP8 operands of the dot into the
+      // while loop to allow e.g. gemm_rewriter.cc to fuse the dequantization
+      // and dot into an FP8 GEMM.
+      auto maybe_while_op = comp->GetUniqueCaller(HloOpcode::kWhile);
+      if (!maybe_while_op.has_value()) {
+        return absl::InvalidArgumentError(
+            "Expected computation to be a loop body.");
+      }
+
+      auto* while_op = *maybe_while_op;
+      TF_ASSIGN_OR_RETURN(auto maybe_new_op, ShiftDequantizationF8(comp));
+      if (maybe_new_op) {
+        changed = true;
+        while_op = maybe_new_op;
+      }
+
+      if (comp->name().find(kWindowedEinsumAgLoopName) == 0) {
+        all_ag_loops_.push_back(WindowedEinsumAgLoops(while_op));
+      }
+      all_windowed_einsum_loops.push_back(while_op);
     }
   }
 
@@ -1186,6 +1397,58 @@ absl::StatusOr<bool> WindowedEinsumHandler::Run(
     changed |= visitor.changed();
   }
 
+  if (!all_windowed_einsum_loops.empty()) {
+    // This is to prepare the module for unrolling. WhileLoopUnroller
+    // looks for the induction variable by matching specific patterns
+    // which expect AlgebraicSimplifier and HloConstantFolding to be applied.
+    // Since we get the loop directly from SPMD patitioner,
+    // the induction variable pattern doesn't conform to what unroller
+    // expects until the passes are applied.
+    AlgebraicSimplifierOptions options;
+    options.set_run_to_fixed_point(false);
+    TF_ASSIGN_OR_RETURN(bool applied_algsimp, AlgebraicSimplifier(options).Run(
+                                                  module, execution_threads));
+    changed |= applied_algsimp;
+    TF_ASSIGN_OR_RETURN(bool applied_cf,
+                        HloConstantFolding().Run(module, execution_threads));
+    changed |= applied_cf;
+  }
+  for (HloInstruction* loop : all_windowed_einsum_loops) {
+    VLOG(5) << "Processing " << loop->ToString() << " for unrolling.";
+    std::string original_body_name = std::string(loop->while_body()->name());
+    std::string original_cond_name =
+        std::string(loop->while_condition()->name());
+
+    // We fully unroll the loop here to maximize overlap.
+    // Without unrolling, each iteration will end with a DUS and gemm.
+    // The gemm will not overlap with anything which means wave quantization
+    // overhead is fully exposed.
+    // After unrolling, all gemms, DUSes, and collectives can overlap
+    // with each other.
+    // We also need to keep the unrolled instructions in an isolated computation
+    // unit such as a trivial loop so instructions here won't be fused with
+    // other instructions later to disrupt the gemm-gemm overlap.
+    TF_ASSIGN_OR_RETURN(
+        UnrollResult result,
+        WhileLoopUnroller::UnrollAndReturnReplacement(
+            loop, /*unroll_factor=*/-1, /*wrap_in_trivial_loop=*/true,
+            /*force_unroll=*/false));
+
+    if (result.unrolled) {
+      result.new_while_op->while_body()->SetAndSanitizeName(
+          absl::StrCat("unrolled_", original_body_name));
+      result.new_while_op->while_condition()->SetAndSanitizeName(
+          absl::StrCat("unrolled_", original_cond_name));
+      // The loop is fully unrolled but has a trip count of 1
+      // To prevent it from being inlined by while loop simplifier,
+      // we add this attribute to it.
+      result.new_while_op->set_frontend_attribute(
+          "skip-simplify-while-loops_trip-count-one", "true");
+      TF_RETURN_IF_ERROR(
+          PostProcessUnrolledLoop(result.new_while_op, stream_id));
+    }
+    changed |= result.unrolled;
+  }
   XLA_VLOG_LINES(5,
                  "WindowedEinsumHandler::Run(), after:\n" + module->ToString());
   return changed;

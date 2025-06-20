@@ -110,6 +110,63 @@ def FastAppendFloat8e4m3fnArrayToTensorProto(tensor_proto, proto_values):
               np.uint8))
 
 
+def SlowAppendFloat8e4m3fnuzArrayToTensorProto(tensor_proto, proto_values):
+  tensor_proto.float8_val += (
+      numpy_compat.np_asarray(
+          proto_values, dtype=dtypes.float8_e4m3fnuz.as_numpy_dtype
+      )
+      .view(np.uint8)
+      .tobytes()
+  )
+
+
+def FastAppendFloat8e4m3fnuzArrayToTensorProto(tensor_proto, proto_values):
+  fast_tensor_util.AppendFloat8ArrayToTensorProto(
+      tensor_proto,
+      numpy_compat.np_asarray(
+          proto_values, dtype=dtypes.float8_e4m3fnuz.as_numpy_dtype
+      ).view(np.uint8),
+  )
+
+
+def SlowAppendFloat8e4m3b11fnuzArrayToTensorProto(tensor_proto, proto_values):
+  tensor_proto.float8_val += (
+      numpy_compat.np_asarray(
+          proto_values, dtype=dtypes.float8_e4m3b11fnuz.as_numpy_dtype
+      )
+      .view(np.uint8)
+      .tobytes()
+  )
+
+
+def FastAppendFloat8e4m3b11fnuzArrayToTensorProto(tensor_proto, proto_values):
+  fast_tensor_util.AppendFloat8ArrayToTensorProto(
+      tensor_proto,
+      numpy_compat.np_asarray(
+          proto_values, dtype=dtypes.float8_e4m3b11fnuz.as_numpy_dtype
+      ).view(np.uint8),
+  )
+
+
+def SlowAppendFloat8e5m2fnuzArrayToTensorProto(tensor_proto, proto_values):
+  tensor_proto.float8_val += (
+      numpy_compat.np_asarray(
+          proto_values, dtype=dtypes.float8_e5m2fnuz.as_numpy_dtype
+      )
+      .view(np.uint8)
+      .tobytes()
+  )
+
+
+def FastAppendFloat8e5m2fnuzArrayToTensorProto(tensor_proto, proto_values):
+  fast_tensor_util.AppendFloat8ArrayToTensorProto(
+      tensor_proto,
+      numpy_compat.np_asarray(
+          proto_values, dtype=dtypes.float8_e5m2fnuz.as_numpy_dtype
+      ).view(np.uint8),
+  )
+
+
 def SlowAppendInt4ArrayToTensorProto(tensor_proto, proto_values):
   # The actual bit representation of int4 as a bit-field is
   # implementation-defined, so we need to explicitly cast each
@@ -125,6 +182,24 @@ def SlowAppendUInt4ArrayToTensorProto(tensor_proto, proto_values):
   # value to an int for packing.
   x = numpy_compat.np_asarray(
       proto_values, dtype=dtypes.uint4.as_numpy_dtype).astype(np.int8)
+  tensor_proto.int_val.extend(x.tolist())
+
+
+def SlowAppendInt2ArrayToTensorProto(tensor_proto, proto_values):
+  # The actual bit representation of int2 as a bit-field is
+  # implementation-defined, so we need to explicitly cast each
+  # value to an int for packing.
+  x = numpy_compat.np_asarray(
+      proto_values, dtype=dtypes.int2.as_numpy_dtype).astype(np.int8)
+  tensor_proto.int_val.extend(x.tolist())
+
+
+def SlowAppendUInt2ArrayToTensorProto(tensor_proto, proto_values):
+  # The actual bit representation of int2 as a bit-field is
+  # implementation-defined, so we need to explicitly cast each
+  # value to an int for packing.
+  x = numpy_compat.np_asarray(
+      proto_values, dtype=dtypes.uint2.as_numpy_dtype).astype(np.int8)
   tensor_proto.int_val.extend(x.tolist())
 
 
@@ -165,8 +240,19 @@ if _FAST_TENSOR_UTIL_AVAILABLE:
       dtypes.float8_e4m3fn.as_numpy_dtype: (
           FastAppendFloat8e4m3fnArrayToTensorProto
       ),
+      dtypes.float8_e4m3fnuz.as_numpy_dtype: (
+          FastAppendFloat8e4m3fnuzArrayToTensorProto
+      ),
+      dtypes.float8_e4m3b11fnuz.as_numpy_dtype: (
+          FastAppendFloat8e4m3b11fnuzArrayToTensorProto
+      ),
+      dtypes.float8_e5m2fnuz.as_numpy_dtype: (
+          FastAppendFloat8e5m2fnuzArrayToTensorProto
+      ),
       dtypes.int4.as_numpy_dtype: SlowAppendInt4ArrayToTensorProto,
       dtypes.uint4.as_numpy_dtype: SlowAppendUInt4ArrayToTensorProto,
+      dtypes.int2.as_numpy_dtype: SlowAppendInt2ArrayToTensorProto,
+      dtypes.uint2.as_numpy_dtype: SlowAppendUInt2ArrayToTensorProto,
   }
 else:
 
@@ -233,6 +319,8 @@ else:
       dtypes.qint32.as_numpy_dtype: SlowAppendQIntArrayToTensorProto,
       dtypes.int4.as_numpy_dtype: SlowAppendInt4ArrayToTensorProto,
       dtypes.uint4.as_numpy_dtype: SlowAppendUInt4ArrayToTensorProto,
+      dtypes.int2.as_numpy_dtype: SlowAppendInt2ArrayToTensorProto,
+      dtypes.uint2.as_numpy_dtype: SlowAppendUInt2ArrayToTensorProto,
   }
 
 
@@ -288,30 +376,31 @@ def _FlattenToStrings(nested_strings):
     yield nested_strings
 
 
-_TENSOR_CONTENT_TYPES = frozenset(
-    [
-        dtypes.float16,
-        dtypes.float32,
-        dtypes.float64,
-        dtypes.int32,
-        dtypes.uint8,
-        dtypes.int16,
-        dtypes.int8,
-        dtypes.int64,
-        dtypes.qint8,
-        dtypes.quint8,
-        dtypes.qint16,
-        dtypes.quint16,
-        dtypes.qint32,
-        dtypes.uint32,
-        dtypes.uint64,
-        dtypes.float8_e5m2,
-        dtypes.float8_e4m3fn,
-        dtypes.bfloat16
-        # int4/uint4 intentionally not listed, since their binary representation
-        # is implementation-dependent.
-    ]
-)
+_TENSOR_CONTENT_TYPES = frozenset([
+    dtypes.float16,
+    dtypes.float32,
+    dtypes.float64,
+    dtypes.int32,
+    dtypes.uint8,
+    dtypes.int16,
+    dtypes.int8,
+    dtypes.int64,
+    dtypes.qint8,
+    dtypes.quint8,
+    dtypes.qint16,
+    dtypes.quint16,
+    dtypes.qint32,
+    dtypes.uint32,
+    dtypes.uint64,
+    dtypes.float8_e5m2,
+    dtypes.float8_e4m3fn,
+    dtypes.float8_e4m3fnuz,
+    dtypes.float8_e4m3b11fnuz,
+    dtypes.float8_e5m2fnuz,
+    dtypes.bfloat16,
+    # int4 / uint4 / int2 / uint2 intentionally not listed, since their binary
+    # representation is implementation-dependent.
+])
 
 
 # pylint: disable=invalid-name
@@ -710,6 +799,8 @@ def MakeNdarray(tensor):
       dtypes.quint16,
       dtypes.int4,
       dtypes.uint4,
+      dtypes.int2,
+      dtypes.uint2,
   ]:
     values = np.fromiter(tensor.int_val, dtype=dtype)
   elif tensor_dtype == dtypes.int64:
@@ -910,10 +1001,10 @@ def constant_value(tensor, partial=False):  # pylint: disable=invalid-name
   Example usage:
 
   >>> a = tf.constant(10)
-  >>> tf.get_static_value(a)
+  >>> print(tf.get_static_value(a))
   10
   >>> b = tf.constant(20)
-  >>> tf.get_static_value(tf.add(a, b))
+  >>> print(tf.get_static_value(tf.add(a, b)))
   30
 
   >>> # `tf.Variable` is not supported.

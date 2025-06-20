@@ -155,6 +155,7 @@ genrule(
         "@tf_runtime//:LICENSE",
         "@local_tsl//:LICENSE",
         "@local_xla//:LICENSE",
+        "@XNNPACK//:LICENSE",
     ] + select({
         "//tensorflow:android": [],
         "//tensorflow:ios": [],
@@ -164,16 +165,10 @@ genrule(
         "//conditions:default": [
             "@com_github_googlecloudplatform_google_cloud_cpp//:LICENSE",
         ],
-    }) + select({
-        "@local_xla//xla/tsl:with_numa_support": [
-            "@hwloc//:COPYING",
-        ],
-        "//conditions:default": [],
     }) + if_cuda([
-        "@cub_archive//:LICENSE.TXT",
         "@local_config_nccl//:LICENSE",
     ]) + if_mkl([
-        "//third_party/mkl_dnn:LICENSE",
+        "@local_xla//third_party/mkl_dnn:LICENSE",
     ]) + if_enable_mkl(["@local_xla//xla/tsl/mkl:LICENSE"]) + tf_additional_license_deps(),
     outs = ["THIRD_PARTY_TF_C_LICENSES"],
     cmd = "$(location :concat_licenses.sh) $(SRCS) >$@",
@@ -198,6 +193,7 @@ genrule(
         "@tf_runtime//:LICENSE",
         "@local_tsl//:LICENSE",
         "@local_xla//:LICENSE",
+        "@XNNPACK//:LICENSE",
     ] + select({
         "//tensorflow:android": [],
         "//tensorflow:ios": [],
@@ -207,16 +203,10 @@ genrule(
         "//conditions:default": [
             "@com_github_googlecloudplatform_google_cloud_cpp//:LICENSE",
         ],
-    }) + select({
-        "@local_xla//xla/tsl:with_numa_support": [
-            "@hwloc//:COPYING",
-        ],
-        "//conditions:default": [],
     }) + if_cuda([
-        "@cub_archive//:LICENSE.TXT",
         "@local_config_nccl//:LICENSE",
     ]) + if_mkl([
-        "//third_party/mkl_dnn:LICENSE",
+        "@local_xla//third_party/mkl_dnn:LICENSE",
     ]) + if_enable_mkl(["@local_xla//xla/tsl/mkl:LICENSE"]) + tf_additional_license_deps(),
     outs = ["THIRD_PARTY_TF_JNI_LICENSES"],
     cmd = "$(location :concat_licenses.sh) $(SRCS) >$@",

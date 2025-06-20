@@ -24,6 +24,7 @@ limitations under the License.
 #include <optional>
 #include <utility>
 
+#include "absl/base/casts.h"
 #include "xla/types.h"
 #include "xla/util.h"
 
@@ -294,13 +295,38 @@ template <typename T>
 int64_t CalculateDistanceInFloats(T a, T b) {
   auto a_sign_and_magnitude = SignAndMagnitude(a);
   auto b_sign_and_magnitude = SignAndMagnitude(b);
-  int64_t a_distance_from_zero = a_sign_and_magnitude.first
-                                     ? -a_sign_and_magnitude.second
-                                     : a_sign_and_magnitude.second;
-  int64_t b_distance_from_zero = b_sign_and_magnitude.first
-                                     ? -b_sign_and_magnitude.second
-                                     : b_sign_and_magnitude.second;
-  return std::abs(a_distance_from_zero - b_distance_from_zero);
+  uint64_t a_distance_from_zero = a_sign_and_magnitude.first
+                                      ? -a_sign_and_magnitude.second
+                                      : a_sign_and_magnitude.second;
+  uint64_t b_distance_from_zero = b_sign_and_magnitude.first
+                                      ? -b_sign_and_magnitude.second
+                                      : b_sign_and_magnitude.second;
+  // Bitcast into signed type after doing subtraction in unsigned to allow for
+  // integer overflow.
+  int64_t signed_distance = a_distance_from_zero - b_distance_from_zero;
+  return std::abs(signed_distance);
+}
+
+// Packs two float operands into a single 32-bit value as bf16. The lower 16
+// bits == lower operand, and the upper 16 bits == upper operand.
+// Uses truncation to convert float to bf16. No rounding is performed.
+template <typename T>
+T PackFloatPairAsBf16(float lower, float upper) {
+  static_assert(sizeof(T) == 4);
+  uint32_t packed = absl::bit_cast<uint32_t>(lower) >> 16;
+  packed |= (absl::bit_cast<uint32_t>(upper) >> 16) << 16;
+  return absl::bit_cast<T>(packed);
+}
+
+// Unpacks a single 32-bit value as bf16 into two float operands. The lower 16
+// bits == lower operand, and the upper 16 bits == upper operand.
+template <typename T>
+std::pair</*lower=*/float, /*upper=*/float> UnpackFloatPairAsBf16(T packed) {
+  static_assert(sizeof(T) == 4);
+  const uint32_t src = absl::bit_cast<uint32_t>(packed);
+  const float lower = absl::bit_cast<float>(src << 16);
+  const float upper = absl::bit_cast<float>(src & 0xFFFF0000);
+  return std::make_pair(lower, upper);
 }
 
 }  // namespace xla

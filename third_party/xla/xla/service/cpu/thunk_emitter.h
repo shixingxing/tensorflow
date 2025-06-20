@@ -19,23 +19,30 @@ limitations under the License.
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
-#include "xla/backends/cpu/runtime/resource_use.h"
+#include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
+#include "mlir/IR/MLIRContext.h"
+#include "xla/backends/cpu/codegen/fusion_compiler.h"
+#include "xla/backends/cpu/codegen/target_machine_features.h"
+#include "xla/backends/cpu/runtime/sort_thunk.h"
 #include "xla/backends/cpu/runtime/thunk.h"
+#include "xla/codegen/kernel_spec.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_module.h"
+#include "xla/runtime/resource_use.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/cpu/ir_emitter2.h"
-#include "xla/service/cpu/target_machine_features.h"
 #include "xla/service/hlo_module_config.h"
 #include "xla/shape_util.h"
+#include "xla/xla_data.pb.h"
 
 namespace xla::cpu {
 
@@ -48,19 +55,37 @@ namespace xla::cpu {
 // multiple LLVM modules compiled to object files).
 class ThunkEmitter {
  public:
+  struct Options {
+    // Whether to compile copy as LLVM kernel. This is used to avoid
+    // dependencies on pjrt/transpose for tfcompiled models.
+    bool compile_copy_as_llvm_kernel;
+  };
+
+  struct EmittedKernel {
+    std::string kernel_name;
+    llvm::orc::ThreadSafeModule module;
+  };
+
   ThunkEmitter(IrEmitter2& ir_emitter,
                const BufferAssignment& buffer_assignment,
                const TargetMachineFeatures& target_machine_features,
-               const HloModuleConfig& hlo_module_config);
+               const HloModule& hlo_module,
+               const Options& options = {
+                   /*compile_copy_as_llvm_kernel=*/false});
 
   // Emits HLO module entry computation as a sequence of thunks.
   absl::StatusOr<ThunkSequence> EmitEntryComputation(const HloModule& module);
+
+  std::vector<EmittedKernel>& kernels() { return kernels_; }
 
  private:
   struct HostKernelAllocationSlices {
     std::vector<BufferAllocation::Slice> arguments;
     std::vector<BufferAllocation::Slice> results;
   };
+
+  std::optional<SortThunk::SortDirection> MatchSortDirection(
+      const HloComputation* hlo_comparator) const;
 
   // Returns the buffer allocation slice assigned to the given instruction at
   // the given shape index. Instruction must have a unique slice assigned to it!
@@ -167,9 +192,6 @@ class ThunkEmitter {
   absl::StatusOr<ThunkSequence> EmitSliceToDynamicThunk(
       const HloInstruction* instruction);
 
-  absl::StatusOr<ThunkSequence> EmitSelectAndScatterThunk(
-      const HloInstruction* instruction);
-
   absl::StatusOr<ThunkSequence> EmitTopKThunk(
       const HloCustomCallInstruction* custom_call);
 
@@ -180,6 +202,12 @@ class ThunkEmitter {
       const HloInstruction* instruction);
 
   absl::StatusOr<ThunkSequence> EmitSortThunk(
+      const HloInstruction* instruction);
+
+  absl::StatusOr<ThunkSequence> EmitXnnFusionThunk(
+      const HloInstruction* instruction);
+
+  absl::StatusOr<ThunkSequence> EmitOneDnnFusionThunk(
       const HloInstruction* instruction);
 
   // Returns the list of buffer allocation slices assigned to the given
@@ -204,11 +232,17 @@ class ThunkEmitter {
       const IrEmitter2::KernelInfo& kernel,
       std::optional<uint64_t> min_alignment = std::nullopt);
 
+  static absl::StatusOr<ThunkSequence> MakeKernelThunkSequence(
+      const HloInstruction* instruction, const KernelSpec& kernel_spec,
+      std::optional<uint64_t> min_alignment = std::nullopt);
+
   IrEmitter2& ir_emitter_;
   const BufferAssignment& buffer_assignment_;
 
   const TargetMachineFeatures& target_machine_features_;
   const HloModuleConfig& hlo_module_config_;
+
+  const Options options_;
 
   // A global resource that is used to order all collective operations.
   std::shared_ptr<Resource> communicator_resource_;
@@ -218,6 +252,11 @@ class ThunkEmitter {
   // create a separate resource for each unique allocation slice.
   absl::flat_hash_map<BufferAllocation::Slice, std::shared_ptr<Resource>>
       token_resources_;
+
+  std::vector<EmittedKernel> kernels_;
+
+  FusionCompiler fusion_compiler_;
+  std::unique_ptr<mlir::MLIRContext> mlir_context_;
 };
 
 }  // namespace xla::cpu

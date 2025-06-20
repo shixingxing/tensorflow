@@ -25,6 +25,7 @@ DiscoverablePathsAndVersions = configure.DiscoverablePathsAndVersions
 Backend = configure.Backend
 HostCompiler = configure.HostCompiler
 CudaCompiler = configure.CudaCompiler
+RocmCompiler = configure.RocmCompiler
 OS = configure.OS
 
 _PYTHON_BIN_PATH = "/usr/bin/python3"
@@ -34,9 +35,9 @@ _COMPILER_OPTIONS = ("-Wno-sign-compare",)
 
 # CUDA specific paths and versions
 _CUDA_SPECIFIC_PATHS_AND_VERSIONS = {
-    "cuda_version": '"12.1.1"',
+    "cuda_version": '"12.8.0"',
     "cuda_compute_capabilities": ["7.5"],
-    "cudnn_version": '"8.6"',
+    "cudnn_version": '"9.8.0"',
     "ld_library_path": "/usr/local/nvidia/lib:/usr/local/nvidia/lib64",
 }
 _CUDA_COMPUTE_CAPABILITIES_AND_LD_LIBRARY_PATH = {
@@ -98,6 +99,7 @@ class ConfigureTest(absltest.TestCase):
         compiler_options=list(_COMPILER_OPTIONS),
         cuda_compiler=CudaCompiler.NVCC,
         using_nccl=False,
+        rocm_compiler=RocmCompiler.HIPCC,
     )
 
     bazelrc_lines = config.to_bazelrc_lines(
@@ -119,6 +121,7 @@ class ConfigureTest(absltest.TestCase):
         compiler_options=list(_COMPILER_OPTIONS),
         cuda_compiler=CudaCompiler.NVCC,
         using_nccl=False,
+        rocm_compiler=RocmCompiler.HIPCC,
     )
 
     bazelrc_lines = config.to_bazelrc_lines(
@@ -139,6 +142,7 @@ class ConfigureTest(absltest.TestCase):
         compiler_options=list(_COMPILER_OPTIONS),
         cuda_compiler=CudaCompiler.CLANG,
         using_nccl=False,
+        rocm_compiler=RocmCompiler.HIPCC,
     )
 
     bazelrc_lines = config.to_bazelrc_lines(
@@ -160,6 +164,7 @@ class ConfigureTest(absltest.TestCase):
         compiler_options=list(_COMPILER_OPTIONS),
         cuda_compiler=CudaCompiler.CLANG,
         using_nccl=False,
+        rocm_compiler=RocmCompiler.HIPCC,
     )
 
     bazelrc_lines = config.to_bazelrc_lines(
@@ -181,6 +186,7 @@ class ConfigureTest(absltest.TestCase):
         compiler_options=list(_COMPILER_OPTIONS),
         cuda_compiler=CudaCompiler.NVCC,
         using_nccl=False,
+        rocm_compiler=RocmCompiler.HIPCC,
     )
 
     bazelrc_lines = config.to_bazelrc_lines(
@@ -202,6 +208,7 @@ class ConfigureTest(absltest.TestCase):
         compiler_options=list(_COMPILER_OPTIONS),
         cuda_compiler=CudaCompiler.NVCC,
         using_nccl=False,
+        rocm_compiler=RocmCompiler.HIPCC,
     )
 
     bazelrc_lines = config.to_bazelrc_lines(

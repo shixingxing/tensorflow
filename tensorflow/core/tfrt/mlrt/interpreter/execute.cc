@@ -48,21 +48,10 @@ CurrentExecutionInfo& GetCurrentExecutionInfo() {
 
 // Resume the execution in `ready_context`.
 void Resume(ExecutionContext& ready_context) {
-  auto& current_execution_info = GetCurrentExecutionInfo();
-  auto* current_context = current_execution_info.current_context;
-  if ((current_context != nullptr) &&
-      (current_execution_info.ready_context == nullptr) &&
-      (current_context->state() == ExecutionContext::State::kReturn) &&
-      (current_context->function_stack_size() == 1)) {
-    // If the current execution is exiting, we can schedule one of the ready
-    // contexts immediately.
-    current_execution_info.ready_context = &ready_context;
-  } else {
-    // Otherwise, we need to resume ready contexts through the thread pool.
-    auto* work_queue = ready_context.work_queue();
-    DCHECK(work_queue);
-    work_queue->AddTask([&ready_context]() { Execute(ready_context); });
-  }
+  // We need to resume ready contexts through the thread pool.
+  auto* work_queue = ready_context.work_queue();
+  DCHECK(work_queue);
+  work_queue->AddTask([&ready_context]() { Execute(ready_context); });
 }
 
 }  // namespace
@@ -178,6 +167,7 @@ void UnwindOnError(ExecutionContext& context, int64_t pc) {
   if (!context.function_stack_.empty()) {
     function_name = context.function_stack_.back().function_object().name();
   }
+  context.LogError(context.status());
   context.LogError(absl::InternalError(absl::StrCat(
       "UnwindOnError: start from function ", function_name,
       " with stack size: ", context.function_stack_.size(), " at pc: ", pc,

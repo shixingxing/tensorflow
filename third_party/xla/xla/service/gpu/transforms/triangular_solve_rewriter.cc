@@ -45,7 +45,7 @@ absl::StatusOr<bool> TriangularSolveRewriter::Run(
        module->MakeNonfusionComputations(execution_threads)) {
     std::vector<HloInstruction*> to_rewrite;
     for (HloInstruction* instr : comp->instructions()) {
-      if (instr->opcode() == HloOpcode::kTriangularSolve) {
+      if (HloPredicateIsOp<HloOpcode::kTriangularSolve>(instr)) {
         to_rewrite.push_back(instr);
       }
     }
@@ -79,6 +79,7 @@ absl::StatusOr<bool> TriangularSolveRewriter::Run(
       TF_ASSIGN_OR_RETURN(HloInstruction * gte,
                           MakeGetTupleElementHlo(custom_call, 0));
       TF_RETURN_IF_ERROR(comp->ReplaceInstruction(instr, gte));
+      changed = true;
     }
   }
   return changed;

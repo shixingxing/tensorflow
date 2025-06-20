@@ -73,7 +73,7 @@ TEST(PartialTensorShapeTest, Concatenate) {
 TEST(PartialTensorShapeTest, ConcatenateWithStatus) {
   PartialTensorShape s({10, 5, 20});
   PartialTensorShape s2;
-  Status status = s.ConcatenateWithStatus(400, &s2);
+  absl::Status status = s.ConcatenateWithStatus(400, &s2);
   EXPECT_TRUE(status.ok());
   EXPECT_EQ(s2.num_elements(), 400000);
   EXPECT_EQ(s2.dims(), 4);
@@ -309,7 +309,7 @@ TEST(PartialTensorShapeTest, PartialShapeMergeWith) {
   EXPECT_EQ(test.dim_size(2), 1);
 
   test = PartialTensorShape();
-  EXPECT_TRUE(errors::IsInvalidArgument(a.MergeWith(d, &test)));
+  EXPECT_TRUE(absl::IsInvalidArgument(a.MergeWith(d, &test)));
 
   test = PartialTensorShape();
   EXPECT_EQ(absl::OkStatus(), a.MergeWith(c, &test));

@@ -21,13 +21,19 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/strings/match.h"
+#include "absl/strings/string_view.h"
+#include "absl/synchronization/blocking_counter.h"
+#include "xla/executable_run_options.h"
+#include "xla/ffi/api/c_api.h"
 #include "xla/ffi/call_frame.h"
 #include "xla/ffi/execution_context.h"
 #include "xla/ffi/execution_state.h"
@@ -36,11 +42,18 @@ limitations under the License.
 #include "xla/primitive_util.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/device_memory_allocator.h"
+#include "xla/tsl/concurrency/async_value_ref.h"
+#include "xla/tsl/concurrency/chain.h"
 #include "xla/tsl/lib/core/status_test_util.h"
+#include "xla/tsl/platform/env.h"
+#include "xla/tsl/platform/status_matchers.h"
+#include "xla/tsl/platform/test.h"
+#include "xla/tsl/platform/test_benchmark.h"
+#include "xla/tsl/platform/threadpool.h"
 #include "xla/xla_data.pb.h"
-#include "tsl/platform/status_matchers.h"
-#include "tsl/platform/test.h"
-#include "tsl/platform/test_benchmark.h"
+
+#define EIGEN_USE_THREADS
+#include "unsupported/Eigen/CXX11/Tensor"
 
 namespace xla::ffi {
 
@@ -56,10 +69,48 @@ enum class Int64BasedEnum : int64_t {
   kTwo = kI32MaxValue + 2,
 };
 
+// Enums for performance benchmark defined below.
+enum class Enum0 : int32_t { kA = 0, kB = 1, kC = 2, kD = 3 };
+enum class Enum1 : int32_t { kA = 0, kB = 1, kC = 2, kD = 3 };
+enum class Enum2 : int32_t { kA = 0, kB = 1, kC = 2, kD = 3 };
+enum class Enum3 : int32_t { kA = 0, kB = 1, kC = 2, kD = 3 };
+enum class Enum4 : int32_t { kA = 0, kB = 1, kC = 2, kD = 3 };
+
 }  // namespace xla::ffi
 
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(::xla::ffi::Int32BasedEnum);
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(::xla::ffi::Int64BasedEnum);
+
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(::xla::ffi::Enum0);
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(::xla::ffi::Enum1);
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(::xla::ffi::Enum2);
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(::xla::ffi::Enum3);
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(::xla::ffi::Enum4);
+
+namespace xla::ffi {
+
+struct PairOfI32AndF32 {
+  int32_t i32;
+  float f32;
+};
+
+struct TupleOfI32 {
+  int32_t i32_0;
+  int32_t i32_1;
+  int32_t i32_2;
+  int32_t i32_3;
+};
+
+}  // namespace xla::ffi
+
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(::xla::ffi::PairOfI32AndF32,
+                                      ::xla::ffi::StructMember<int32_t>("i32"),
+                                      ::xla::ffi::StructMember<float>("f32"));
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
+    ::xla::ffi::TupleOfI32, ::xla::ffi::StructMember<int32_t>("i32_0"),
+    ::xla::ffi::StructMember<int32_t>("i32_1"),
+    ::xla::ffi::StructMember<int32_t>("i32_2"),
+    ::xla::ffi::StructMember<int32_t>("i32_3"));
 
 namespace xla::ffi {
 
@@ -73,6 +124,9 @@ TEST(FfiTest, DataTypeEnumValue) {
 
   EXPECT_EQ(encoded(PrimitiveType::PRED), encoded(DataType::PRED));
 
+  EXPECT_EQ(encoded(PrimitiveType::S1), encoded(DataType::S1));
+  EXPECT_EQ(encoded(PrimitiveType::S2), encoded(DataType::S2));
+  EXPECT_EQ(encoded(PrimitiveType::S4), encoded(DataType::S4));
   EXPECT_EQ(encoded(PrimitiveType::S8), encoded(DataType::S8));
   EXPECT_EQ(encoded(PrimitiveType::S16), encoded(DataType::S16));
   EXPECT_EQ(encoded(PrimitiveType::S32), encoded(DataType::S32));
@@ -94,12 +148,16 @@ TEST(FfiTest, DataTypeEnumValue) {
 
   EXPECT_EQ(encoded(PrimitiveType::TOKEN), encoded(DataType::TOKEN));
 
+  EXPECT_EQ(encoded(PrimitiveType::F4E2M1FN), encoded(DataType::F4E2M1FN));
   EXPECT_EQ(encoded(PrimitiveType::F8E5M2), encoded(DataType::F8E5M2));
+  EXPECT_EQ(encoded(PrimitiveType::F8E4M3), encoded(DataType::F8E4M3));
   EXPECT_EQ(encoded(PrimitiveType::F8E4M3FN), encoded(DataType::F8E4M3FN));
   EXPECT_EQ(encoded(PrimitiveType::F8E4M3B11FNUZ),
             encoded(DataType::F8E4M3B11FNUZ));
   EXPECT_EQ(encoded(PrimitiveType::F8E5M2FNUZ), encoded(DataType::F8E5M2FNUZ));
   EXPECT_EQ(encoded(PrimitiveType::F8E4M3FNUZ), encoded(DataType::F8E4M3FNUZ));
+  EXPECT_EQ(encoded(PrimitiveType::F8E3M4), encoded(DataType::F8E3M4));
+  EXPECT_EQ(encoded(PrimitiveType::F8E8M0FNU), encoded(DataType::F8E8M0FNU));
 }
 
 TEST(FfiTest, DataTypeByteWidth) {
@@ -109,6 +167,12 @@ TEST(FfiTest, DataTypeByteWidth) {
   EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::PRED),
             ByteWidth(DataType::PRED));
 
+  EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::S1),
+            ByteWidth(DataType::S1));
+  EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::S2),
+            ByteWidth(DataType::S2));
+  EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::S4),
+            ByteWidth(DataType::S4));
   EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::S8),
             ByteWidth(DataType::S8));
   EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::S16),
@@ -118,6 +182,12 @@ TEST(FfiTest, DataTypeByteWidth) {
   EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::S64),
             ByteWidth(DataType::S64));
 
+  EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::U1),
+            ByteWidth(DataType::U1));
+  EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::U2),
+            ByteWidth(DataType::U2));
+  EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::U4),
+            ByteWidth(DataType::U4));
   EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::U8),
             ByteWidth(DataType::U8));
   EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::U16),
@@ -142,8 +212,12 @@ TEST(FfiTest, DataTypeByteWidth) {
   EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::C128),
             ByteWidth(DataType::C128));
 
+  EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::F4E2M1FN),
+            ByteWidth(DataType::F4E2M1FN));
   EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::F8E5M2),
             ByteWidth(DataType::F8E5M2));
+  EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::F8E4M3),
+            ByteWidth(DataType::F8E4M3));
   EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::F8E4M3FN),
             ByteWidth(DataType::F8E4M3FN));
   EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::F8E4M3B11FNUZ),
@@ -152,6 +226,10 @@ TEST(FfiTest, DataTypeByteWidth) {
             ByteWidth(DataType::F8E5M2FNUZ));
   EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::F8E4M3FNUZ),
             ByteWidth(DataType::F8E4M3FNUZ));
+  EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::F8E3M4),
+            ByteWidth(DataType::F8E3M4));
+  EXPECT_EQ(primitive_util::ByteWidth(PrimitiveType::F8E8M0FNU),
+            ByteWidth(DataType::F8E8M0FNU));
 }
 
 TEST(FfiTest, ErrorEnumValue) {
@@ -202,6 +280,161 @@ TEST(FfiTest, Expected) {
   EXPECT_THAT(error.error().message(), HasSubstr("Test error"));
 }
 
+TEST(FfiTest, FutureSetAvailable) {
+  Promise promise;
+  Future future(promise);
+
+  promise.SetAvailable();
+  future.OnReady([](const std::optional<Error>& error) {
+    EXPECT_FALSE(error.has_value());
+  });
+}
+
+TEST(FfiTest, FutureSetError) {
+  Promise promise;
+  Future future(promise);
+
+  promise.SetError(Error(ErrorCode::kInternal, "Test error"));
+  future.OnReady([](const std::optional<Error>& error) {
+    EXPECT_TRUE(error.has_value());
+    EXPECT_THAT(error->message(), HasSubstr("Test error"));
+  });
+}
+
+TEST(FfiTest, FutureSetAvailableFromThreadPool) {
+  tsl::thread::ThreadPool pool(tsl::Env::Default(), "ffi-test", 2);
+
+  Promise promise;
+  Future future(promise);
+
+  // We write and read to and from the shared variable to check that `OnReady`
+  // callback is correctly synchronized with memory writes done in a thread
+  // that completes the promise.
+  int32_t value = 0;
+
+  absl::BlockingCounter counter(1);
+
+  future.OnReady([&](const std::optional<Error>& error) {
+    EXPECT_FALSE(error.has_value());
+    EXPECT_EQ(value, 42);
+    counter.DecrementCount();
+  });
+
+  pool.Schedule([&]() {
+    value = 42;
+    promise.SetAvailable();
+  });
+
+  counter.Wait();
+}
+
+TEST(FfiTest, FutureSetErrorFromThreadPool) {
+  tsl::thread::ThreadPool pool(tsl::Env::Default(), "ffi-test", 2);
+
+  Promise promise;
+  Future future(promise);
+
+  // We write and read to and from the shared variable to check that `OnReady`
+  // callback is correctly synchronized with memory writes done in a thread
+  // that completes the promise.
+  int32_t value = 0;
+
+  absl::BlockingCounter counter(1);
+
+  future.OnReady([&](const std::optional<Error>& error) {
+    EXPECT_TRUE(error.has_value());
+    EXPECT_THAT(error->message(), HasSubstr("Test error"));
+    EXPECT_EQ(value, 42);
+    counter.DecrementCount();
+  });
+
+  pool.Schedule([&]() {
+    value = 42;
+    promise.SetError(Error(ErrorCode::kInternal, "Test error"));
+  });
+
+  counter.Wait();
+}
+
+TEST(FfiTest, FutureRace) {
+  tsl::thread::ThreadPool pool(tsl::Env::Default(), "ffi-test", 2);
+
+  // Schedule `SetAvailable` and `OnReady` on a thread pool to detect
+  // potential data races. Do this in a loop to make sure that we have
+  // a good chance of triggering a data race if there is one.
+  for (int32_t i = 0; i < 1000; ++i) {
+    Promise promise;
+    Future future(promise);
+
+    absl::BlockingCounter counter(1);
+
+    pool.Schedule([&]() { promise.SetAvailable(); });
+    pool.Schedule([&]() {
+      future.OnReady([&](const std::optional<Error>& error) {
+        EXPECT_FALSE(error.has_value());
+        counter.DecrementCount();
+      });
+    });
+
+    counter.Wait();
+  }
+}
+
+TEST(FfiTest, CountDownSuccess) {
+  CountDownPromise counter(2);
+  Future future(counter);
+  EXPECT_FALSE(counter.CountDown());
+  EXPECT_TRUE(counter.CountDown());
+  future.OnReady([](const std::optional<Error>& error) {
+    EXPECT_FALSE(error.has_value());
+  });
+}
+
+TEST(FfiTest, CountDownError) {
+  CountDownPromise counter(3);
+  Future future(counter);
+  EXPECT_FALSE(counter.CountDown());
+  EXPECT_FALSE(counter.CountDown(Error(ErrorCode::kInternal, "Test error")));
+  EXPECT_TRUE(counter.CountDown());
+  future.OnReady([](const std::optional<Error>& error) {
+    EXPECT_TRUE(error.has_value());
+    EXPECT_THAT(error->message(), HasSubstr("Test error"));
+  });
+}
+
+TEST(FfiTest, CountDownSuccessFromThreadPool) {
+  tsl::thread::ThreadPool pool(tsl::Env::Default(), "ffi-test", 2);
+
+  CountDownPromise counter(2);
+  Future future(counter);
+
+  future.OnReady([](const std::optional<Error>& error) {
+    EXPECT_FALSE(error.has_value());
+  });
+
+  for (int64_t i = 0; i < 2; ++i) {
+    pool.Schedule([counter]() mutable { counter.CountDown(); });
+  }
+}
+
+TEST(FfiTest, CountDownErrorFromThreadPool) {
+  tsl::thread::ThreadPool pool(tsl::Env::Default(), "ffi-test", 2);
+
+  CountDownPromise counter(3);
+  Future future(counter);
+
+  future.OnReady([](const std::optional<Error>& error) {
+    EXPECT_TRUE(error.has_value());
+    EXPECT_THAT(error->message(), HasSubstr("Test error"));
+  });
+
+  pool.Schedule([counter]() mutable { counter.CountDown(); });
+  pool.Schedule([counter]() mutable {
+    counter.CountDown(Error(ErrorCode::kInternal, "Test error"));
+  });
+  pool.Schedule([counter]() mutable { counter.CountDown(); });
+}
+
 TEST(FfiTest, ReturnError) {
   CallFrameBuilder builder(/*num_args=*/0, /*num_rets=*/0);
   auto call_frame = builder.Build();
@@ -211,6 +444,41 @@ TEST(FfiTest, ReturnError) {
 
   auto status = Call(*handler, call_frame);
   EXPECT_EQ(status, absl::InternalError("Test error"));
+}
+
+TEST(FfiTest, RunId) {
+  CallFrameBuilder builder(/*num_args=*/0, /*num_rets=*/0);
+  auto call_frame = builder.Build();
+
+  auto handler = Ffi::Bind().Ctx<RunId>().To([&](RunId run_id) {
+    EXPECT_EQ(run_id.run_id, 42);
+    return Error::Success();
+  });
+
+  CallOptions options;
+  options.run_id = xla::RunId{42};
+
+  auto status = Call(*handler, call_frame, options);
+
+  TF_ASSERT_OK(status);
+}
+
+TEST(FfiTest, DeviceOrdinal) {
+  CallFrameBuilder builder(/*num_args=*/0, /*num_rets=*/0);
+  auto call_frame = builder.Build();
+
+  auto handler =
+      Ffi::Bind().Ctx<DeviceOrdinal>().To([&](int32_t device_ordinal) {
+        EXPECT_EQ(device_ordinal, 42);
+        return Error::Success();
+      });
+
+  CallOptions options;
+  options.device_ordinal = 42;
+
+  auto status = Call(*handler, call_frame, options);
+
+  TF_ASSERT_OK(status);
 }
 
 TEST(FfiTest, AnyBufferArgument) {
@@ -223,6 +491,10 @@ TEST(FfiTest, AnyBufferArgument) {
 
   auto handler = Ffi::Bind().Arg<AnyBuffer>().To([&](auto buffer) {
     EXPECT_EQ(buffer.untyped_data(), storage.data());
+    EXPECT_EQ(buffer.template typed_data<float>(),
+              reinterpret_cast<float*>(storage.data()));
+    EXPECT_EQ(buffer.template reinterpret_data<int32_t>(),
+              reinterpret_cast<int32_t*>(storage.data()));
     EXPECT_EQ(buffer.dimensions().size(), 2);
     return Error::Success();
   });
@@ -259,6 +531,8 @@ TEST(FfiTest, AnyBufferResult) {
 
   auto handler = Ffi::Bind().Ret<AnyBuffer>().To([&](Result<AnyBuffer> buffer) {
     EXPECT_EQ(buffer->untyped_data(), storage.data());
+    EXPECT_EQ(buffer->template typed_data<float>(),
+              reinterpret_cast<float*>(storage.data()));
     EXPECT_EQ(buffer->dimensions().size(), 2);
     return Error::Success();
   });
@@ -312,6 +586,25 @@ TEST(FfiTest, WrongTypeBufferArgument) {
       status,
       StatusIs(absl::StatusCode::kInvalidArgument,
                HasSubstr("Wrong buffer dtype: expected F32 but got S32")));
+}
+
+TEST(FfiTest, WrongNumberOfArguments) {
+  CallFrameBuilder::AttributesBuilder attrs;
+  attrs.Insert("foo", 42);
+  attrs.Insert("bar", 43);
+
+  CallFrameBuilder builder(/*num_args=*/0, /*num_rets=*/0);
+  builder.AddAttributes(attrs.Build());
+  auto call_frame = builder.Build();
+
+  auto handler =
+      Ffi::Bind().Attr<int>("foo").To([](int foo) { return Error::Success(); });
+  auto status = Call(*handler, call_frame);
+
+  EXPECT_THAT(status, StatusIs(absl::StatusCode::kInvalidArgument,
+                               HasSubstr("Wrong number of attributes")));
+  EXPECT_THAT(status.message(), HasSubstr("foo"));
+  EXPECT_THAT(status.message(), HasSubstr("bar"));
 }
 
 TEST(FfiTest, TokenArgument) {
@@ -542,16 +835,8 @@ TEST(FfiTest, AutoBindingResult) {
   TF_ASSERT_OK(status);
 }
 
-struct I32AndF32 {
-  int32_t i32;
-  float f32;
-};
-
-XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(I32AndF32, StructMember<int32_t>("i32"),
-                                      StructMember<float>("f32"));
-
 TEST(FfiTest, AutoBindingStructs) {
-  auto handler = Ffi::BindTo(+[](I32AndF32 attrs) {
+  auto handler = Ffi::BindTo(+[](PairOfI32AndF32 attrs) {
     EXPECT_EQ(attrs.i32, 42);
     EXPECT_EQ(attrs.f32, 42.0f);
     return Error::Success();
@@ -609,21 +894,29 @@ TEST(FfiTest, ArrayAttr) {
   attrs.Insert("arr1", std::vector<int16_t>({1, 2, 3, 4}));
   attrs.Insert("arr2", std::vector<int32_t>({1, 2, 3, 4}));
   attrs.Insert("arr3", std::vector<int64_t>({1, 2, 3, 4}));
-  attrs.Insert("arr4", std::vector<float>({1, 2, 3, 4}));
-  attrs.Insert("arr5", std::vector<double>({1, 2, 3, 4}));
+  attrs.Insert("arr4", std::vector<uint8_t>({1, 2, 3, 4}));
+  attrs.Insert("arr5", std::vector<uint16_t>({1, 2, 3, 4}));
+  attrs.Insert("arr6", std::vector<uint32_t>({1, 2, 3, 4}));
+  attrs.Insert("arr7", std::vector<uint64_t>({1, 2, 3, 4}));
+  attrs.Insert("arr8", std::vector<float>({1, 2, 3, 4}));
+  attrs.Insert("arr9", std::vector<double>({1, 2, 3, 4}));
 
   CallFrameBuilder builder(/*num_args=*/0, /*num_rets=*/0);
   builder.AddAttributes(attrs.Build());
   auto call_frame = builder.Build();
 
   auto fn = [&](auto arr0, auto arr1, auto arr2, auto arr3, auto arr4,
-                auto arr5) {
+                auto arr5, auto arr6, auto arr7, auto arr8, auto arr9) {
     EXPECT_EQ(arr0, Span<const int8_t>({1, 2, 3, 4}));
     EXPECT_EQ(arr1, Span<const int16_t>({1, 2, 3, 4}));
     EXPECT_EQ(arr2, Span<const int32_t>({1, 2, 3, 4}));
     EXPECT_EQ(arr3, Span<const int64_t>({1, 2, 3, 4}));
-    EXPECT_EQ(arr4, Span<const float>({1, 2, 3, 4}));
-    EXPECT_EQ(arr5, Span<const double>({1, 2, 3, 4}));
+    EXPECT_EQ(arr4, Span<const uint8_t>({1, 2, 3, 4}));
+    EXPECT_EQ(arr5, Span<const uint16_t>({1, 2, 3, 4}));
+    EXPECT_EQ(arr6, Span<const uint32_t>({1, 2, 3, 4}));
+    EXPECT_EQ(arr7, Span<const uint64_t>({1, 2, 3, 4}));
+    EXPECT_EQ(arr8, Span<const float>({1, 2, 3, 4}));
+    EXPECT_EQ(arr9, Span<const double>({1, 2, 3, 4}));
     return Error::Success();
   };
 
@@ -632,8 +925,12 @@ TEST(FfiTest, ArrayAttr) {
                      .Attr<Span<const int16_t>>("arr1")
                      .Attr<Span<const int32_t>>("arr2")
                      .Attr<Span<const int64_t>>("arr3")
-                     .Attr<Span<const float>>("arr4")
-                     .Attr<Span<const double>>("arr5")
+                     .Attr<Span<const uint8_t>>("arr4")
+                     .Attr<Span<const uint16_t>>("arr5")
+                     .Attr<Span<const uint32_t>>("arr6")
+                     .Attr<Span<const uint64_t>>("arr7")
+                     .Attr<Span<const float>>("arr8")
+                     .Attr<Span<const double>>("arr9")
                      .To(fn);
   auto status = Call(*handler, call_frame);
 
@@ -665,9 +962,17 @@ TEST(FfiTest, AttrsAsDictionary) {
     EXPECT_TRUE(f32.has_value());
     EXPECT_TRUE(str.has_value());
 
-    if (i32.has_value()) EXPECT_EQ(*i32, 42);
-    if (f32.has_value()) EXPECT_EQ(*f32, 42.0f);
-    if (str.has_value()) EXPECT_EQ(*str, "foo");
+    if (i32.has_value()) {
+      EXPECT_EQ(*i32, 42);
+    }
+
+    if (f32.has_value()) {
+      EXPECT_EQ(*f32, 42.0f);
+    }
+
+    if (str.has_value()) {
+      EXPECT_EQ(*str, "foo");
+    }
 
     EXPECT_FALSE(dict.contains("i64"));
     EXPECT_FALSE(dict.get<int64_t>("i32").has_value());
@@ -683,10 +988,10 @@ TEST(FfiTest, AttrsAsDictionary) {
 }
 
 TEST(FfiTest, DictionaryAttr) {
-  CallFrameBuilder::FlatAttributesMap dict0;
+  CallFrameBuilder::AttributesMap dict0;
   dict0.try_emplace("i32", 42);
 
-  CallFrameBuilder::FlatAttributesMap dict1;
+  CallFrameBuilder::AttributesMap dict1;
   dict1.try_emplace("f32", 42.0f);
 
   CallFrameBuilder::AttributesBuilder attrs;
@@ -710,8 +1015,13 @@ TEST(FfiTest, DictionaryAttr) {
     EXPECT_TRUE(i32.has_value());
     EXPECT_TRUE(f32.has_value());
 
-    if (i32.has_value()) EXPECT_EQ(*i32, 42);
-    if (f32.has_value()) EXPECT_EQ(*f32, 42.0f);
+    if (i32.has_value()) {
+      EXPECT_EQ(*i32, 42);
+    }
+
+    if (f32.has_value()) {
+      EXPECT_EQ(*f32, 42.0f);
+    }
 
     return Error::Success();
   };
@@ -724,17 +1034,8 @@ TEST(FfiTest, DictionaryAttr) {
   TF_ASSERT_OK(status);
 }
 
-struct PairOfI32AndF32 {
-  int32_t i32;
-  float f32;
-};
-
-XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(PairOfI32AndF32,
-                                      StructMember<int32_t>("i32"),
-                                      StructMember<float>("f32"));
-
 TEST(FfiTest, StructAttr) {
-  CallFrameBuilder::FlatAttributesMap dict;
+  CallFrameBuilder::AttributesMap dict;
   dict.try_emplace("i32", 42);
   dict.try_emplace("f32", 42.0f);
 
@@ -847,7 +1148,7 @@ TEST(FfiTest, EnumAttr) {
 }
 
 TEST(FfiTest, WrongEnumAttrType) {
-  CallFrameBuilder::FlatAttributesMap dict;
+  CallFrameBuilder::AttributesMap dict;
   dict.try_emplace("i32", 42);
 
   CallFrameBuilder::AttributesBuilder attrs;
@@ -885,30 +1186,52 @@ TEST(FfiTest, WrongEnumAttrType) {
       << status.message() << "\n";
 }
 
-struct MyData {
+struct MyDataWithAutoTypeId {
   static TypeId id;
-  std::string str;
+  std::string value;
 };
 
-TypeId MyData::id = {};  // zero-initialize type id
-XLA_FFI_REGISTER_TYPE(GetXlaFfiApi(), "my_data", &MyData::id);
+struct MyDataWithExplicitTypeId {
+  static TypeId id;
+  int64_t value;
+};
+
+// Rely on XLA to assign unique type id for the type.
+TypeId MyDataWithAutoTypeId::id = XLA_FFI_UNKNOWN_TYPE_ID;
+XLA_FFI_REGISTER_TYPE(GetXlaFfiApi(), "my_data_auto",
+                      &MyDataWithAutoTypeId::id);
+
+// Provide explicit type id and rely on XLA to check that it's unique.
+TypeId MyDataWithExplicitTypeId::id = {42};
+XLA_FFI_REGISTER_TYPE(GetXlaFfiApi(), "my_data_explicit",
+                      &MyDataWithExplicitTypeId::id);
 
 TEST(FfiTest, UserData) {
-  MyData data{"foo"};
+  MyDataWithAutoTypeId data0{"foo"};
+  MyDataWithExplicitTypeId data1{42};
+
+  EXPECT_GE(MyDataWithAutoTypeId::id.type_id, 0);
+  EXPECT_EQ(MyDataWithExplicitTypeId::id.type_id, 42);
 
   ExecutionContext execution_context;
   TF_ASSERT_OK(execution_context.Insert(
-      TypeIdRegistry::TypeId(MyData::id.type_id), &data));
+      TypeIdRegistry::TypeId(MyDataWithAutoTypeId::id.type_id), &data0));
+  TF_ASSERT_OK(execution_context.Insert(
+      TypeIdRegistry::TypeId(MyDataWithExplicitTypeId::id.type_id), &data1));
 
   CallFrameBuilder builder(/*num_args=*/0, /*num_rets=*/0);
   auto call_frame = builder.Build();
 
-  auto fn = [&](MyData* data) {
-    EXPECT_EQ(data->str, "foo");
+  auto fn = [&](MyDataWithAutoTypeId* data0, MyDataWithExplicitTypeId* data1) {
+    EXPECT_EQ(data0->value, "foo");
+    EXPECT_EQ(data1->value, 42);
     return Error::Success();
   };
 
-  auto handler = Ffi::Bind().Ctx<UserData<MyData>>().To(fn);
+  auto handler = Ffi::Bind()
+                     .Ctx<UserData<MyDataWithAutoTypeId>>()
+                     .Ctx<UserData<MyDataWithExplicitTypeId>>()
+                     .To(fn);
 
   CallOptions options;
   options.execution_context = &execution_context;
@@ -1019,6 +1342,115 @@ TEST(FfiTest, ScratchAllocatorUnimplemented) {
   TF_ASSERT_OK(status);
 }
 
+TEST(FfiTest, BindFfiInternals) {
+  (void)Ffi::Bind().Ctx<FfiApi>().Ctx<FfiExecutionContext>().To(
+      +[](const XLA_FFI_Api* api, XLA_FFI_ExecutionContext* ctx) {
+        return Error::Success();
+      });
+}
+
+TEST(FfiTest, ThreadPool) {
+  tsl::thread::ThreadPool pool(tsl::Env::Default(), "ffi-test", 2);
+  Eigen::ThreadPoolDevice device(pool.AsEigenThreadPool(), pool.NumThreads());
+
+  auto fn = [&](ThreadPool thread_pool) {
+    // Check that we can get the size of the underlying thread pool.
+    if (thread_pool.num_threads() != 2) {
+      return Error::Internal("Wrong number of threads");
+    }
+
+    // Use a pair of blocking counters to check that scheduled task was executed
+    // on a thread pool (it would deadlock if executed inline).
+    absl::BlockingCounter prepare(1);
+    absl::BlockingCounter execute(1);
+
+    thread_pool.Schedule([&] {
+      prepare.Wait();
+      execute.DecrementCount();
+    });
+
+    prepare.DecrementCount();
+    execute.Wait();
+
+    return Error::Success();
+  };
+
+  auto handler = Ffi::Bind().Ctx<ThreadPool>().To(fn);
+  CallFrame call_frame =
+      CallFrameBuilder(/*num_args=*/0, /*num_rets=*/0).Build();
+
+  CallOptions options;
+  options.backend_options = CallOptions::CpuOptions{&device};
+
+  auto status = Call(*handler, call_frame, options);
+  TF_ASSERT_OK(status);
+}
+
+TEST(FfiTest, AsyncHandler) {
+  tsl::thread::ThreadPool pool(tsl::Env::Default(), "ffi-test", 2);
+  Eigen::ThreadPoolDevice device(pool.AsEigenThreadPool(), pool.NumThreads());
+
+  int32_t value = 0;
+
+  // Handler completes execution asynchronously on a given thread pool.
+  auto fn = [&](ThreadPool thread_pool) -> Future {
+    Promise promise;
+    Future future(promise);
+
+    thread_pool.Schedule([&, promise = std::move(promise)]() mutable {
+      value = 42;
+      promise.SetAvailable();
+    });
+
+    return future;
+  };
+
+  auto handler = Ffi::Bind().Ctx<ThreadPool>().To(fn);
+  CallFrame call_frame =
+      CallFrameBuilder(/*num_args=*/0, /*num_rets=*/0).Build();
+
+  CallOptions options;
+  options.backend_options = CallOptions::CpuOptions{&device};
+
+  {  // Synchronous call.
+    absl::Status status = Call(*handler, call_frame, options);
+    TF_ASSERT_OK(status);
+    EXPECT_EQ(value, 42);
+  }
+
+  value = 0;  // reset value between calls
+
+  {  // Asynchronous call.
+    tsl::AsyncValueRef<tsl::Chain> async_value =
+        CallAsync(*handler, call_frame, options);
+    tsl::BlockUntilReady(async_value);
+    ASSERT_TRUE(async_value.IsConcrete());
+    EXPECT_EQ(value, 42);
+  }
+}
+
+TEST(FfiTest, Metadata) {
+  auto api = GetXlaFfiApi();
+  auto handler = Ffi::BindTo([]() { return Error::Success(); });
+  auto maybe_metadata = GetMetadata(*handler);
+  EXPECT_TRUE(maybe_metadata.ok());
+  auto metadata = maybe_metadata.value();
+  EXPECT_EQ(metadata.api_version.major_version, api->api_version.major_version);
+  EXPECT_EQ(metadata.api_version.minor_version, api->api_version.minor_version);
+  EXPECT_EQ(metadata.traits, 0);
+}
+
+TEST(FfiTest, MetadataTraits) {
+  auto handler = Ffi::BindTo([]() { return Error::Success(); },
+                             {Traits::kCmdBufferCompatible});
+  auto maybe_metadata = GetMetadata(*handler);
+  EXPECT_TRUE(maybe_metadata.ok());
+  auto metadata = maybe_metadata.value();
+  EXPECT_EQ(metadata.api_version.major_version, XLA_FFI_API_MAJOR);
+  EXPECT_EQ(metadata.api_version.minor_version, XLA_FFI_API_MINOR);
+  EXPECT_EQ(metadata.traits, XLA_FFI_HANDLER_TRAITS_COMMAND_BUFFER_COMPATIBLE);
+}
+
 //===----------------------------------------------------------------------===//
 // Performance benchmarks are below.
 //===----------------------------------------------------------------------===//
@@ -1079,6 +1511,27 @@ void BM_AnyBufferArgX4(benchmark::State& state) {
 }
 
 BENCHMARK(BM_AnyBufferArgX4);
+
+//===----------------------------------------------------------------------===//
+// BM_AsyncAnyBufferArgX1
+//===----------------------------------------------------------------------===//
+
+void BM_AsyncAnyBufferArgX1(benchmark::State& state) {
+  auto call_frame = WithBufferArgs(1).Build();
+
+  auto handler = Ffi::Bind().Arg<AnyBuffer>().To([](auto buffer) {
+    benchmark::DoNotOptimize(buffer);
+    Promise promise;
+    promise.SetAvailable();
+    return Future(promise);
+  });
+
+  for (auto _ : state) {
+    CHECK_OK(Call(*handler, call_frame));
+  }
+}
+
+BENCHMARK(BM_AsyncAnyBufferArgX1);
 
 //===----------------------------------------------------------------------===//
 // BM_BufferArgX1
@@ -1166,19 +1619,6 @@ BENCHMARK(BM_BufferArgX8);
 // BM_TupleOfI32Attrs
 //===----------------------------------------------------------------------===//
 
-struct TupleOfI32 {
-  int64_t i32_0;
-  int64_t i32_1;
-  int64_t i32_2;
-  int64_t i32_3;
-};
-
-XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(TupleOfI32,
-                                      StructMember<int32_t>("i32_0"),
-                                      StructMember<int32_t>("i32_1"),
-                                      StructMember<int32_t>("i32_2"),
-                                      StructMember<int32_t>("i32_3"));
-
 void BM_TupleOfI32Attrs(benchmark::State& state) {
   CallFrameBuilder::AttributesBuilder attrs;
   attrs.Insert("i32_0", 1);
@@ -1201,5 +1641,63 @@ void BM_TupleOfI32Attrs(benchmark::State& state) {
 }
 
 BENCHMARK(BM_TupleOfI32Attrs);
+
+//===----------------------------------------------------------------------===//
+// BM_EnumAttrs
+//===----------------------------------------------------------------------===//
+
+static Error EnumAttrsFunction(Enum0 e0, Enum1 e1, Enum2 e2, Enum3 e3,
+                               Enum4 e4) {
+  benchmark::DoNotOptimize(e0);
+  benchmark::DoNotOptimize(e1);
+  benchmark::DoNotOptimize(e2);
+  benchmark::DoNotOptimize(e3);
+  benchmark::DoNotOptimize(e4);
+  return Error::Success();
+}
+
+template <typename F>
+void BM_EnumAttrs(benchmark::State& state, F&& f) {
+  CallFrameBuilder::AttributesBuilder attrs;
+  attrs.Insert("e0", int32_t{0});
+  attrs.Insert("e1", int32_t{0});
+  attrs.Insert("e2", int32_t{0});
+  attrs.Insert("e3", int32_t{0});
+  attrs.Insert("e4", int32_t{0});
+
+  CallFrameBuilder builder(/*num_args=*/0, /*num_rets=*/0);
+  builder.AddAttributes(attrs.Build());
+  auto call_frame = builder.Build();
+
+  auto handler = Ffi::Bind()
+                     .Attr<Enum0>("e0")
+                     .Attr<Enum1>("e1")
+                     .Attr<Enum2>("e2")
+                     .Attr<Enum3>("e3")
+                     .Attr<Enum4>("e4")
+                     .To(std::forward<F>(f));
+
+  for (auto _ : state) {
+    CHECK_OK(Call(*handler, call_frame));
+  }
+}
+
+static void BM_EnumAttrs(benchmark::State& state) {
+  BM_EnumAttrs(state, [](Enum0 e0, Enum1 e1, Enum2 e2, Enum3 e3, Enum4 e4) {
+    return EnumAttrsFunction(e0, e1, e2, e3, e4);
+  });
+}
+
+static void BM_EnumAttrsFunction(benchmark::State& state) {
+  BM_EnumAttrs(state, EnumAttrsFunction);
+}
+
+static void BM_EnumAttrsFunctionWrapper(benchmark::State& state) {
+  BM_EnumAttrs(state, Ffi::Wrapper<EnumAttrsFunction>());
+}
+
+BENCHMARK(BM_EnumAttrs);
+BENCHMARK(BM_EnumAttrsFunction);
+BENCHMARK(BM_EnumAttrsFunctionWrapper);
 
 }  // namespace xla::ffi
