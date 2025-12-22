@@ -18,6 +18,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -25,12 +26,12 @@ limitations under the License.
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/string_view.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/hlo/utils/hlo_query.h"
 #include "xla/service/collective_ops_utils.h"
-#include "xla/service/collective_permute_decomposer.h"
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/cublas_cudnn.h"
 #include "xla/service/gpu/transforms/collectives/collective_ops_utils.h"
@@ -81,9 +82,14 @@ bool IsNopInstruction(const HloInstruction& hlo) {
   }
 }
 
-bool IsAsyncComputeOp(const HloInstruction& hlo) {
-  return (hlo.opcode() == HloOpcode::kAsyncStart ||
-          hlo.opcode() == HloOpcode::kAsyncDone) &&
+bool IsAsyncComputeStartOp(const HloInstruction& hlo) {
+  return hlo.opcode() == HloOpcode::kAsyncStart &&
+         !hlo_query::IsCollectiveCommunicationOp(hlo.async_wrapped_opcode()) &&
+         hlo.async_execution_thread() != hlo.parent()->execution_thread();
+}
+
+bool IsAsyncComputeDoneOp(const HloInstruction& hlo) {
+  return hlo.opcode() == HloOpcode::kAsyncDone &&
          !hlo_query::IsCollectiveCommunicationOp(hlo.async_wrapped_opcode()) &&
          hlo.async_execution_thread() != hlo.parent()->execution_thread();
 }
@@ -134,13 +140,21 @@ bool IsSlicingMemcpy(const HloInstruction& hlo) {
   return false;
 }
 
-bool IsMemcpyAsyncOp(const HloInstruction& hlo) {
-  if (hlo.opcode() == HloOpcode::kCopyStart ||
-      hlo.opcode() == HloOpcode::kCopyDone) {
+bool IsMemcpyAsyncStartOp(const HloInstruction& hlo) {
+  if (hlo.opcode() == HloOpcode::kCopyStart) {
     return true;
   }
-  if (hlo.opcode() != HloOpcode::kAsyncStart &&
-      hlo.opcode() != HloOpcode::kAsyncDone) {
+  if (hlo.opcode() != HloOpcode::kAsyncStart) {
+    return false;
+  }
+  return IsSlicingMemcpy(*hlo.async_wrapped_instruction());
+}
+
+bool IsMemcpyAsyncDoneOp(const HloInstruction& hlo) {
+  if (hlo.opcode() == HloOpcode::kCopyDone) {
+    return true;
+  }
+  if (hlo.opcode() != HloOpcode::kAsyncDone) {
     return false;
   }
   return IsSlicingMemcpy(*hlo.async_wrapped_instruction());
@@ -154,7 +168,7 @@ bool IsGpuAsyncStart(const HloInstruction& hlo) {
   return (hlo_query::IsAsyncCollectiveStartOp(&hlo,
                                               /*include_send_recv=*/true) &&
           !IsGPUSyncCollective(hlo)) ||
-         IsAsyncComputeOp(hlo) || IsMemcpyAsyncOp(hlo);
+         IsAsyncComputeStartOp(hlo) || IsMemcpyAsyncStartOp(hlo);
 }
 
 // Marks async done operations to be scheduled as late as possible.
@@ -162,7 +176,7 @@ bool IsGpuAsyncDone(const HloInstruction& hlo) {
   return (hlo_query::IsAsyncCollectiveDoneOp(&hlo,
                                              /*include_send_recv=*/true) &&
           !IsGPUSyncCollective(*hlo.operand(0))) ||
-         IsAsyncComputeOp(hlo) || IsMemcpyAsyncOp(hlo);
+         IsAsyncComputeDoneOp(hlo) || IsMemcpyAsyncDoneOp(hlo);
 }
 
 bool IsAsyncPair(const HloInstruction& from, const HloInstruction& target) {
@@ -591,6 +605,20 @@ ApproximateLatencyEstimator::TimeCost GpuLatencyEstimator::NodeCost(
   // custom call is 1000, the LHS will try to schedule approximately 5 of
   // these in between each start/end pair.
   if (instr->opcode() == HloOpcode::kCustomCall) {
+    if (instr->has_frontend_attributes() &&
+        instr->frontend_attributes().map().contains("latency_metadata")) {
+      int64_t latency_metadata_ns = 0;
+      CHECK(absl::SimpleAtoi(
+          instr->frontend_attributes().map().at("latency_metadata"),
+          &latency_metadata_ns))
+          << "Failed to parse latency from custom call for " << instr->name()
+          << " from latency_metadata:"
+          << instr->frontend_attributes().map().at("latency_metadata");
+      VLOG(10) << "NodeCost: Returning latency from custom call for "
+               << instr->name() << ": " << latency_metadata_ns / 1000.0
+               << " ns";
+      return (LatencyEstimator::TimeCost)latency_metadata_ns / 1000.0;
+    }
     if (IsCublasGemm(*instr) || IsCustomCallToDnnConvolution(*instr)) {
       return ApproximateLatencyEstimator::kMediumCost;
     }

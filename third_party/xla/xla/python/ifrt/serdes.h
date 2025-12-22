@@ -26,6 +26,7 @@ limitations under the License.
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ExtensibleRTTI.h"
 #include "xla/python/ifrt/serdes.pb.h"
+#include "xla/python/ifrt/serdes_default_version_accessor.h"
 #include "xla/python/ifrt/serdes_version.h"
 #include "xla/tsl/platform/statusor.h"
 
@@ -34,7 +35,11 @@ namespace ifrt {
 
 // Base class for serialization options to be passed to `Serialize`.
 struct SerializeOptions : llvm::RTTIExtends<SerializeOptions, llvm::RTTIRoot> {
-  SerDesVersion version = SerDesVersion::current();
+  explicit SerializeOptions(
+      SerDesVersion version = SerDesDefaultVersionAccessor::Get())
+      : version(version) {}
+
+  SerDesVersion version;
 
   static char ID;  // NOLINT
 };
@@ -115,6 +120,10 @@ absl::StatusOr<std::unique_ptr<Serializable>> DeserializeUnchecked(
 //
 // Returns an error if the `Serializable` type does not have a corresponding
 // `SerDes` registered or the `SerDes` returns an error.
+absl::Status Serialize(const Serializable& serializable,
+                       std::unique_ptr<SerializeOptions> options,
+                       Serialized& proto);
+
 absl::StatusOr<Serialized> Serialize(const Serializable& serializable,
                                      std::unique_ptr<SerializeOptions> options);
 

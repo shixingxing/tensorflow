@@ -25,13 +25,16 @@ limitations under the License.
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "xla/comparison_util.h"
 #include "xla/debug_options_flags.h"
+#include "xla/hlo/analysis/alias_info.h"
 #include "xla/hlo/analysis/hlo_alias_analysis.h"
 #include "xla/hlo/analysis/hlo_dataflow_analysis.h"
 #include "xla/hlo/analysis/hlo_ordering.h"
@@ -63,7 +66,6 @@ limitations under the License.
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/tsl/lib/core/status_test_util.h"
-#include "xla/tsl/platform/status.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/util/proto/proto_matchers.h"
 #include "xla/xla_data.pb.h"
@@ -75,7 +77,6 @@ using memory_space_assignment::PresetAssignments;
 using ::testing::HasSubstr;
 using ::testing::UnorderedElementsAre;
 using ::tsl::proto_testing::EqualsProto;
-using tsl::testing::StatusIs;
 
 // DFS visitor that collects the instructions referenced by a computation
 // without descending into nested computations, i.e., only from the operands.
@@ -103,7 +104,7 @@ class InstructionListVisitor : public DfsHloVisitorWithDefault {
 
 std::vector<const HloInstruction*> GetInstructions(HloInstruction* root) {
   InstructionListVisitor main_list(root);
-  TF_CHECK_OK(root->Accept(&main_list));
+  CHECK_OK(root->Accept(&main_list));
   return main_list.GetInstructions();
 }
 
@@ -117,11 +118,13 @@ class BufferAssignmentTest : public HloHardwareIndependentTestBase {
 
   std::unique_ptr<BufferAssignment> RunBufferAssignment(HloModule* module,
                                                         int64_t alignment = 1) {
+    BufferAssigner::Options opts;
+    opts.allocate_buffers_for_constants = true;
     return BufferAssigner::Run(
                module, std::make_unique<DependencyHloOrdering>(module),
-               &BufferSizeBytes,
+               &BufferSizeBytes, &alias_info_,
                [alignment](LogicalBuffer::Color) { return alignment; },
-               /*allocate_buffers_for_constants=*/true)
+               std::move(opts))
         .value();
   }
 
@@ -131,7 +134,7 @@ class BufferAssignmentTest : public HloHardwareIndependentTestBase {
     auto proto = buffers->ToProto();
     // Recreate buffer assignment from proto.
     return BufferAssignment::FromProto(proto, module, &BufferSizeBytes,
-                                       /*can_share_buffer=*/nullptr);
+                                       &alias_info_);
   }
 
   std::unique_ptr<BufferAssignment> RunBufferAssignmentWithSequentialOrdering(
@@ -140,25 +143,29 @@ class BufferAssignmentTest : public HloHardwareIndependentTestBase {
       const BufferAssigner::PrivateStacks& private_stacks = {},
       std::optional<BufferAssignment::BufferIsolationOptions>
           isolation_options = std::nullopt) {
+    BufferAssigner::Options opts;
+    opts.allocate_buffers_for_constants = true;
+    opts.colorer = colorer;
+    opts.private_stacks = &private_stacks;
+    opts.isolation_options = isolation_options;
     return BufferAssigner::Run(
                module,
                std::make_unique<SequentialHloOrdering>(module->schedule()),
-               &BufferSizeBytes,
+               &BufferSizeBytes, &alias_info_,
                [alignment](LogicalBuffer::Color) { return alignment; },
-               /*allocate_buffers_for_constants=*/true, colorer,
-               /*must_not_live_out=*/std::nullopt, /*can_share_buffer=*/nullptr,
-               /*preset_assignments=*/{}, private_stacks,
-               /*heap_buffer_interval_compare=*/nullptr, isolation_options)
+               std::move(opts))
         .value();
   }
 
   std::unique_ptr<BufferAssignment> RunBufferAssignmentNoBuffersForConstants(
       HloModule* module, int64_t alignment = 1) {
+    BufferAssigner::Options opts;
+    opts.allocate_buffers_for_constants = false;
     return BufferAssigner::Run(
                module, std::make_unique<DependencyHloOrdering>(module),
-               &BufferSizeBytes,
+               &BufferSizeBytes, &alias_info_,
                [alignment](LogicalBuffer::Color) { return alignment; },
-               /*allocate_buffers_for_constants=*/false)
+               std::move(opts))
         .value();
   }
 
@@ -170,24 +177,28 @@ class BufferAssignmentTest : public HloHardwareIndependentTestBase {
       return instruction->opcode() == HloOpcode::kAdd;
     };
 
+    BufferAssigner::Options opts;
+    opts.allocate_buffers_for_constants = false;
+    opts.must_not_live_out = must_not_live_out;
     return BufferAssigner::Run(
                module, std::make_unique<DependencyHloOrdering>(module),
-               &BufferSizeBytes,
+               &BufferSizeBytes, &alias_info_,
                [alignment](LogicalBuffer::Color) { return alignment; },
-               /*allocate_buffers_for_constants=*/false,
-               /*colorer=*/BufferAssigner::DefaultColorer(),
-               /*must_not_live_out=*/must_not_live_out)
+               std::move(opts))
         .value();
   }
 
   std::unique_ptr<BufferAssignment> RunColoredBufferAssignment(
       HloModule* module, BufferAssigner::Colorer colorer,
       int64_t alignment = 1) {
+    BufferAssigner::Options opts;
+    opts.allocate_buffers_for_constants = true;
+    opts.colorer = std::move(colorer);
     return BufferAssigner::Run(
                module, std::make_unique<DependencyHloOrdering>(module),
-               &BufferSizeBytes,
+               &BufferSizeBytes, &alias_info_,
                [alignment](LogicalBuffer::Color) { return alignment; },
-               /*allocate_buffers_for_constants=*/true, std::move(colorer))
+               std::move(opts))
         .value();
   }
 
@@ -196,40 +207,41 @@ class BufferAssignmentTest : public HloHardwareIndependentTestBase {
       int64_t alignment = 1) {
     HloSchedule schedule(module);
     schedule.set_sequence(module->entry_computation(), instruction_sequence);
+    BufferAssigner::Options opts;
+    opts.allocate_buffers_for_constants = true;
     return BufferAssigner::Run(
                module, std::make_unique<SequentialHloOrdering>(schedule),
-               &BufferSizeBytes,
+               &BufferSizeBytes, &alias_info_,
                [alignment](LogicalBuffer::Color) { return alignment; },
-               /*allocate_buffers_for_constants=*/true)
+               std::move(opts))
         .value();
   }
 
   std::unique_ptr<BufferAssignment> RunBufferAssignmentWithPresetAssignments(
       HloModule* module, std::unique_ptr<PresetAssignments> preset_assignments,
       int64_t alignment = 1) {
+    BufferAssigner::Options opts;
+    opts.allocate_buffers_for_constants = true;
+    opts.preset_assignments = std::move(preset_assignments);
     return BufferAssigner::Run(
                module, std::make_unique<DependencyHloOrdering>(module),
-               &BufferSizeBytes,
+               &BufferSizeBytes, &alias_info_,
                [alignment](LogicalBuffer::Color) { return alignment; },
-               /*allocate_buffers_for_constants=*/true,
-               BufferAssigner::DefaultColorer(),
-               /*must_not_live_out=*/std::nullopt,
-               /*can_share_buffer=*/nullptr, std::move(preset_assignments))
+               std::move(opts))
         .value();
   }
 
   std::unique_ptr<BufferAssignment> RunBufferAssignmentWithIsolationOptions(
       HloModule* module, std::optional<BufferAssignment::BufferIsolationOptions>
                              isolation_options = std::nullopt) {
+    BufferAssigner::Options opts;
+    opts.allocate_buffers_for_constants = true;
+    opts.isolation_options = isolation_options;
     return BufferAssigner::Run(
                module,
                std::make_unique<SequentialHloOrdering>(module->schedule()),
-               &BufferSizeBytes, [](LogicalBuffer::Color) { return 1; },
-               /*allocate_buffers_for_constants=*/true,
-               BufferAssigner::DefaultColorer(),
-               /*must_not_live_out=*/std::nullopt, /*can_share_buffer=*/nullptr,
-               /*preset_assignments=*/{}, /*private_stacks=*/{},
-               /*heap_buffer_interval_compare=*/nullptr, isolation_options)
+               &BufferSizeBytes, &alias_info_,
+               [](LogicalBuffer::Color) { return 1; }, std::move(opts))
         .value();
   }
 
@@ -387,6 +399,7 @@ class BufferAssignmentTest : public HloHardwareIndependentTestBase {
   Shape f32a100x10_ = ShapeUtil::MakeShape(F32, {100, 10});
   Shape t_s32_f32v4_ = ShapeUtil::MakeTupleShape({s32_, f32vec4_});
   Shape t_s32_f32v10_ = ShapeUtil::MakeTupleShape({s32_, f32vec10_});
+  AliasInfo alias_info_;
 };
 
 // Returns true if the buffers assigned to instructions in "a" are distinct
@@ -2065,6 +2078,80 @@ TEST_F(BufferAssignmentTest, OneTempAllocation) {
   }
 }
 
+TEST_F(BufferAssignmentTest, TempAllocationLimitResetsBuffer) {
+  // Test that temporary buffers are combined into allocations up to the limit
+  // specified by xla_multiheap_size_constraint_per_heap.
+  auto builder = HloComputation::Builder(TestName());
+  Shape shape_10x10 = ShapeUtil::MakeShape(F32, {10, 10});
+  Shape shape_40x10 = ShapeUtil::MakeShape(F32, {40, 10});
+
+  auto param_a = builder.AddInstruction(
+      HloInstruction::CreateParameter(0, shape_10x10, "param_a"));
+  auto param_b = builder.AddInstruction(
+      HloInstruction::CreateParameter(1, shape_10x10, "param_b"));
+  auto param_c = builder.AddInstruction(
+      HloInstruction::CreateParameter(2, shape_10x10, "param_c"));
+  auto param_d = builder.AddInstruction(
+      HloInstruction::CreateParameter(3, shape_10x10, "param_d"));
+  auto param_e = builder.AddInstruction(
+      HloInstruction::CreateParameter(4, shape_10x10, "param_e"));
+  DotDimensionNumbers dot_dnums;
+  dot_dnums.add_lhs_contracting_dimensions(1);
+  dot_dnums.add_rhs_contracting_dimensions(0);
+  PrecisionConfig precision_config;
+  precision_config.mutable_operand_precision()->Resize(
+      2, PrecisionConfig::DEFAULT);
+  auto dot_ab = builder.AddInstruction(HloInstruction::CreateDot(
+      shape_10x10, param_a, param_b, dot_dnums, precision_config));
+  auto dot_bc = builder.AddInstruction(HloInstruction::CreateDot(
+      shape_10x10, param_b, param_c, dot_dnums, precision_config));
+  auto dot_cd = builder.AddInstruction(HloInstruction::CreateDot(
+      shape_10x10, param_c, param_d, dot_dnums, precision_config));
+  auto dot_de = builder.AddInstruction(HloInstruction::CreateDot(
+      shape_10x10, param_d, param_e, dot_dnums, precision_config));
+  builder.AddInstruction(HloInstruction::CreateConcatenate(
+      shape_40x10, {dot_ab, dot_bc, dot_cd, dot_de}, 0));
+
+  // Run buffer assignment with alignment=1.
+  auto module = CreateNewVerifiedModule();
+  module->AddEntryComputation(builder.Build());
+  module->mutable_config()
+      .mutable_debug_options()
+      .set_xla_multiheap_size_constraint_per_heap(801);
+  auto assignment = RunBufferAssignment(module.get(), /*alignment=*/1);
+
+  // 5 params allocations, 1 output, and 2 temp allocations.
+  // Dots are size 400. 400+400=800 < 801, so two dots fit in one allocation.
+  // The next dot comes: 800+400=1200 >= 801, so we reset to a new allocation.
+  // The new allocation takes 400, and 400+400=800 < 801 for the next dot.
+  // So we expect 2 allocations of size 800.
+  EXPECT_EQ(8, assignment->Allocations().size());
+
+  BufferAllocation::Slice slice_ab =
+      assignment->GetUniqueTopLevelSlice(dot_ab).value();
+  BufferAllocation::Slice slice_bc =
+      assignment->GetUniqueTopLevelSlice(dot_bc).value();
+  BufferAllocation::Slice slice_cd =
+      assignment->GetUniqueTopLevelSlice(dot_cd).value();
+  BufferAllocation::Slice slice_de =
+      assignment->GetUniqueTopLevelSlice(dot_de).value();
+
+  EXPECT_EQ(400, slice_ab.size());
+  EXPECT_EQ(400, slice_bc.size());
+  EXPECT_EQ(400, slice_cd.size());
+  EXPECT_EQ(400, slice_de.size());
+
+  EXPECT_EQ(800, slice_ab.allocation()->size());
+  EXPECT_EQ(800, slice_bc.allocation()->size());
+  EXPECT_EQ(800, slice_cd.allocation()->size());
+  EXPECT_EQ(800, slice_de.allocation()->size());
+
+  absl::flat_hash_set<const BufferAllocation*> allocs = {
+      slice_ab.allocation(), slice_bc.allocation(), slice_cd.allocation(),
+      slice_de.allocation()};
+  EXPECT_EQ(allocs.size(), 2);
+}
+
 TEST_F(BufferAssignmentTest, TrivialPeakBuffers) {
   // paramscalar -(bc)- (mul) -- (add) -- (sub)
   //                     /        /        /
@@ -2138,6 +2225,14 @@ TEST_F(BufferAssignmentTest, PeakBuffers) {
   EXPECT_FALSE(buffer.IsInputOrOutput());
   EXPECT_TRUE(buffer.IsPreallocatedTempBuffer());
   ASSERT_EQ(buffer.assigned_buffers().size(), 4);
+  const char* const kExpectedMemoryUsageReport =
+      R"(cumulative_size;       size;       offset; used_by_n_values; shapes_list
+------------------------------------------------------------
+     800B( 50%);       800B;            0;                2; f32[100], f32[200]
+   1.2KiB( 75%);       400B;          800;                1; f32[100]
+   1.6KiB(100%);       400B;         1200;                1; f32[100]
+)";
+  EXPECT_EQ(buffer.MemoryUsageReport(""), kExpectedMemoryUsageReport);
 
   const std::vector<const HloValue*>& peak_buffers =
       buffer.PeakMemoryLogicalBuffers();
@@ -2326,12 +2421,15 @@ class WhileBufferAssignmentTest : public HloHardwareIndependentTestBase {
 
   std::unique_ptr<BufferAssignment> RunBufferAssignment(HloModule* module,
                                                         int64_t alignment = 1) {
-    HloSchedule schedule = ScheduleModule(module, ByteSizeOf).value();
+    HloSchedule schedule =
+        ScheduleModule(module, &alias_info_, ByteSizeOf).value();
+    BufferAssigner::Options opts;
+    opts.allocate_buffers_for_constants = true;
     return BufferAssigner::Run(
                module, std::make_unique<SequentialHloOrdering>(schedule),
-               ByteSizeOf,
+               ByteSizeOf, &alias_info_,
                [alignment](LogicalBuffer::Color) { return alignment; },
-               /*allocate_buffers_for_constants=*/true)
+               std::move(opts))
         .value();
   }
 
@@ -2342,10 +2440,12 @@ class WhileBufferAssignmentTest : public HloHardwareIndependentTestBase {
   Shape data_shape_ = ShapeUtil::MakeShape(F32, {4});
   Shape loop_state_shape_ =
       ShapeUtil::MakeTupleShape({data_shape_, data_shape_, data_shape_});
+  AliasInfo alias_info_;
 };
 
 static void RunCopyInsertion(HloModule* module) {
-  CopyInsertion copy_insertion;
+  AliasInfo alias_info;
+  CopyInsertion copy_insertion(&alias_info);
   EXPECT_IS_OK(copy_insertion.Run(module).status());
 }
 
@@ -2404,6 +2504,10 @@ TEST_F(WhileBufferAssignmentTest, TwoForwardWhileLoops) {
   // Verify 'weights1' and read-only use while1{1} alias.
   EXPECT_EQ(assignment->GetUniqueSlice(weights1, {}).value(),
             assignment->GetUniqueSlice(while1, {1}).value());
+
+  TF_ASSERT_OK_AND_ASSIGN(Shape shape,
+                          assignment->GetShapeForUniqueSlice(while1, {1}));
+  EXPECT_EQ(shape, data_shape_);
 }
 
 // Tests that two colocated buffer sets are not merged if an entry parameter
@@ -2451,7 +2555,8 @@ ENTRY %test_module {
   // Run CopyInsertion and check if the graph constructed above doesn't need
   // any copies inserted for BufferAssignment to run.
   int64_t instruction_count = m->instruction_count();
-  CopyInsertion copy_insertion;
+  AliasInfo alias_info;
+  CopyInsertion copy_insertion(&alias_info);
   ASSERT_IS_OK(copy_insertion.Run(m.get()).status());
   ASSERT_EQ(instruction_count, m->instruction_count());
 
@@ -2518,7 +2623,8 @@ ENTRY %test_module {
   // Run CopyInsertion and check if the graph constructed above doesn't need
   // any copies inserted for BufferAssignment to run.
   int64_t instruction_count = m->instruction_count();
-  CopyInsertion copy_insertion;
+  AliasInfo alias_info;
+  CopyInsertion copy_insertion(&alias_info);
   ASSERT_IS_OK(copy_insertion.Run(m.get()).status());
   ASSERT_EQ(instruction_count, m->instruction_count());
 
@@ -2626,7 +2732,8 @@ TEST_F(WhileBufferAssignmentTest, ColocatedBuffers) {
   // Run CopyInsertion and check if the graph constructed above doesn't need
   // any copies inserted for BufferAssignment to run.
   int64_t instruction_count = module->instruction_count();
-  CopyInsertion copy_insertion;
+  AliasInfo alias_info;
+  CopyInsertion copy_insertion(&alias_info);
   ASSERT_IS_OK(copy_insertion.Run(module.get()).status());
   ASSERT_EQ(instruction_count, module->instruction_count());
 
@@ -2635,7 +2742,7 @@ TEST_F(WhileBufferAssignmentTest, ColocatedBuffers) {
   // nodes are traversed during BufferAssignment.
   TF_ASSERT_OK_AND_ASSIGN(
       HloSchedule schedule,
-      ScheduleModule(module.get(), [](const BufferValue& buffer) {
+      ScheduleModule(module.get(), &alias_info_, [](const BufferValue& buffer) {
         return ShapeUtil::ByteSizeOf(buffer.shape(),
                                      /*pointer_size=*/sizeof(void*));
       }));
@@ -2644,12 +2751,14 @@ TEST_F(WhileBufferAssignmentTest, ColocatedBuffers) {
       {token, infeed, infeed_data, while0, while1, zero, add, while2, tuple});
   TF_ASSERT_OK(schedule.Verify());
 
+  BufferAssigner::Options opts;
+  opts.allocate_buffers_for_constants = true;
   TF_ASSERT_OK_AND_ASSIGN(
       auto assignment,
       BufferAssigner::Run(
           module.get(), std::make_unique<SequentialHloOrdering>(schedule),
-          &BufferSizeBytes, [](LogicalBuffer::Color) { return 1; },
-          /*allocate_buffers_for_constants=*/true));
+          &BufferSizeBytes, &alias_info_,
+          [](LogicalBuffer::Color) { return 1; }, std::move(opts)));
 
   // The result tuple elements must be assigned with different buffers.
   TF_ASSERT_OK_AND_ASSIGN(auto slice0, assignment->GetUniqueSlice(tuple, {0}));
@@ -3362,7 +3471,8 @@ TEST_F(WhileBufferAssignmentTest, WhileLoopsInterferingResultRange) {
 
   RunCopyInsertion(module.get());
 
-  HloSchedule schedule = ScheduleModule(module.get(), ByteSizeOf).value();
+  HloSchedule schedule =
+      ScheduleModule(module.get(), &alias_info_, ByteSizeOf).value();
 
   // To trigger b/38494731, we want a specific Hlo schedule for the
   // root computation, so we overwrite that entry with a manually
@@ -3377,11 +3487,13 @@ TEST_F(WhileBufferAssignmentTest, WhileLoopsInterferingResultRange) {
   // itself is buggy.
   TF_ASSERT_OK(schedule.Verify());
 
+  BufferAssigner::Options opts;
+  opts.allocate_buffers_for_constants = true;
   auto assignment =
       BufferAssigner::Run(
           module.get(), std::make_unique<SequentialHloOrdering>(schedule),
-          ByteSizeOf, [](LogicalBuffer::Color) { return 1; },
-          /*allocate_buffers_for_constants=*/true)
+          ByteSizeOf, &alias_info_, [](LogicalBuffer::Color) { return 1; },
+          std::move(opts))
           .value();
 
   EXPECT_TRUE(BuffersDistinct({while0}, {while1}, *assignment));
@@ -3568,10 +3680,10 @@ TEST(BufferAllocationSliceProtoTest, FromProtoErrorAllocationNotFound) {
   allocations.push_back(
       BufferAllocation(/*index=*/1, /*size=*/200, /*color=*/0));
 
-  EXPECT_THAT(
-      BufferAllocation::Slice::FromProto(proto, allocations),
-      StatusIs(absl::StatusCode::kOutOfRange,
-               HasSubstr("Buffer allocation index 2 is out of range.")));
+  EXPECT_THAT(BufferAllocation::Slice::FromProto(proto, allocations),
+              absl_testing::StatusIs(
+                  absl::StatusCode::kOutOfRange,
+                  HasSubstr("Buffer allocation index 2 is out of range.")));
 }
 
 TEST(BufferAllocationTest, ToProto) {
@@ -3966,6 +4078,202 @@ TEST(ComputePeakMemoryTest, ProtoWithNoEvents) {
   buffer1->set_size(23);
 
   EXPECT_EQ(*ComputePeakMemory(proto), 0);
+}
+
+TEST(ComputePeakMemoryTest, BufferAllocations) {
+  BufferAssignmentProto proto;
+  LogicalBufferProto* buffer42 = proto.add_logical_buffers();
+  buffer42->set_id(42);
+  buffer42->set_size(1024);
+  BufferAllocationProto* alloc = proto.add_buffer_allocations();
+
+  auto TestAllocation = [&](bool is_entry_computation_parameter,
+                            bool is_thread_local, bool is_constant,
+                            bool maybe_live_out) -> int64_t {
+    alloc->set_is_entry_computation_parameter(is_entry_computation_parameter);
+    alloc->set_is_thread_local(is_thread_local);
+    alloc->set_is_constant(is_constant);
+    alloc->set_maybe_live_out(maybe_live_out);
+    return *ComputePeakMemory(proto);
+  };
+
+  BufferAllocationProto::Assigned* assigned = alloc->add_assigned();
+  assigned->set_logical_buffer_id(42);
+  EXPECT_EQ(TestAllocation(false, false, false, false), 0);
+  EXPECT_EQ(TestAllocation(false, true, false, false), 0);
+  EXPECT_EQ(TestAllocation(false, false, true, false), 1024);
+  EXPECT_EQ(TestAllocation(true, false, false, false), 1024);
+  EXPECT_EQ(TestAllocation(false, false, false, true), 1024);
+  EXPECT_EQ(TestAllocation(true, true, false, true), 0);
+}
+
+TEST(ComputePeakMemoryTest, MultipleAssignments) {
+  BufferAssignmentProto proto;
+  LogicalBufferProto* buffer1 = proto.add_logical_buffers();
+  buffer1->set_id(1);
+  buffer1->set_size(1);
+  LogicalBufferProto* buffer2 = proto.add_logical_buffers();
+  buffer2->set_id(2);
+  buffer2->set_size(22);
+  LogicalBufferProto* buffer3 = proto.add_logical_buffers();
+  buffer3->set_id(3);
+  buffer3->set_size(333);
+  LogicalBufferProto* buffer4 = proto.add_logical_buffers();
+  buffer4->set_id(4);
+  buffer4->set_size(4444);
+  LogicalBufferProto* buffer5 = proto.add_logical_buffers();
+  buffer5->set_id(5);
+  buffer5->set_size(55555);
+
+  BufferAllocationProto* alloc = proto.add_buffer_allocations();
+  alloc->add_assigned()->set_logical_buffer_id(1);
+  alloc->add_assigned()->set_logical_buffer_id(2);
+  alloc->add_assigned()->set_logical_buffer_id(3);
+  alloc->add_assigned()->set_logical_buffer_id(23);  // doesn't exit
+  alloc->set_is_entry_computation_parameter(true);
+  alloc->set_is_thread_local(false);
+  alloc->set_is_constant(false);
+  alloc->set_maybe_live_out(false);
+  EXPECT_EQ(*ComputePeakMemory(proto), 333);
+}
+
+TEST(ComputePeakMemoryTest, ShareParameter) {
+  BufferAssignmentProto proto;
+  HeapSimulatorTrace* trace = proto.add_heap_simulator_traces();
+  LogicalBufferProto* buffer0 = proto.add_logical_buffers();
+  buffer0->set_id(0);
+  buffer0->set_size(1024);
+  LogicalBufferProto* buffer1 = proto.add_logical_buffers();
+  buffer1->set_id(1);
+  buffer1->set_size(1024);
+
+  // buffer 0 is a parameter
+  BufferAllocationProto* alloc = proto.add_buffer_allocations();
+  alloc->add_assigned()->set_logical_buffer_id(0);
+  alloc->set_is_entry_computation_parameter(true);
+  alloc->set_is_thread_local(false);
+
+  // buffer 0 is shared with buffer 1
+  HeapSimulatorTrace::Event* e;
+  e = trace->add_events();
+  e->set_buffer_id(1);
+  e->set_kind(HeapSimulatorTrace::Event::SHARE_WITH);
+  e->set_share_with_canonical_id(0);
+
+  EXPECT_EQ(*ComputePeakMemory(proto), 1024);
+}
+
+TEST(ComputePeakMemoryTest, StaticBufferAlsoGetsAllocated) {
+  BufferAssignmentProto proto;
+  HeapSimulatorTrace* trace = proto.add_heap_simulator_traces();
+  LogicalBufferProto* buffer0 = proto.add_logical_buffers();
+  buffer0->set_id(0);
+  buffer0->set_size(1024);
+
+  // buffer 0 is a parameter
+  BufferAllocationProto* alloc = proto.add_buffer_allocations();
+  alloc->add_assigned()->set_logical_buffer_id(0);
+  alloc->set_is_entry_computation_parameter(true);
+  alloc->set_is_thread_local(false);
+
+  // now we "allocate" buffer 0. It's already live, so this doesn't
+  // do anything.
+  HeapSimulatorTrace::Event* e;
+  e = trace->add_events();
+  e->set_buffer_id(0);
+  e->set_kind(HeapSimulatorTrace::Event::ALLOC);
+
+  EXPECT_EQ(*ComputePeakMemory(proto), 1024);
+}
+
+TEST(ComputePeakMemoryTest, ParamBufferAndAllocationBuffer) {
+  BufferAssignmentProto proto;
+  HeapSimulatorTrace* trace = proto.add_heap_simulator_traces();
+  LogicalBufferProto* buffer0 = proto.add_logical_buffers();
+  buffer0->set_id(0);
+  buffer0->set_size(123);
+  LogicalBufferProto* buffer1 = proto.add_logical_buffers();
+  buffer1->set_id(1);
+  buffer1->set_size(321);
+
+  // buffer 0 is a parameter.
+  BufferAllocationProto* alloc = proto.add_buffer_allocations();
+  alloc->add_assigned()->set_logical_buffer_id(0);
+  alloc->set_is_entry_computation_parameter(true);
+  alloc->set_is_thread_local(false);
+
+  // buffer 1 is allocated through an event.
+  HeapSimulatorTrace::Event* e;
+  e = trace->add_events();
+  e->set_buffer_id(1);
+  e->set_kind(HeapSimulatorTrace::Event::ALLOC);
+
+  EXPECT_EQ(*ComputePeakMemory(proto), 123 + 321);
+}
+
+TEST(ComputePeakMemoryTest, LargeResult) {
+  BufferAssignmentProto proto;
+  LogicalBufferProto* buffer0 = proto.add_logical_buffers();
+  buffer0->set_id(0);
+  buffer0->set_size(1LL << 33);
+
+  BufferAllocationProto* alloc = proto.add_buffer_allocations();
+  alloc->add_assigned()->set_logical_buffer_id(0);
+  alloc->set_is_entry_computation_parameter(true);
+
+  EXPECT_EQ(*ComputePeakMemory(proto), 1LL << 33);
+}
+
+TEST(ComputeTotalAllocationBytesTest, EmptyProto) {
+  BufferAssignmentProto proto;
+  EXPECT_EQ(ComputeTotalAllocationBytes(proto, /*memory_color=*/0), 0);
+}
+
+TEST(ComputeTotalAllocationBytesTest, NonMatchingColorAllocations) {
+  BufferAssignmentProto proto;
+  BufferAllocationProto* alloc1 = proto.add_buffer_allocations();
+  alloc1->set_size(10);
+  alloc1->set_color(1);
+  BufferAllocationProto* alloc2 = proto.add_buffer_allocations();
+  alloc2->set_size(20);
+  alloc2->set_color(2);
+  EXPECT_EQ(ComputeTotalAllocationBytes(proto, /*memory_color=*/0), 0);
+}
+
+TEST(ComputeTotalAllocationBytesTest, OnlyMatchingColorAllocations) {
+  BufferAssignmentProto proto;
+  BufferAllocationProto* alloc1 = proto.add_buffer_allocations();
+  alloc1->set_size(10);
+  alloc1->set_color(0);
+  BufferAllocationProto* alloc2 = proto.add_buffer_allocations();
+  alloc2->set_size(20);
+  alloc2->set_color(0);
+  EXPECT_EQ(ComputeTotalAllocationBytes(proto, /*memory_color=*/0), 30);
+}
+
+TEST(ComputeTotalAllocationBytesTest, MixedColorAllocations) {
+  BufferAssignmentProto proto;
+  BufferAllocationProto* alloc1 = proto.add_buffer_allocations();
+  alloc1->set_size(10);
+  alloc1->set_color(0);
+  BufferAllocationProto* alloc2 = proto.add_buffer_allocations();
+  alloc2->set_size(20);
+  alloc2->set_color(1);
+  BufferAllocationProto* alloc3 = proto.add_buffer_allocations();
+  alloc3->set_size(30);
+  alloc3->set_color(0);
+  EXPECT_EQ(ComputeTotalAllocationBytes(proto, /*memory_color=*/0), 40);
+}
+
+TEST(ComputeTotalAllocationBytesTest, LargeAllocations) {
+  BufferAssignmentProto proto;
+  BufferAllocationProto* alloc1 = proto.add_buffer_allocations();
+  alloc1->set_size(1LL << 33);
+  alloc1->set_color(0);
+  BufferAllocationProto* alloc3 = proto.add_buffer_allocations();
+  alloc3->set_size(1LL << 33);
+  alloc3->set_color(0);
+  EXPECT_EQ(ComputeTotalAllocationBytes(proto, /*memory_color=*/0), 1LL << 34);
 }
 
 }  // namespace

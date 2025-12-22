@@ -1,3 +1,5 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
 # Device runtime profiling.
 load(
     "//xla/tsl:tsl.bzl",
@@ -90,7 +92,7 @@ cc_library(
         ":profiling_context_no_op",
         # copybara:comment_end
         # copybara:uncomment_begin(google-only)
-        # "//learning/brain/google/runtime:profiling_context",
+        # "//learning/brain/google/runtime:profiling_context",  # buildcleaner: keep
         # copybara:uncomment_end
         "@llvm-project//llvm:Support",
     ],

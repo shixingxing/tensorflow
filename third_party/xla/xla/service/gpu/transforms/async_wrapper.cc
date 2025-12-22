@@ -15,10 +15,10 @@ limitations under the License.
 
 #include "xla/service/gpu/transforms/async_wrapper.h"
 
-#include <algorithm>
 #include <deque>
 #include <iterator>
 
+#include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
@@ -28,12 +28,13 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/shape_util.h"
+#include "xla/tsl/platform/errors.h"
 #include "xla/util.h"
-#include "tsl/platform/errors.h"
+#include "xla/xla_data.pb.h"
 
 namespace xla::gpu {
 
-absl::StatusOr<bool> AsyncWrapper::Run(
+absl::StatusOr<bool> AsyncWrapper::RunImpl(
     HloModule* module,
     const absl::flat_hash_set<absl::string_view>& execution_threads) {
   bool changed = false;
@@ -69,9 +70,8 @@ absl::StatusOr<bool> AsyncWrapper::Run(
       // instructions that can potentially be made async.
       if (HloPredicateIsOp<HloOpcode::kCall, HloOpcode::kConditional,
                            HloOpcode::kWhile>(instruction)) {
-        std::copy(instruction->called_computations().begin(),
-                  instruction->called_computations().end(),
-                  std::back_inserter(computations));
+        absl::c_copy(instruction->called_computations(),
+                     std::back_inserter(computations));
       }
     }
   }

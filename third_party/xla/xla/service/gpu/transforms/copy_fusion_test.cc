@@ -16,6 +16,7 @@ limitations under the License.
 #include "xla/service/gpu/transforms/copy_fusion.h"
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include <gmock/gmock.h>
@@ -34,6 +35,7 @@ limitations under the License.
 #include "xla/shape_util.h"
 #include "xla/stream_executor/device_description.h"
 #include "xla/stream_executor/device_description.pb.h"
+#include "xla/xla_data.pb.h"
 
 namespace xla {
 namespace gpu {
@@ -158,6 +160,34 @@ TEST_F(CopyFusionTest, CopyFusionTransposeOfBroadcastedConstantTwoCopies) {
                                         m::GetTupleElement())));
   EXPECT_THAT(fusion->fused_expression_root(),
               GmockMatch(m::Tuple(m::Transpose(), m::Copy(), m::Copy())));
+}
+
+TEST_F(CopyFusionTest, CopyFusionTransposeOfBroadcastedTwoCopiesWithSharding) {
+  auto module = ParseAndReturnVerifiedModule(absl::StrCat(kModulePrefix, R"(
+    fused_computation {
+      two = f32[] constant(2.0)
+      broadcast = f32[16,32]{1,0} broadcast(two), dimensions={}
+      s.1 = f32[16,32]{1,0} sqrt(broadcast)
+      ROOT c.1 = f32[32,16]{1,0} transpose(s.1), dimensions={1,0}
+    }
+
+    ENTRY main {
+      fusion = f32[32,16]{1,0} fusion(), kind=kInput, calls=fused_computation, sharding={replicated}
+      copy.1 = f32[32,16]{1,0} copy(fusion)
+      copy.2 = f32[32,16]{1,0} copy(fusion)
+      ROOT t = (f32[32,16]{1,0}, f32[32,16]{1,0}) tuple(copy.2, copy.1)
+    })"))
+                    .value();
+  ASSERT_TRUE(cf_.Run(module.get()).value());
+  SCOPED_TRACE(module->ToString());
+  const HloInstruction* root = module->entry_computation()->root_instruction();
+  const HloInstruction* fusion = nullptr;
+  ASSERT_THAT(root,
+              GmockMatch(m::Tuple(m::GetTupleElement(m::Fusion(&fusion)),
+                                  m::GetTupleElement(m::Fusion(&fusion)))));
+  EXPECT_THAT(fusion->fused_expression_root(),
+              GmockMatch(m::Tuple(m::Transpose(), m::Copy(), m::Copy())));
+  EXPECT_FALSE(fusion->has_sharding());
 }
 
 TEST_F(CopyFusionTest, CopyFusionTransposeTwoCopies) {
@@ -618,6 +648,32 @@ TEST_F(CopyFusionTest, CopyFusionWithFewerThanMaxCopies) {
 TEST_F(CopyFusionTest, CopyFusionWithMoreThanMaxCopies) {
   const int64_t max_copies = MaxOperandsAndOutputsPerFusion();
   EXPECT_FALSE(CreateFusionWithNumCopies(max_copies));
+}
+
+TEST_F(CopyFusionTest, PropagateOriginalValue) {
+  ASSERT_OK_AND_ASSIGN(
+      auto module, ParseAndReturnVerifiedModule(absl::StrCat(kModulePrefix, R"(
+    fused_computation {
+      two = f32[] constant(2.0)
+      broadcast = f32[16,32]{1,0} broadcast(two), dimensions={}
+      s.1 = f32[16,32]{1,0} sqrt(broadcast)
+      ROOT c.1 = f32[32,16]{1,0} transpose(s.1), dimensions={1,0}, origin={{"transpose"}}
+    }
+
+    ENTRY main {
+      fusion = f32[32,16]{1,0} fusion(), kind=kInput, calls=fused_computation, origin={{"transpose"}}
+      copy.1 = f32[32,16]{1,0} copy(fusion)
+      copy.2 = f32[32,16]{1,0} copy(fusion)
+      ROOT t = (f32[32,16]{1,0}, f32[32,16]{1,0}) tuple(copy.2, copy.1)
+    })")));
+
+  ASSERT_OK_AND_ASSIGN(auto changed, cf_.Run(module.get()));
+  ASSERT_TRUE(changed);
+  const HloInstruction* fusion =
+      *module->entry_computation()->instructions().begin();
+
+  EXPECT_TRUE(fusion != nullptr);
+  EXPECT_EQ(fusion->original_value()->ToString(), R"(({"transpose"}, {}, {}))");
 }
 
 }  // namespace gpu

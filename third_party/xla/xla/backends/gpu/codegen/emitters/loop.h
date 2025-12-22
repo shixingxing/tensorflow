@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -36,16 +37,15 @@ namespace gpu {
 // Generic loop fusion. Lowers to LLVM via MLIR.
 class LoopFusion final : public EmitterBase {
  public:
-  explicit LoopFusion(const HloFusionAnalysis& analysis)
+  LoopFusion(const HloFusionAnalysis& analysis, mlir::MLIRContext* mlir_context)
       : analysis_(analysis), config_(ComputeLoopFusionConfig(analysis)) {}
   LaunchDimensions launch_dimensions() const override;
 
   std::optional<IndexingMap> ComputeThreadIdToOutputIndexing(
-      int64_t root_index, mlir::MLIRContext* ctx) const override;
+      int64_t root_index, mlir::MLIRContext* mlir_context) const override;
 
-  std::optional<IndexingMap> ComputeThreadIdToInputIndexing(
-      int64_t root_index, int64_t hero_operand_index,
-      mlir::MLIRContext* ctx) const override;
+  std::optional<std::vector<IndexingMap>> ComputeThreadIdToInputIndexing(
+      int64_t root_index, mlir::MLIRContext* mlir_context) const override;
 
  private:
   absl::StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> CreateMLIRModule(
@@ -58,6 +58,8 @@ class LoopFusion final : public EmitterBase {
       const emitters::CallTargetProvider& call_targets,
       mlir::func::FuncOp entry_function,
       const HloFusionInstruction& fusion) const override;
+
+  WorkDimensions GetWorkDimensions() const;
 
  private:
   const HloFusionAnalysis& analysis_;

@@ -23,6 +23,7 @@ package_group(
 cc_library(
     name = "math_utils",
     hdrs = ["math_utils.h"],
+    visibility = internal_visibility([":friends"]),
 )
 
 cc_library(
@@ -296,6 +297,7 @@ cc_library(
     deps = [
         ":tf_xplane_visitor",
         ":timespan",
+        ":tpu_xplane_utils",
         ":xplane_builder",
         ":xplane_schema",
         ":xplane_utils",
@@ -305,12 +307,13 @@ cc_library(
         "//xla/tsl/platform:logging",
         "//xla/tsl/platform:types",
         "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/base:no_destructor",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/functional:bind_front",
         "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/strings",
-        "@local_tsl//tsl/platform:dso_loader",
         "@local_tsl//tsl/profiler/protobuf:xplane_proto_cc",
     ],
 )
@@ -339,17 +342,23 @@ tsl_cc_test(
     srcs = ["group_events_test.cc"],
     deps = [
         ":group_events",
+        ":preprocess_xplane",
         ":tf_xplane_visitor",
+        ":timespan",
+        ":trace_utils",
         ":xplane_builder",
         ":xplane_schema",
         ":xplane_test_utils",
+        ":xplane_utils",
         ":xplane_visitor",
-        "//xla/tsl/platform:env_impl",
+        "//xla/tsl/platform:env_impl",  # buildcleaner: keep
         "//xla/tsl/platform:test",
         "//xla/tsl/platform:types",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest_main",
+        "@local_tsl//tsl/profiler/lib:context_types_hdrs",
         "@local_tsl//tsl/profiler/protobuf:xplane_proto_cc",
     ],
 )
@@ -475,9 +484,22 @@ cc_library(
         "//xla/tsl/platform:status",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
         "@local_tsl//tsl/profiler/lib:profiler_session",
         "@local_tsl//tsl/profiler/protobuf:profiler_options_proto_cc",
+    ],
+)
+
+tsl_cc_test(
+    name = "session_manager_test",
+    srcs = ["session_manager_test.cc"],
+    deps = [
+        ":session_manager",
+        "//xla/tsl/platform:test",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_googletest//:gtest_main",
     ],
 )
 
@@ -489,6 +511,7 @@ cc_library(
         ":xplane_builder",
         ":xplane_schema",
         ":xplane_utils",
+        ":xplane_visitor",
         "@com_google_absl//absl/log",
         "@local_tsl//tsl/profiler/protobuf:xplane_proto_cc",
     ],
@@ -499,8 +522,6 @@ tsl_cc_test(
     srcs = ["timestamp_utils_test.cc"],
     deps = [
         ":timestamp_utils",
-        ":xplane_schema",
-        ":xplane_utils",
         ":xplane_visitor",
         "//xla/tsl/platform:test",
         "@com_google_googletest//:gtest_main",
@@ -543,7 +564,6 @@ tsl_cc_test(
     deps = [
         ":lock_free_queue",
         "//xla/tsl/platform:env",
-        "//xla/tsl/platform:env_impl",
         "//xla/tsl/platform:test",
         "@com_google_absl//absl/synchronization",
         "@com_google_googletest//:gtest_main",
@@ -574,7 +594,6 @@ tsl_cc_test(
     deps = [
         ":per_thread",
         "//xla/tsl/platform:env",
-        "//xla/tsl/platform:env_impl",
         "//xla/tsl/platform:test",
         "@com_google_absl//absl/memory",
         "@com_google_absl//absl/strings",
@@ -612,6 +631,10 @@ cc_library(
     srcs = ["profiler_options_util.cc"],
     hdrs = ["profiler_options_util.h"],
     deps = [
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
         "@local_tsl//tsl/profiler/protobuf:profiler_options_proto_cc",
     ],
 )

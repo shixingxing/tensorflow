@@ -17,6 +17,7 @@ limitations under the License.
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
@@ -59,8 +60,8 @@ class DummyCopyEmitter : public EmitterBase {
     return std::nullopt;
   }
 
-  std::optional<IndexingMap> ComputeThreadIdToInputIndexing(
-      int64_t, int64_t, mlir::MLIRContext*) const final {
+  std::optional<std::vector<IndexingMap>> ComputeThreadIdToInputIndexing(
+      int64_t, mlir::MLIRContext*) const final {
     return std::nullopt;
   }
 
@@ -73,11 +74,11 @@ class DummyCopyEmitter : public EmitterBase {
     mlir::ImplicitLocOpBuilder b(entry_function.getLoc(), entry_function);
     b.setInsertionPointToStart(entry_function.addEntryBlock());
     auto thread_id = EmitThreadId(b, 0);
-    auto value = b.create<mlir::tensor::ExtractOp>(
-        entry_function.getArgument(0), mlir::ValueRange{thread_id});
-    auto result = b.create<mlir::tensor::InsertOp>(
-        value, entry_function.getArgument(1), mlir::ValueRange{thread_id});
-    b.create<mlir::func::ReturnOp>(result->getResults());
+    auto value = mlir::tensor::ExtractOp::create(
+        b, entry_function.getArgument(0), mlir::ValueRange{thread_id});
+    auto result = mlir::tensor::InsertOp::create(
+        b, value, entry_function.getArgument(1), mlir::ValueRange{thread_id});
+    mlir::func::ReturnOp::create(b, result->getResults());
     return absl::OkStatus();
   }
 };
@@ -85,11 +86,11 @@ class DummyCopyEmitter : public EmitterBase {
 class EmitterBaseTest : public HloHardwareIndependentTestBase {
  protected:
   EmitterBaseTest() {
-    context_.appendDialectRegistry(EmitterBase::GetDialectRegistry());
-    context_.loadAllAvailableDialects();
+    mlir_context_.appendDialectRegistry(EmitterBase::GetDialectRegistry());
+    mlir_context_.loadAllAvailableDialects();
   }
 
-  mlir::MLIRContext context_;
+  mlir::MLIRContext mlir_context_;
   stream_executor::DeviceDescription device_info_ =
       TestGpuDeviceInfo::CudaOrRocmDeviceInfo();
 };
@@ -110,7 +111,7 @@ TEST_F(EmitterBaseTest, CreateMlirModule) {
   TF_ASSERT_OK_AND_ASSIGN(
       auto mlir_module,
       emitter.CreateMLIRModule(
-          context_,
+          mlir_context_,
           *Cast<HloFusionInstruction>(
               module->entry_computation()->root_instruction()),
           "fusion",
@@ -141,7 +142,7 @@ TEST_F(EmitterBaseTest, CreateLLVMModule) {
   TF_ASSERT_OK_AND_ASSIGN(
       auto llvm_module,
       emitter.CreateLLVMModule(
-          context_, llvm_context, device_info_,
+          mlir_context_, llvm_context, device_info_,
           *Cast<HloFusionInstruction>(
               module->entry_computation()->root_instruction()),
           "fusion",
@@ -158,9 +159,9 @@ TEST_F(EmitterBaseTest, CreateLLVMModule) {
                    R"(
     // CHECK: define void @fusion(ptr noalias %[[IN:.*]], ptr noalias %[[OUT:.*]])
     // CHECK:   %[[TID:.*]] = call i32 TIDX()
-    // CHECK:   %[[IN_PTR:.*]] = getelementptr inbounds float, ptr %[[IN]], i32 %[[TID]]
+    // CHECK:   %[[IN_PTR:.*]] = getelementptr inbounds [100 x float], ptr %[[IN]], i32 0, i32 %[[TID]]
     // CHECK:   %[[VAL:.*]] = load float, ptr %[[IN_PTR]], align 4
-    // CHECK:   %[[OUT_PTR:.*]] = getelementptr inbounds float, ptr %[[OUT]], i32 %[[TID]]
+    // CHECK:   %[[OUT_PTR:.*]] = getelementptr inbounds [100 x float], ptr %[[OUT]], i32 0, i32 %[[TID]]
     // CHECK:   store float %[[VAL]], ptr %[[OUT_PTR]], align 4
     // CHECK:   ret void
   )",

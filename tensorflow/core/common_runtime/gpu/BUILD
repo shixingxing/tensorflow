@@ -203,7 +203,9 @@ tf_cuda_library(
         "//tensorflow/core/profiler/lib:scoped_memory_debug_annotation",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
         "@local_xla//xla:shape_util",
+        "@local_xla//xla/pjrt:host_memory_allocator",
         "@local_xla//xla/stream_executor/gpu:gpu_init_impl",
         "@local_xla//xla/stream_executor/integrations:stream_executor_allocator",
         "@local_xla//xla/tsl/framework:device_id_utils",
@@ -347,6 +349,7 @@ tf_cuda_cc_test(
         "//tensorflow/core/common_runtime:core_cpu_internal",
         "//tensorflow/core/common_runtime:direct_session_internal",
         "//tensorflow/core/kernels:ops_util",
+        "@com_google_absl//absl/synchronization",
         "@local_xla//xla/stream_executor/gpu:gpu_cudamallocasync_allocator",
         "@local_xla//xla/tsl/framework:device_id",
     ],
@@ -409,6 +412,7 @@ tf_cuda_cc_test(
         "//tensorflow/core/common_runtime:core_cpu_internal",
         "//tensorflow/core/common_runtime:direct_session_internal",
         "//tensorflow/core/kernels:ops_util",
+        "@com_google_absl//absl/synchronization",
         "@local_xla//xla/stream_executor/gpu:gpu_cudamallocasync_allocator",
     ],
 )
@@ -427,6 +431,7 @@ tf_cuda_cc_test(
         "//tensorflow/core:test_main",
         "//tensorflow/core/common_runtime:core_cpu_internal",
         "//tensorflow/core/common_runtime:direct_session_internal",
+        "@com_google_absl//absl/synchronization",
     ],
 )
 

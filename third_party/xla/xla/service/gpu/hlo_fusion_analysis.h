@@ -27,10 +27,15 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/utils/hlo_traversal.h"
 #include "xla/service/gpu/backend_configs.pb.h"
+#include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/stream_executor/device_description.h"
 
 namespace xla {
 namespace gpu {
+
+// Returns true if the instruction's fusion backend config kind matches the
+// given one.
+bool IsGpuFusionKind(const HloInstruction& hlo, absl::string_view kind);
 
 class HloFusionAnalysis {
  public:
@@ -42,10 +47,10 @@ class HloFusionAnalysis {
     kReduction,
     kTranspose,
     kConcatenate,
-    kInputSlices,
     kScatter,
     kCuDnn,
     kDynamicMemcpy,
+    kSort,
   };
 
   // Precomputed information about inputs (arguments) and outputs (roots) of the
@@ -88,8 +93,7 @@ class HloFusionAnalysis {
     return fusion_spec_.fusion_hero(i);
   }
 
-  // Determines the fusion type for the emitter.
-  EmitterFusionKind GetEmitterFusionKind() const;
+  EmitterFusionKind emitter_fusion_kind() const { return emitter_fusion_kind_; }
 
   // Returns the hero reduction of the computation.
   const HloInstruction* FindHeroReduction() const;
@@ -100,8 +104,8 @@ class HloFusionAnalysis {
     return fusion_backend_config_;
   }
 
-  // Returns the tiled transpose description. Requires that GetEmitterFusionKind
-  // returns kTranspose.
+  // Returns the tiled transpose description. Requires that emitter_fusion_kind_
+  // is kTranspose.
   const TransposeDescription& tiled_transpose() const {
     CHECK(tiled_transpose_.has_value());
     return *tiled_transpose_;
@@ -114,6 +118,7 @@ class HloFusionAnalysis {
  private:
   HloFusionAnalysis(FusionBackendConfig fusion_backend_config,
                     HloFusionSpec fusion_spec,
+                    EmitterFusionKind emitter_fusion_kind,
                     const se::DeviceDescription* device_info,
                     std::optional<TransposeDescription> tiled_transpose,
                     InputOutputInfo input_output_info);
@@ -123,6 +128,7 @@ class HloFusionAnalysis {
   FusionBackendConfig fusion_backend_config_;
 
   HloFusionSpec fusion_spec_;
+  EmitterFusionKind emitter_fusion_kind_;
 
   const se::DeviceDescription* device_info_;
   std::optional<TransposeDescription> tiled_transpose_;

@@ -26,6 +26,7 @@ limitations under the License.
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Support/Casting.h"
+#include "xla/hlo/analysis/alias_info.h"
 #include "xla/hlo/analysis/hlo_ordering.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
@@ -75,11 +76,13 @@ TEST_F(CpuNoAliasTest, Concat) {
   hlo_module->AddEntryComputation(std::move(computation));
 
   // Now that we have an HLO module, build an llvm_ir::AliasAnalysis for it.
+  AliasInfo alias_info;
   auto status_or_buffer_assn = BufferAssigner::Run(
       hlo_module.get(),
       std::make_unique<DependencyHloOrdering>(hlo_module.get()),
-      backend().compiler()->BufferSizeBytesFunction(),
-      [](LogicalBuffer::Color) { return /*alignment=*/1; });
+      backend().compiler()->BufferSizeBytesFunction(), &alias_info,
+      [](LogicalBuffer::Color) { return /*alignment=*/1; },
+      BufferAssigner::Options{});
   ASSERT_EQ(status_or_buffer_assn.status(), absl::OkStatus());
 
   llvm::LLVMContext context;

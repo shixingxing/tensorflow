@@ -231,11 +231,13 @@ LogicalResult convert_graph_uint8_tensor(mlir::MLIRContext &context,
       auto rescale_output_zp = tosa::getConstTensorInt<int8_t>(
           builder, loc, {static_cast<int8_t>(rescale_output_zp_val)});
 
+      const auto rounding_mode_attr = tosa::RoundingModeAttr::get(
+          builder.getContext(), tosa::RoundingMode::SINGLE_ROUND);
       auto rescale_op = builder.create<tosa::RescaleOp>(
           loc, rescaled_type, arg, multiplier, shift, rescale_input_zp,
           rescale_output_zp,
           /* scale32 = */ builder.getBoolAttr(true),
-          /* rounding_mode = */ builder.getStringAttr("SINGLE_ROUND"),
+          /* rounding_mode = */ rounding_mode_attr,
           /* per_channel = */ builder.getBoolAttr(false),
           /* input_unsigned = */ builder.getBoolAttr(true),     // uint8_t ->
           /* output_unsigned = */ builder.getBoolAttr(false));  // int8_t
@@ -262,7 +264,8 @@ LogicalResult convert_graph_uint8_tensor(mlir::MLIRContext &context,
     // Convert intermediate tensor.
     for (auto &op : bb) {
       if (llvm::dyn_cast<tosa::ConstOp>(&op)) {
-        continue;  // Skip if the operation is a tosa::ConstOp
+        // Skip tosa const ops created during rescaling. 
+        continue;
       }
 
       for (Value output_val : op.getResults()) {
@@ -324,11 +327,13 @@ LogicalResult convert_graph_uint8_tensor(mlir::MLIRContext &context,
       auto rescale_output_zp = tosa::getConstTensorInt<int8_t>(
           builder, loc, {static_cast<int8_t>(uint8_zp_val)});
 
+      const auto rounding_mode_attr = tosa::RoundingModeAttr::get(
+        builder.getContext(), tosa::RoundingMode::SINGLE_ROUND);
       auto rescale_op = builder.create<tosa::RescaleOp>(
           loc, uint8_output_type, input_val, multiplier, shift,
           rescale_input_zp, rescale_output_zp,
           /* scale32 = */ builder.getBoolAttr(true),
-          /* rounding_mode = */ builder.getStringAttr("SINGLE_ROUND"),
+          /* rounding_mode = */ rounding_mode_attr,
           /* per_channel = */ builder.getBoolAttr(false),
           /* input_unsigned = */ builder.getBoolAttr(false),   // int8_t ->
           /* output_unsigned = */ builder.getBoolAttr(true));  // uint8_t
@@ -350,6 +355,13 @@ void ConvertUint8ToInt8::runOnOperation() {
   RewritePatternSet patterns(&getContext());
   auto &ctx = getContext();
   mlir::func::FuncOp func = getOperation();
+
+  func.walk([&](Operation *op) {
+    if (isa<TosaOp>(op)){
+      // Run this before calling convert_graph_uint8_tensor as rescaling introduces tosa ops
+      op->emitError("tosa operations are not expected in this pass. Run tosa-convert-tfl-uint8 before tosa-legalize-tfl");
+    }
+  });
 
   // Convert uint8 const tensor. const needs to be handled specifically.
   patterns.add<ConvertUint8QConstOp>(&ctx);

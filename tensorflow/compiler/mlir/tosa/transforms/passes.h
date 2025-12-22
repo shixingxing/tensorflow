@@ -53,8 +53,8 @@ std::unique_ptr<OperationPass<func::FuncOp>> createFuseBiasTFPass();
 // `enabledPatterns` is a set of labels used to filter out input patterns that
 //  do not have one of the labels in this set.
 std::unique_ptr<OperationPass<func::FuncOp>> createLegalizeTFLPass(
-    ArrayRef<std::string> disabled_patterns = std::nullopt,
-    ArrayRef<std::string> enabled_patterns = std::nullopt);
+    ArrayRef<std::string> disabled_patterns = {},
+    ArrayRef<std::string> enabled_patterns = {});
 
 std::unique_ptr<OperationPass<ModuleOp>> createRetainCallOnceFuncsPass();
 std::unique_ptr<OperationPass<ModuleOp>> createStripModuleMetadataPass();
@@ -70,7 +70,6 @@ std::unique_ptr<OperationPass<func::FuncOp>> createVerifyFullyConvertedPass();
 std::unique_ptr<OperationPass<ModuleOp>> createLegalizeTFLStatefulPass();
 
 #define GEN_PASS_REGISTRATION
-#define GEN_PASS_CLASSES
 #define GEN_PASS_DECL_TOSALEGALIZETFPASS
 #define GEN_PASS_DECL_TOSALEGALIZETFLPASS
 #define GEN_PASS_DECL_TOSALEGALIZETFTFLPASS

@@ -17,10 +17,13 @@ limitations under the License.
 #define XLA_BACKENDS_GPU_RUNTIME_GPUBLAS_LT_MATMUL_THUNK_H_
 
 #include <cstdint>
+#include <memory>
 #include <optional>
+#include <string>
 
-#include "absl/base/thread_annotations.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "xla/backends/gpu/runtime/thunk.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/gpu/matmul_utils.h"
@@ -32,8 +35,10 @@ namespace gpu {
 
 class CublasLtMatmulThunk : public Thunk {
  public:
-  CublasLtMatmulThunk(const HloInstruction* instr, GemmConfig gemm_config,
+  CublasLtMatmulThunk(Thunk::ThunkInfo thunk_info, std::string canonical_hlo,
+                      GemmConfig gemm_config,
                       se::gpu::BlasLt::Epilogue epilogue, int64_t algorithm_idx,
+                      int64_t autotune_workspace_size,
                       BufferAllocation::Slice a, BufferAllocation::Slice b,
                       BufferAllocation::Slice c, BufferAllocation::Slice d,
                       BufferAllocation::Slice bias /* may be null */,
@@ -53,6 +58,13 @@ class CublasLtMatmulThunk : public Thunk {
     return workspace_;
   }
 
+  BufferUses buffer_uses() const override;
+
+  absl::StatusOr<ThunkProto> ToProto() const override;
+  static absl::StatusOr<std::unique_ptr<Thunk>> FromProto(
+      Thunk::ThunkInfo thunk_info, const CublasLtMatmulThunkProto& proto,
+      absl::Span<const BufferAllocation> allocations);
+
  protected:
   CublasLtMatmulThunk(const CublasLtMatmulThunk& rhs);
 
@@ -61,10 +73,10 @@ class CublasLtMatmulThunk : public Thunk {
   absl::StatusOr<se::gpu::BlasLt::MatmulPlan*> GetCachedMatmulPlan(
       const ExecuteParams& params);
 
- protected:
   GemmConfig gemm_config_;
   se::gpu::BlasLt::Epilogue epilogue_;
   int64_t algorithm_idx_;
+  int64_t autotune_workspace_size_;
   std::string canonical_hlo_;
   BufferAllocation::Slice a_;
   BufferAllocation::Slice b_;

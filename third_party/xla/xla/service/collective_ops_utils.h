@@ -17,50 +17,33 @@ limitations under the License.
 #define XLA_SERVICE_COLLECTIVE_OPS_UTILS_H_
 
 #include <cstdint>
+#include <memory>
 #include <optional>
-#include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "absl/functional/function_ref.h"
 #include "absl/log/log.h"
-#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/str_join.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
+#include "xla/core/collectives/reduction_kind.h"
 #include "xla/executable_run_options.h"
-#include "xla/hlo/ir/collective_device_list.h"
+#include "xla/hlo/ir/collective_op_group_mode.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
-#include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_opcode.h"
+#include "xla/hlo/ir/replica_group.h"
 #include "xla/literal.h"
+#include "xla/runtime/device_id.h"
 #include "xla/service/collective_permute_cycle.h"
 #include "xla/service/computation_placer.h"
-#include "xla/service/global_device_id.h"
 #include "xla/service/pattern_matcher.h"
 #include "xla/service/source_target_pairs.h"
-#include "xla/stream_executor/device_memory.h"
 
 namespace xla {
-
-enum class ReductionKind { SUM, PRODUCT, MIN, MAX };
-
-constexpr absl::string_view ReductionKindToString(
-    ReductionKind reduction_kind) {
-  switch (reduction_kind) {
-    case ReductionKind::SUM:
-      return "sum";
-    case ReductionKind::PRODUCT:
-      return "prod";
-    case ReductionKind::MIN:
-      return "min";
-    case ReductionKind::MAX:
-      return "max";
-  }
-}
 
 absl::StatusOr<ReductionKind> StringToReductionKind(
     absl::string_view reduction_kind);
@@ -85,46 +68,6 @@ std::optional<HloOpcode> ReductionKindToOpcode(ReductionKind reduction_kind);
 std::optional<Literal> GetReductionIdentity(ReductionKind kind,
                                             PrimitiveType type);
 
-// There are broadly 4 modes that collective communication ops use to describe
-// which sets of devices are participating with a given device in the operation.
-// These modes are determined by the values of channel_id (optional) and
-// use_global_device_ids (optional). The modes are as follows:
-//
-// kCrossReplica:
-//    implied by: no channel id, use_global_device_ids = false, or
-//                no channel_id, no use_global_device_ids:
-//    replica_groups contain replica_id, group contains all replicas for the
-//    current partition
-//
-// kCrossPartition:
-//    implied by: channel_id is set, no use_global_device_ids:
-//    replica_groups contain partition_id, group contains all partitions for the
-//    current replica.
-//
-// kCrossReplicaAndPartition:
-//    implied by: channel_id is set, use_global_device_ids = false:
-//    replica_groups contain replica_id, group contains all replicas for all
-//    partitions (as opposed to just current partition).
-//
-// kFlattenedID:
-//    implied by: channel_id is set, use_global_device_ids = true:
-//    replica_groups contain flattened-ids, group contains devices that are
-//    listed in the flattened-id list.
-//
-// Rest of the combinations are invalid.
-//
-// Since the actual value of channel_id does not matter, we use a bool argument
-// `has_channel_id`, and optional<bool> for use_global_device_ids.
-// Note that use_global_device_ids true requires channel_id to be set as well.
-// Additionally, if use_global_device_ids = true, replica groups cannot be
-// empty (verified in the HLO verifier).
-enum class CollectiveOpGroupMode {
-  kCrossReplica,
-  kCrossPartition,
-  kCrossReplicaAndPartition,
-  kFlattenedID,
-};
-
 // Figures out which IDs are participating in the collective subgroup.
 // An empty `groups` indicates that all [0, total_participant_count) IDs
 // are participating. Note that for CollectiveOpGroupMode::kFlattenedID,
@@ -138,10 +81,8 @@ absl::StatusOr<std::vector<int>> GetParticipatingIDs(
 absl::StatusOr<std::vector<std::vector<int64_t>>> GetAsyncReplicaGroups(
     const HloInstruction* instruction);
 
-absl::string_view CollectiveOpGroupModeToString(
-    CollectiveOpGroupMode group_mode);
-
-const CollectiveDeviceList& GetCollectiveDeviceList(const HloInstruction* hlo);
+const CollectiveDeviceListBase& GetCollectiveDeviceList(
+    const HloInstruction* hlo);
 
 const std::vector<ReplicaGroup>& GetCollectiveReplicaGroups(
     const HloInstruction* hlo);
@@ -156,11 +97,6 @@ const std::vector<ReplicaGroup>& GetCollectiveReplicaGroups(
 //   * HloRaggedAllToAllInstruction
 absl::StatusOr<CollectiveOpGroupMode> GetCollectiveOpGroupMode(
     const HloInstruction* instr);
-
-// Returns the group formation mode implied by (a) whether the operation has
-// channel_id and (b) if it has use_global_device_ids and if yes, its value.
-absl::StatusOr<CollectiveOpGroupMode> GetCollectiveOpGroupMode(
-    bool has_channel_id, std::optional<bool> use_global_device_ids);
 
 // Figures out subgroups of participating devices from given replica_groups and
 // group_mode.
@@ -195,24 +131,28 @@ GetParticipatingDevicesGroups(const HloInstruction* collective);
 
 // Same as above, except that it returns the flattened id in the replica groups
 // instead of device id.
-absl::StatusOr<CollectiveDeviceList> GetParticipatingFlattenedIdGroups(
+absl::StatusOr<std::unique_ptr<CollectiveDeviceListBase>>
+GetParticipatingFlattenedIdGroups(
     const DeviceAssignment& device_assignment,
-    const CollectiveDeviceList& collective_device_list,
+    const CollectiveDeviceListBase& collective_device_list,
     CollectiveOpGroupMode group_mode);
 
 // Same as above, but take replica/partition count instead of device assignment.
-absl::StatusOr<CollectiveDeviceList> GetParticipatingFlattenedIdGroups(
-    const CollectiveDeviceList& collective_device_list,
+absl::StatusOr<std::unique_ptr<CollectiveDeviceListBase>>
+GetParticipatingFlattenedIdGroups(
+    const CollectiveDeviceListBase& collective_device_list,
     CollectiveOpGroupMode group_mode, int replica_count, int partition_count);
 
 // Same as above, with collective group mode determined by the collective
 // instruction.
-absl::StatusOr<CollectiveDeviceList> GetParticipatingFlattenedIdGroups(
-    const HloInstruction* hlo, const DeviceAssignment& device_assignment);
+absl::StatusOr<std::unique_ptr<CollectiveDeviceListBase>>
+GetParticipatingFlattenedIdGroups(const HloInstruction* hlo,
+                                  const DeviceAssignment& device_assignment);
 
 // Same as above, used for cases where static_device_assignment is not present.
-absl::StatusOr<CollectiveDeviceList> GetParticipatingFlattenedIdGroups(
-    const HloInstruction* hlo, int replica_count, int partition_count);
+absl::StatusOr<std::unique_ptr<CollectiveDeviceListBase>>
+GetParticipatingFlattenedIdGroups(const HloInstruction* hlo, int replica_count,
+                                  int partition_count);
 
 // Figures out which devices are participating in the collective subgroup.
 absl::StatusOr<std::vector<GlobalDeviceId>> GetParticipatingDevices(
@@ -248,6 +188,8 @@ bool IsExclusivelyCrossReplica(absl::Span<const ReplicaGroup> replica_groups,
                                bool use_global_ids, bool has_channel_id,
                                const DeviceAssignment& device_assignment);
 
+bool HasDuplicateSourcesOrTargets(const SourceTargetPairs& pairs);
+
 // A custom call target that can be used to create a nop that can legally
 // replace a collective op.
 inline constexpr absl::string_view kNopCustomCallTarget = "AllocateBuffer";
@@ -269,7 +211,6 @@ absl::StatusOr<bool> IsAsyncCollective(const HloInstruction* instruction);
 // Returns the collective instruction if argument is a collective op (or a
 // collective fusion) with channel_id.
 HloInstruction* IsOrHasCollectiveWithChannelId(HloInstruction* instruction);
-
 
 // Key that identifies a particular Rendezvous object in our global hashtable.
 // This determines which calls to ExecuteOnStream communicate with each other.
@@ -338,7 +279,7 @@ struct RendezvousKey {
     return absl::StrFormat(
         "RendezvousKey{run_id=%s, global_devices=[%s], "
         "num_local_participants=%d, collective_op_kind=%s, op_id=%d}",
-        run_id.ToString(), GlobalDeviceIdsToString(global_devices),
+        run_id.ToString(), absl::StrJoin(global_devices, ", "),
         num_local_participants, CollectiveOpKindString(), op_id);
   }
 
@@ -356,34 +297,10 @@ inline bool MayPipelineSendRecvChannel(int64_t channel_id) {
   return channel_id > 0;
 }
 
-constexpr char kSendRecvSourceTargetPairsAttr[] =
-    "_xla_send_recv_source_target_pairs";
-
 // When a Send or Recv is annotated with frontend attribute
 // _xla_send_recv_pipeline="1", asynchronous stream kP2P1 is used to execute the
 // Send or Recv. For all other cases, asynchronous stream kP2P0 is used.
 constexpr char kSendRecvPipelineAttr[] = "_xla_send_recv_pipeline";
-
-// This frontend attribute conveys the following information:
-// (1) _xla_send_recv_validation="invalid": the runtime should skip sending or
-// receiving data when the instruction is executed.
-// (2) the absent of the attribute: the runtime should faithfully perform the
-// Send or Recv operation when the instruction is executed.
-// (3) _xla_send_recv_validation={list-of-bounds}: the list-of-bounds
-// corresponds to the value of _xla_send_recv_source_target_pairs, and specifies
-// the execution instances for which the runtime should faithfully perform the
-// Send or Recv operation. Here is an example:
-//   _xla_send_recv_source_target_pairs={{0,1}, {1,2}}
-//   _xla_send_recv_validation={{2,3}, {5,7}}
-// The Send or Recv instruction with the above two attributes have the
-// following semantics:
-// The communication between device 0 and 1 will only send or receive data
-// for execution instances 2 and 3 of the instruction on devices 0 and 1.
-// For execution instances 0, 1, and beyond 3, the runtime should skip sending
-// or receiving any data.
-// Similarly, the communication between device 1 and 2 will only send or
-// receive data on execution instances 5 and 7.
-constexpr char kSendRecvValidationAttr[] = "_xla_send_recv_validation";
 
 // Attribute to indicate that collective operations should be issued on a
 // dedicated p2p stream. This is a hint and there is no guarantee that this will
@@ -391,6 +308,14 @@ constexpr char kSendRecvValidationAttr[] = "_xla_send_recv_validation";
 inline constexpr absl::string_view kCollectiveStreamAttrName =
     "_xla_gpu_collective_stream";
 inline constexpr absl::string_view kCollectiveStreamP2P = "p2p";
+
+// Returns latency metadata in microseconds(us) if the instruction is a custom
+// call with latency metadata. Returns `std::nullopt` if the instruction is not
+// a custom call with latency metadata or invalid latency metadata is provided.
+std::optional<double> GetCustomCallLatencyMetadata(const HloInstruction* instr);
+
+int64_t GetSubgroupSize(const HloCollectiveInstruction* hlo,
+                        CollectiveOpGroupMode group_mode);
 
 }  // end namespace xla
 

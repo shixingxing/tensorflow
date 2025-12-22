@@ -256,7 +256,7 @@ absl::Status UseGradientAccumulation(const OptimizationParameters& params,
     }
     case GradientAccumulationSupport::kNotSupported: {
       if (raw_gradient_accumulation_status) {
-        return errors::InvalidArgument(strings::Printf(
+        return errors::InvalidArgument(absl::StrFormat(
             "Optimization algorithm %s does not support gradient accumulation "
             "but parameters specify it.",
             GetOptimizationAlgorithmName(params.parameters_case()).c_str()));
@@ -475,7 +475,7 @@ absl::Status LoadOpShapeFunction::operator()(
     shape_inference::InferenceContext* c) const {
   int table_id;
   TF_RETURN_IF_ERROR(c->GetAttr("table_id", &table_id));
-  string table_name;
+  std::string table_name;
   TF_RETURN_IF_ERROR(c->GetAttr("table_name", &table_name));
   // Exactly one must be non-default.
   if ((table_id >= 0) == (!table_name.empty())) {
@@ -505,7 +505,7 @@ absl::Status RetrieveOpShapeFunction::operator()(
     shape_inference::InferenceContext* c) const {
   int table_id;
   TF_RETURN_IF_ERROR(c->GetAttr("table_id", &table_id));
-  string table_name;
+  std::string table_name;
   TF_RETURN_IF_ERROR(c->GetAttr("table_name", &table_name));
   // Exactly one must be non-default.
   if ((table_id >= 0) == (!table_name.empty())) {

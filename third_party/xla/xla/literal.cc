@@ -29,7 +29,9 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/algorithm/container.h"
 #include "absl/base/casts.h"
+#include "absl/base/no_destructor.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/functional/function_ref.h"
 #include "absl/log/check.h"
@@ -112,11 +114,11 @@ template <PrimitiveType kType>
 const Shape& ScalarShapeImpl() {
   static_assert(primitive_util::IsArrayType(kType),
                 "Not a valid type for a scalar.");
-  static const Shape* const shape = [] {
-    auto* const shape = new Shape(kType, /*dimensions=*/{});
-    shape->mutable_layout();
+  static const absl::NoDestructor<Shape> shape([] {
+    Shape shape(kType, /*dimensions=*/{});
+    shape.mutable_layout();
     return shape;
-  }();
+  }());
   return *shape;
 }
 
@@ -130,7 +132,7 @@ const Shape& ScalarShape(PrimitiveType type) {
 
 const Shape& NilShape() {
   // Create a nullary tuple.
-  static const Shape* const shape = new Shape(std::vector<Shape>());
+  static const absl::NoDestructor<Shape> shape(std::vector<Shape>{});
   return *shape;
 }
 
@@ -248,9 +250,6 @@ Shape* MutableLiteralBase::mutable_shape_do_not_use() {
 
 Literal::Literal() : Literal(NilShape()) {}
 
-Literal::Literal(const Shape& shape)
-    : Literal(shape, /*allocate_arrays=*/true) {}
-
 void Literal::SetShape(const Shape& shape) {
   if (const Shape* intered_shape_ptr = TryInternShape(shape)) {
     shape_ = intered_shape_ptr;
@@ -272,15 +271,15 @@ void Literal::SetShape(const Shape& shape) {
   shape_ = std::move(owning_shape_ptr);
 }
 
-void Literal::SetPiece(const Shape& shape, Piece* piece, bool allocate_arrays,
-                       ArrayValueState leaf_array_value_state) {
+absl::Status Literal::SetPiece(const Shape& shape, Piece* piece,
+                               bool allocate_arrays,
+                               ArrayValueState leaf_array_value_state) {
   if (shape.IsTuple()) {
     for (const Shape& subshape : shape.tuple_shapes()) {
       Piece child_piece;
       child_piece.set_subshape(&subshape);
-
-      SetPiece(subshape, &child_piece, allocate_arrays, leaf_array_value_state);
-
+      TF_RETURN_IF_ERROR(SetPiece(subshape, &child_piece, allocate_arrays,
+                                  leaf_array_value_state));
       piece->emplace_back(std::move(child_piece));
     }
   } else if (shape.IsArray()) {
@@ -291,21 +290,33 @@ void Literal::SetPiece(const Shape& shape, Piece* piece, bool allocate_arrays,
     piece->set_array_value_state(leaf_array_value_state);
     if (leaf_array_value_state == LiteralBase::ArrayValueState::kKnown &&
         allocate_arrays) {
-      piece->AllocateBuffers();
+      TF_RETURN_IF_ERROR(piece->AllocateBuffers());
     }
   }
+  return absl::OkStatus();
+}
+
+absl::StatusOr<Literal> Literal::Make(
+    const Shape& shape, const bool allocate_arrays,
+    const ArrayValueState leaf_array_value_state) {
+  // We cannot use the default constructor because it is implemented in terms
+  // of Literal::Make(), leading to infinite recursion.
+  Literal literal(UninitializedLiteralTag{});
+  literal.SetShape(shape);
+  CHECK(leaf_array_value_state != ArrayValueState::kKnown ||
+        LayoutUtil::HasLayout(*literal.shape_));
+  literal.root_piece_.set_subshape(literal.shape_.get());
+  CHECK(&literal.root_piece_.subshape() == literal.shape_.get());
+
+  TF_RETURN_IF_ERROR(literal.SetPiece(*literal.shape_, &literal.root_piece_,
+                                      allocate_arrays, leaf_array_value_state));
+  return literal;
 }
 
 Literal::Literal(const Shape& shape, bool allocate_arrays,
-                 ArrayValueState leaf_array_value_state) {
-  SetShape(shape);
-  CHECK(leaf_array_value_state != ArrayValueState::kKnown ||
-        LayoutUtil::HasLayout(*shape_));
-  root_piece_.set_subshape(shape_.get());
-  CHECK(&root_piece_.subshape() == shape_.get());
-
-  SetPiece(*shape_, &root_piece_, allocate_arrays, leaf_array_value_state);
-}
+                 ArrayValueState leaf_array_value_state)
+    : Literal(Literal::Make(shape, allocate_arrays, leaf_array_value_state)
+                  .value()) {}
 
 Literal::~Literal() { DeallocateBuffers(); }
 
@@ -445,11 +456,11 @@ absl::Status MutableLiteralBase::CopySliceFromInternal(
 
     auto copy_proc = [&](absl::Span<const int64_t> indexes) {
       // Map from multi-dimensional index, to source index.
-      std::transform(indexes.begin(), indexes.end(), src_base.begin(),
-                     src_indexes.begin(), std::plus<int64_t>());
+      absl::c_transform(indexes, src_base, src_indexes.begin(),
+                        std::plus<int64_t>());
       // Map from multi-dimensional index, to destination index.
-      std::transform(indexes.begin(), indexes.end(), dest_base.begin(),
-                     dest_indexes.begin(), std::plus<int64_t>());
+      absl::c_transform(indexes, dest_base, dest_indexes.begin(),
+                        std::plus<int64_t>());
 
       int64_t src_index = linear_index(src_literal.shape(), src_indexes);
       int64_t dest_index = linear_index(shape(), dest_indexes);
@@ -621,16 +632,20 @@ void LiteralBase::Piece::SetDynamicSize(int64_t dim_index, int32_t size) {
   dynamic_size_buffer()[dim_index] = size;
 }
 
-void LiteralBase::Piece::AllocateBuffers() {
+absl::Status LiteralBase::Piece::AllocateBuffers() {
   const int64_t bytes = total_bytes_dense();
   if (bytes > kMaxInlinedBytes) {
     CHECK_EQ(buffer(), nullptr);
-    storage_.Emplace<DenseRep>(
-        static_cast<char*>(tsl::port::AlignedMalloc(bytes, kMinimumAlignment)));
-    CHECK_NE(buffer(), nullptr) << "Failed to allocate buffer for Literal";
+    storage_.Emplace<DenseRep>(static_cast<char*>(tsl::port::AlignedMalloc(
+        bytes, static_cast<std::align_val_t>(kMinimumAlignment))));
+    if (buffer() == nullptr) {
+      return absl::ResourceExhaustedError(
+          "Failed to allocate buffer for Literal");
+    }
   } else {
     storage_.Emplace<DenseInlinedRep>();
   }
+  return absl::OkStatus();
 }
 
 void LiteralBase::Piece::DeallocateBuffers() {
@@ -699,7 +714,7 @@ absl::Status LiteralBase::Piece::CopyFrom(const LiteralBase::Piece& src,
     CHECK(src.array_value_state_ == ArrayValueState::kKnown);
     if (array_value_state_ == ArrayValueState::kUndetermined ||
         array_value_state_ == ArrayValueState::kUnknown) {
-      AllocateBuffers();
+      TF_RETURN_IF_ERROR(AllocateBuffers());
     }
     array_value_state_ = src.array_value_state_;
   }
@@ -1732,18 +1747,27 @@ void ConvertBetweenNativeTypes(absl::Span<const NativeSrcT> src_data,
     if constexpr (!std::is_same_v<NativeDestT, bool> &&
                   !std::numeric_limits<NativeSrcT>::is_integer &&
                   std::numeric_limits<NativeDestT>::is_integer) {
+      // NaN check.
       if (src != src) {
         return NativeDestT{0};
       }
-      if (src >=
-          static_cast<NativeSrcT>(std::numeric_limits<NativeDestT>::max())) {
+
+      // Clamp values that cannot fit in the destination type to avoid undefined
+      // behavior.
+      // An N-bit integer has a max of 2^N - 1 so max() + 1 is 2^N. Ensure
+      // double can losslessly hold.
+      static_assert((std::numeric_limits<double>::max_exponent - 1) >=
+                    std::numeric_limits<NativeDestT>::digits);
+      if (static_cast<double>(src) >=
+          static_cast<double>(std::numeric_limits<NativeDestT>::max())) {
         return std::numeric_limits<NativeDestT>::max();
       }
-      if (src <=
-          static_cast<NativeSrcT>(std::numeric_limits<NativeDestT>::lowest())) {
+      if (static_cast<double>(src) <=
+          static_cast<double>(std::numeric_limits<NativeDestT>::lowest())) {
         return std::numeric_limits<NativeDestT>::lowest();
       }
     }
+
     // TODO(b/370786669): Once ml_dtypes is updated to include
     // https://github.com/jax-ml/ml_dtypes/pull/205, do not special-case e3m4 by
     // casting to half first.
@@ -1794,7 +1818,7 @@ absl::StatusOr<Literal> ConvertSwitch(const LiteralBase& literal,
   if (literal.shape().element_type() == primitive_dest_type) {
     return literal.Clone();
   }
-  // Source Array type requirement is ensured by IsDenseArray before.
+  // Source Array type requirement is ensured before.
   if (!primitive_util::IsArrayType(primitive_dest_type) ||
       !primitive_util::IsArrayType(literal.shape().element_type())) {
     return Unimplemented("%s from type %s to type %s is not implemented.",
@@ -1902,7 +1926,21 @@ template <typename NativeT>
 bool LiteralBase::Piece::EqualElementsInternal(
     const LiteralBase::Piece& other, std::vector<int64_t>* multi_index) const {
   if (multi_index->size() == subshape().dimensions().size()) {
-    return (Get<NativeT>(*multi_index) == other.Get<NativeT>(*multi_index));
+    const NativeT value = Get<NativeT>(*multi_index);
+    const NativeT other_value = other.Get<NativeT>(*multi_index);
+    // The EqualElements function uses memcmp to compare two literals that have
+    // the same shape (including the layout!). This can be seen as a "fast path"
+    // comparison. This function on the other hand performs an elementwise
+    // comparison and is for cases where shapes or layouts differ.
+    //
+    // Instead of operator==(), we use memcmp so that the comparison of
+    // individual elements is consistent with the fast path.
+    //
+    // This also ensures consistency for hashing, as the hash of a literal is
+    // also computed on the underlying data rather than logical equivalence. If
+    // this were not the case, 0.0f and -0.0f would continue to have different
+    // hash values even though in C++ they are considered equal.
+    return memcmp(&value, &other_value, sizeof(NativeT)) == 0;
   }
   for (int64_t i = 0; i < GetDynamicSize(multi_index->size()); ++i) {
     multi_index->push_back(i);

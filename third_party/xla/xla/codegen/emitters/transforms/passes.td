@@ -18,17 +18,18 @@ limitations under the License.
 
 include "mlir/Pass/PassBase.td"
 
-def LowerXlaMathLibPass : Pass<"xla-lower-xla-math-lib", "mlir::func::FuncOp"> {
-  let summary = "Lowers XLA math function calls to xla.* math lib calls.";
+def LowerXlaIntrinsicLibPass : Pass<"xla-lower-xla-intrinsic-lib", "mlir::ModuleOp"> {
+  let summary = "Lowers XLA math function calls to xla.* intrinsic lib calls.";
   let description = [{
-    Lowers XLA math function calls to xla.* math lib calls. This enables LLVM to
+    Lowers XLA math function calls to xla.* intrinsic lib calls. This enables LLVM to
     vectorize, inline, and optimize over LLVM IR implementations of these
     functions and their approximations.
   }];
   let dependentDialects = [
     "mlir::func::FuncDialect",
+    "mlir::vector::VectorDialect",
   ];
-  let constructor = "CreateLowerXlaMathLibPass()";
+  let constructor = "CreateLowerXlaIntrinsicLibPass()";
 }
 
 def ConvertPureCallOpsPass
@@ -92,6 +93,11 @@ def ExpandFloatOpsPass : Pass<"xla-expand-float-ops", "mlir::ModuleOp"> {
     "mlir::mhlo::MhloDialect"
   ];
 
+  let options = [
+    Option<"approximate_tanh_", "approximate_tanh", "bool", /*default=*/"true",
+           "Use built-in MLIR approximation for tanh.">,
+  ];
+
   let constructor = "CreateExpandFloatOpsPass()";
 }
 
@@ -121,29 +127,6 @@ def LowerTensorsPass : Pass<"xla-lower-tensors", "mlir::ModuleOp"> {
            "Whether the pass targets a 'cpu' or 'gpu'. If 'cpu', gpu_device_info_ must be empty.">,
   ];
   let constructor = "CreateLowerTensorsPass()";
-}
-
-def LowerToLLVMPass :
-   Pass<"xla-lower-to-llvm", "mlir::ModuleOp"> {
-  let summary = "Lowers to LLVM.";
-
-  let description = [{
-    Lowers the rest to LLVM
-  }];
-
-  let dependentDialects = [
-    "mlir::func::FuncDialect",
-    "mlir::LLVM::LLVMDialect",
-    "mlir::NVVM::NVVMDialect",
-  ];
-
-  let options = [
-    Option<"gpu_device_info_", "gpu_device_info", "std::string", /*default=*/"",
-           "Serialized stream_executor::GPUDeviceInfo proto.">,
-    Option<"target_type_", "target_type", "std::string", /*default=*/"\"gpu\"",
-           "Whether the pass targets a 'cpu' or 'gpu'. If 'cpu', gpu_device_info_ must be empty.">,
-  ];
-  let constructor = "CreateLowerToLLVMPass()";
 }
 
 def LowerXlaToScfPass :
@@ -198,20 +181,6 @@ def MergePointersToSameSlicePass :
   let constructor = "CreateMergePointersToSameSlicePass()";
 }
 
-def PropagateAliasScopesPass :
-   Pass<"xla-propagate-alias-scopes", "mlir::func::FuncOp"> {
-  let summary = "Propagates alias scopes from function args to tensor modifications.";
-
-  let description = [{
-      Propagates alias scopes from function args to tensor modifications.
-  }];
-
-  let dependentDialects = [
-    "mlir::func::FuncDialect",
-    "mlir::LLVM::LLVMDialect",
-  ];
-}
-
 def PropagateSliceIndicesPass :
    Pass<"xla-propagate-slice-indices", "mlir::ModuleOp"> {
   let summary = "Propagates slice indices from the entry function to all callees.";
@@ -258,6 +227,11 @@ def SimplifyArithPass : Pass<"xla-simplify-arith", "mlir::func::FuncOp"> {
   let dependentDialects = [
     "mlir::arith::ArithDialect",
     "mlir::func::FuncDialect",
+  ];
+
+  let options = [
+    Option<"fast_min_max_", "fast_min_max", "bool", /*default=*/"false",
+           "Use fast min/max (does not propagate nan).">,
   ];
 
   let constructor = "CreateSimplifyArithPass()";
@@ -333,6 +307,16 @@ def VectorizeLoadsAndStoresPass :
   ];
 
   let constructor = "CreateVectorizeLoadsAndStoresPass()";
+}
+
+def SafeIntegerArithmeticPass : Pass<"xla-safe-integer-arithmetic"> {
+  let summary = "Make integer arithmetics safe.";
+
+  let description = [{
+    This pass converts integer division and remainder to ones that do not cause
+    undefined behavior. It only converts operations that are marked with the
+    attribute "xla.guard_ub".
+  }];
 }
 
 #endif  // XLA_CODEGEN_EMITTERS_TRANSFORMS_PASSES_TD_

@@ -44,8 +44,8 @@ cc_library(
     hdrs = ["tf_allocator_adapter.h"],
     deps = [
         "//xla:shape_util",
-        "//xla/stream_executor:device_memory",
-        "//xla/stream_executor:device_memory_allocator",
+        "//xla/stream_executor:device_address",
+        "//xla/stream_executor:device_address_allocator",
         "//xla/stream_executor:platform",
         "//xla/stream_executor:stream",
         "//xla/stream_executor:stream_executor_h",
@@ -59,6 +59,7 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:cord",
         "@com_google_absl//absl/synchronization",
+        "@local_tsl//tsl/platform:numbers",
     ],
 )
 
@@ -89,6 +90,7 @@ cc_library(
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/log",
+        "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/synchronization",
         "@local_tsl//tsl/profiler/lib:traceme",
     ],
@@ -118,7 +120,7 @@ xla_cc_test(
         ":tf_allocator_adapter",
         "//xla/service:cpu_plugin",
         "//xla/service:platform_util",
-        "//xla/stream_executor:device_memory_allocator",
+        "//xla/stream_executor:device_address_allocator",
         "//xla/stream_executor:platform",
         "//xla/stream_executor:stream",
         "//xla/stream_executor:stream_executor_h",

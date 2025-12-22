@@ -1,3 +1,4 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load(
     "//tensorflow:tensorflow.bzl",
     "tf_cc_test",
@@ -18,6 +19,7 @@ cc_library(
     srcs = ["mlir_to_bytecode.cc"],
     hdrs = ["mlir_to_bytecode.h"],
     deps = [
+        "//tensorflow/compiler/mlir/tfrt/ir/mlrt:mlrt_ops",
         "//tensorflow/core/tfrt/mlrt/bytecode",
         "//tensorflow/core/tfrt/mlrt/bytecode:executable",
         "//tensorflow/core/tfrt/mlrt/bytecode:function",
@@ -42,10 +44,12 @@ tf_cc_test(
     data = glob(["testdata/**"]),
     deps = [
         ":mlir_to_bytecode",
+        "//tensorflow/compiler/mlir/tfrt/ir/mlrt:mlrt_ops",
         "//tensorflow/core/tfrt/mlrt/bytecode",
         "//tensorflow/core/tfrt/mlrt/bytecode:executable",
         "//tensorflow/core/tfrt/mlrt/interpreter:attribute_span",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_matchers",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings:string_view",
         "@com_google_googletest//:gtest_main",
@@ -54,8 +58,6 @@ tf_cc_test(
         "@llvm-project//mlir:Parser",
         "@llvm-project//mlir:Support",
         "@local_xla//xla/tsl/platform:resource_loader",
-        "@local_xla//xla/tsl/platform:status_matchers",
-        "@local_xla//xla/tsl/platform:test",
     ],
 )
 

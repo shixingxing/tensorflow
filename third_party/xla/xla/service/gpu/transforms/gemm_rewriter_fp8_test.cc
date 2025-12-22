@@ -20,6 +20,7 @@ limitations under the License.
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 #include "absl/container/flat_hash_map.h"
@@ -64,15 +65,15 @@ class ParameterizedFp8GemmRewriteTest
       replacements_[kF8E4M3AmaxPlaceholder] = "448.";
       return;
     }
-    if (IsRocm() && std::get<se::RocmComputeCapability>(Capability())
-                        .has_ocp_fp8_support()) {
+    if (IsRocm() &&
+        Capability().rocm_compute_capability()->has_ocp_fp8_support()) {
       replacements_[kF8E4M3DatatypePlaceholder] = "f8e4m3fn";
       replacements_[kF8E5M2DatatypePlaceholder] = "f8e5m2";
       replacements_[kF8E4M3AmaxPlaceholder] = "448.";
       return;
     }
-    if (IsRocm() && std::get<se::RocmComputeCapability>(Capability())
-                        .has_nanoo_fp8_support()) {
+    if (IsRocm() &&
+        Capability().rocm_compute_capability()->has_nanoo_fp8_support()) {
       replacements_[kF8E4M3DatatypePlaceholder] = "f8e4m3fnuz";
       replacements_[kF8E5M2DatatypePlaceholder] = "f8e5m2fnuz";
       replacements_[kF8E4M3AmaxPlaceholder] = "240.";
@@ -91,7 +92,7 @@ class ParameterizedFp8GemmRewriteTest
     }
 
     if (IsRocm() &&
-        !std::get<se::RocmComputeCapability>(Capability()).has_fp8_support()) {
+        !Capability().rocm_compute_capability()->has_fp8_support()) {
       GTEST_SKIP()
           << "F8 gemm rewrite is only supported on MI300 and newer archs.";
     }
@@ -136,9 +137,18 @@ class ParameterizedFp8GemmRewriteTest
     if (expected.has_value()) {
       std::string replaced_pattern =
           absl::StrReplaceAll(expected.value(), replacements_);
+      std::vector<absl::string_view> additional_check_prefixes;
+      if (IsCuda()) {
+        additional_check_prefixes.push_back("CHECK-PTX");
+      }
+      if (IsRocm()) {
+        additional_check_prefixes.push_back("CHECK-GCN");
+      }
+
       GemmRewriteTestBase::RunAndFilecheckHloRewrite(
           absl::StrReplaceAll(hlo, replacements_), std::move(hlo_pass),
-          replaced_pattern, after_pass_checks, config);
+          replaced_pattern, after_pass_checks, config,
+          additional_check_prefixes);
     }
   }
 
@@ -2963,8 +2973,8 @@ TEST_P(ParameterizedFp8GemmRewriteTest, FnuzTypeF8) {
       ROOT out = f32[16,16] dot(x_unscaled, y_unscaled), lhs_contracting_dims={1}, rhs_contracting_dims={0}
           }
 )";
-  if (IsRocm() && std::get<se::RocmComputeCapability>(Capability())
-                      .has_nanoo_fp8_support()) {
+  if (IsRocm() &&
+      Capability().rocm_compute_capability()->has_nanoo_fp8_support()) {
     EXPECT_TRUE(RunAndCompare(hlo_text, ErrorSpec{1e-2, 1e-2}));
     RunAndFilecheckHloRewrite(
         hlo_text,

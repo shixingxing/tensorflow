@@ -1,5 +1,6 @@
 # Tensorflow util package
 
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//tensorflow:pytype.default.bzl", "pytype_strict_library")
 load("//tensorflow:strict.default.bzl", "py_strict_library")
 load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable", "tf_py_strict_test", "tf_python_pybind_extension")
@@ -132,6 +133,8 @@ cc_library(
         "//tensorflow/core:lib_internal",
         "//tensorflow/core/platform:stringpiece",
         "//tensorflow/python/lib/core:safe_pyobject_ptr",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
         "@local_xla//third_party/python_runtime:headers",
     ],
     alwayslink = 1,
@@ -782,7 +785,7 @@ py_strict_library(
         # library. It isn't possible to add these test dependencies via tensorflow.bzl's
         # py_test because not all tensorflow tests use tensorflow.bzl's py_test.
         "//tensorflow/python:global_test_configuration",
-        "@pypi_wrapt//:pkg",
+        "@pypi//wrapt",
         "//tensorflow/python:pywrap_tensorflow",
         ":_pywrap_utils",
     ],
@@ -968,7 +971,7 @@ py_strict_library(
         # py_test because not all tensorflow tests use tensorflow.bzl's py_test.
         "//tensorflow/python:global_test_configuration",
         "//third_party/py/numpy",
-        "@pypi_wrapt//:pkg",
+        "@pypi//wrapt",
     ],
 )
 

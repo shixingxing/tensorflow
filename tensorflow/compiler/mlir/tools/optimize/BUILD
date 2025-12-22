@@ -1,3 +1,4 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable")
 
 package(
@@ -16,9 +17,7 @@ cc_library(
     deps = [
         "//tensorflow/compiler/mlir/tools:safe_cast",
         "//tensorflow/core/framework:tensor_shape",
-        "//tensorflow/core/platform:logging",
-        "//tensorflow/core/platform:macros",
+        "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/types:span",
-        "@local_xla//xla/tsl/platform:status",
     ],
 )

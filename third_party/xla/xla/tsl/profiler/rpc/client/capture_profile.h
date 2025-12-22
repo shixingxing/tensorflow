@@ -34,6 +34,12 @@ absl::Status ExportToTensorBoard(const tensorflow::profiler::XSpace& xspace,
                                  const std::string& logdir,
                                  bool also_export_trace_json = false);
 
+// The run is the directory which contains the xplane.pb files.
+absl::Status ExportToTensorBoard(const tensorflow::profiler::XSpace& xspace,
+                                 const std::string& logdir,
+                                 const std::string& run,
+                                 bool also_export_trace_json = false);
+
 // Collects one sample of monitoring profile and shows user-friendly metrics.
 // If timestamp flag is true, timestamp will be displayed in "%H:%M:%S" format.
 absl::Status Monitor(const std::string& service_addr, int duration_ms,
@@ -53,16 +59,20 @@ absl::Status CaptureRemoteTrace(
 absl::Status CaptureRemoteTrace(
     const char* service_addr, const char* logdir, const char* worker_list,
     bool include_dataset_ops, int duration_ms, int num_tracing_attempts,
-    const absl::flat_hash_map<std::string, std::variant<int, std::string>>&
-        options);
+    const absl::flat_hash_map<std::string,
+                              std::variant<bool, int, std::string>>& options);
 
 // Generates RemoteProfilerSessionManagerOptions from inputs and calls
 // CaptureRemoteTrace.
-absl::Status CaptureRemoteTraceWithBoolOpts(
+inline absl::Status CaptureRemoteTraceWithBoolOpts(
     const char* service_addr, const char* logdir, const char* worker_list,
     bool include_dataset_ops, int duration_ms, int num_tracing_attempts,
     const absl::flat_hash_map<std::string,
-                              std::variant<bool, int, std::string>>& options);
+                              std::variant<bool, int, std::string>>& options) {
+  return CaptureRemoteTrace(service_addr, logdir, worker_list,
+                            include_dataset_ops, duration_ms,
+                            num_tracing_attempts, options);
+}
 
 }  // namespace profiler
 }  // namespace tsl

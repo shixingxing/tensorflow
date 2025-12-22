@@ -28,6 +28,7 @@ limitations under the License.
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
@@ -39,6 +40,7 @@ limitations under the License.
 #endif  // PLATFORM_GOOGLE
 #include "absl/types/span.h"
 #include "xla/debug_options_flags.h"
+#include "xla/hlo/analysis/alias_info.h"
 #include "xla/hlo/analysis/hlo_dataflow_analysis.h"
 #include "xla/hlo/analysis/hlo_operand_index.h"
 #include "xla/hlo/analysis/hlo_reachability.h"
@@ -52,23 +54,8 @@ limitations under the License.
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/util.h"
-#include "tsl/platform/errors.h"
-#include "tsl/platform/logging.h"
-#include "tsl/platform/status.h"
 
 namespace xla {
-
-#if defined(PLATFORM_GOOGLE)
-FusionDecision::FusionDecision(bool decision,
-                               absl::SourceLocation source_location) {
-  if (!decision) {
-    explanation_ =
-        absl::StrCat("Not fusing: due to ", source_location.file_name(), ":",
-                     source_location.line());
-  }
-}
-#endif  // PLATFORM_GOOGLE
-
 namespace {
 
 // These nodes can always be duplicated into consumers, even if
@@ -156,6 +143,7 @@ bool IsAlwaysDuplicable(const HloInstruction& instruction) {
     case HloOpcode::kCos:
     case HloOpcode::kSign:
     case HloOpcode::kSin:
+    case HloOpcode::kSinh:
     case HloOpcode::kTan:
       return ShapeUtil::ElementIsComplex(instruction.shape());
 
@@ -172,13 +160,19 @@ bool IsAlwaysDuplicable(const HloInstruction& instruction) {
 
     // Expensive instructions or unusual instructions for which fusion is
     // nonsensical.
+    case HloOpcode::kAcos:
+    case HloOpcode::kAcosh:
+    case HloOpcode::kAsin:
+    case HloOpcode::kAsinh:
     case HloOpcode::kAddDependency:
     case HloOpcode::kAfterAll:
     case HloOpcode::kAtan2:
+    case HloOpcode::kAtanh:
     case HloOpcode::kAsyncStart:
     case HloOpcode::kAsyncUpdate:
     case HloOpcode::kAsyncDone:
     case HloOpcode::kBatchNormGrad:
+    case HloOpcode::kCosh:
     case HloOpcode::kBatchNormInference:
     case HloOpcode::kBatchNormTraining:
     case HloOpcode::kCall:
@@ -222,6 +216,7 @@ bool IsAlwaysDuplicable(const HloInstruction& instruction) {
     case HloOpcode::kRngGetAndUpdateState:
     case HloOpcode::kRngBitGenerator:
     case HloOpcode::kRsqrt:
+    case HloOpcode::kScaledDot:
     case HloOpcode::kScatter:
     case HloOpcode::kSelectAndScatter:
     case HloOpcode::kSend:
@@ -524,7 +519,7 @@ class ReversePostOrderFusionQueue : public FusionQueue {
 bool MultiOutputFusionCreatesCycle(HloInstruction* producer,
                                    HloInstruction* consumer,
                                    const HloReachabilityMap& reachability) {
-  absl::flat_hash_set<int> operands;
+  absl::flat_hash_set<int64_t> operands;
   auto insert = [&](const HloInstruction* operand) {
     if (operand == producer) {
       return false;
@@ -559,7 +554,7 @@ bool MultiOutputFusionCreatesCycle(HloInstruction* producer,
   std::vector<HloInstruction*> worklist = producer->users();
   worklist.insert(worklist.end(), producer->control_successors().begin(),
                   producer->control_successors().end());
-  absl::flat_hash_set<int> visits;
+  absl::flat_hash_set<int64_t> visits;
   while (!worklist.empty()) {
     const HloInstruction* user = worklist.back();
     worklist.pop_back();
@@ -590,7 +585,7 @@ std::unique_ptr<FusionQueue> InstructionFusion::GetFusionQueue(
   return std::make_unique<ReversePostOrderFusionQueue>(computation);
 }
 
-absl::StatusOr<bool> InstructionFusion::Run(
+absl::StatusOr<bool> InstructionFusion::RunImpl(
     HloModule* module,
     const absl::flat_hash_set<absl::string_view>& execution_threads) {
   bool changed = false;
@@ -791,16 +786,17 @@ HloInstruction* InstructionFusion::AddFusionInstruction(
     // have the same value as the root of the fused computation. However, we
     // copy the value nontheless to simplify some use cases that involve
     // fusions.
-    TF_CHECK_OK(computation->ReplaceInstruction(consumer, fusion_instruction));
+    CHECK_OK(computation->ReplaceInstruction(consumer, fusion_instruction));
   }
-  fusion_instruction->set_called_computations_execution_thread(
-      computation->execution_thread(),
-      /*skip_async_execution_thread_overwrite=*/false);
   return fusion_instruction;
 }
 
 HloInstruction* InstructionFusion::FuseInstruction(
     HloInstruction* fusion_instruction, HloInstruction* producer) {
+  if (producer->opcode() == HloOpcode::kFusion) {
+    fusion_instruction->MergeFusionInstruction(producer);
+    return fusion_instruction;
+  }
   return fusion_instruction->FuseInstruction(producer);
 }
 
@@ -1103,7 +1099,8 @@ FusionDecision InstructionFusion::ShouldFuse(
     HloInstruction* consumer, int64_t operand_index,
     std::function<FusionDecision(const HloInstruction*, const HloInstruction*,
                                  std::optional<const InPlaceFusionOptions>)>
-        inplace_op_fusion_decider) {
+        inplace_op_fusion_decider,
+    bool legality_check_only /*=false*/) {
   HloInstruction* producer = consumer->mutable_operand(operand_index);
 
   // Don't fuse across a root instruction.
@@ -1113,7 +1110,7 @@ FusionDecision InstructionFusion::ShouldFuse(
   }
 
   // Cost condition: don't duplicate expensive instructions.
-  if (FusionWouldDuplicate(*producer, *consumer) &&
+  if (!legality_check_only && FusionWouldDuplicate(*producer, *consumer) &&
       (!may_duplicate_ || is_expensive_(*producer)) &&
       !IsAlwaysDuplicable(*producer)) {
     return FusionDecision::Forbid(may_duplicate_

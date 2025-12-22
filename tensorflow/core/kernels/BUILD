@@ -12,6 +12,7 @@ load(
     "if_mkl",
     "mkl_deps",
 )
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load(
     "//tensorflow:tensorflow.bzl",
     "if_android",
@@ -218,6 +219,7 @@ tf_kernel_library(
         "//tensorflow/core/activity_watcher:activity_watcher_utils",
         "//tensorflow/core/profiler/lib:connected_traceme",
         "//tensorflow/core/profiler/lib:traceme",
+        "@com_google_absl//absl/synchronization",
     ] + if_nccl([
         "//tensorflow/core/nccl:collective_communicator",
     ]),
@@ -274,6 +276,7 @@ tf_kernel_library(
         "//tensorflow/core:framework",
         "//tensorflow/core:framework_internal",
         "//tensorflow/core/framework:bounds_check",
+        "//tensorflow/core/platform:tstring",
         "@eigen_archive//:eigen3",
     ],
     alwayslink = 0,
@@ -384,7 +387,7 @@ tf_kernel_library(
         "nccl_ops.cc",
     ]),
     deps = if_cuda([
-        "@local_config_nccl//:nccl",
+        "@local_xla//xla/tsl/cuda:nccl",
     ]) + if_rocm([
         "@local_config_rocm//rocm:rccl",
     ]) + if_cuda_or_rocm([
@@ -536,6 +539,11 @@ tf_cuda_only_cc_test(
 cc_library(
     name = "conv_ops_gpu_hdrs",
     hdrs = ["conv_ops_gpu.h"],
+    deps = if_cuda_or_rocm([
+        "@local_xla//xla/stream_executor:data_type",
+        "@local_xla//xla/stream_executor:dnn",
+        "//tensorflow/core:framework",
+    ]),
 )
 
 cc_library(
@@ -562,7 +570,7 @@ cc_library(
         "//tensorflow/core/platform:tensor_float_32_hdr_lib",
         "//tensorflow/core/util:determinism_for_kernels",
         "//tensorflow/core/util:env_var",
-        "@local_xla//xla/stream_executor:numeric_options",
+        "@local_xla//xla/stream_executor:engine_options",
         "@local_xla//xla/tsl/util:determinism_for_kernels",
     ] + if_static(["//tensorflow/core/platform:tensor_float_32_utils"]),
 )
@@ -714,6 +722,7 @@ cc_library(
         "//tensorflow/core/platform:numbers",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/types:optional",
         "@local_xla//xla/tsl/platform:types",
     ],
@@ -730,6 +739,7 @@ tf_kernel_library(
     deps = [
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
+        "@com_google_absl//absl/synchronization",
     ],
 )
 
@@ -925,6 +935,7 @@ tf_kernel_library(
     deps = ARRAY_DEPS + [
         "//tensorflow/core:gpu_runtime",
         "//tensorflow/core/debug:debug_io_utils",
+        "@com_google_absl//absl/synchronization",
     ],
 )
 
@@ -1061,7 +1072,10 @@ tf_kernel_library(
 tf_kernel_library(
     name = "gather_op",
     prefix = "gather_op",
-    deps = ARRAY_DEPS,
+    deps = ARRAY_DEPS + [
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+    ],
 )
 
 tf_kernel_library(
@@ -1351,6 +1365,8 @@ tf_kernel_library(
     srcs = ["ragged_gather_op.cc"],
     deps = [
         "//tensorflow/core:framework",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
     ],
 )
 
@@ -1741,14 +1757,22 @@ tf_cc_test(
         ":concat_op",
         ":ops_testutil",
         ":ops_util",
+        "//tensorflow/cc:cc_ops",
+        "//tensorflow/cc:client_session",
+        "//tensorflow/cc:math_ops",
+        "//tensorflow/cc:ops",
+        "//tensorflow/cc:scope",
+        "//tensorflow/cc:testutil",
         "//tensorflow/core:core_cpu",
         "//tensorflow/core:framework",
-        "//tensorflow/core:lib",
+        "//tensorflow/core:lib_headers_for_pybind",
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
         "//tensorflow/core:testlib",
+        "//tensorflow/core/platform:tstring",
         "@com_google_absl//absl/base:prefetch",
+        "@com_google_googletest//:gtest",
     ],
 )
 
@@ -2426,6 +2450,7 @@ tf_kernel_library(
         ":range_sampler",
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
+        "@com_google_absl//absl/container:flat_hash_map",
     ],
 )
 
@@ -2437,6 +2462,8 @@ cc_library(
     deps = [
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/log:check",
     ],
 )
 
@@ -2728,6 +2755,8 @@ tf_kernel_library(
         ":gather_functor",
         ":gpu_prim_hdrs",
         "//tensorflow/core:framework_internal",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
     ],
 )
 
@@ -2947,7 +2976,9 @@ tf_kernel_library(
         "//tensorflow/core:lib_internal",
         "//tensorflow/core/framework:bounds_check",
         "//tensorflow/core/util:determinism_for_kernels",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
     ],
 )
 
@@ -5171,6 +5202,7 @@ tf_kernel_library(
     prefix = "sparse_reshape_op",
     deps = SPARSE_DEPS + [
         ":reshape_util",
+        "@com_google_absl//absl/status",
     ],
 )
 
@@ -5444,6 +5476,8 @@ tf_kernel_library(
     deps = STATE_DEPS + [
         ":loose_headers",
         "//tensorflow/core/util:determinism_for_kernels",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
     ],
 )
 
@@ -5453,6 +5487,8 @@ tf_kernel_library(
     deps = STATE_DEPS + [
         "//tensorflow/core/framework:op_requires",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
     ],
 )
 
@@ -5868,6 +5904,8 @@ tf_kernel_library(
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core/framework:bounds_check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
         "@eigen_archive//:eigen3",
     ],
 )
@@ -6494,7 +6532,6 @@ filegroup(
         "variable_ops.h",
         "variant_ops_util.cc",
         "variant_ops_util.h",
-    ] + [
         "//tensorflow/c/kernels:portable_all_op_kernels",
         "//tensorflow/core/kernels/image:non_max_suppression_op.cc",
         "//tensorflow/core/kernels/image:non_max_suppression_op.h",
@@ -6966,7 +7003,6 @@ filegroup(
         "whole_file_read_ops.cc",
         "xent_op.cc",
         ":portable_extended_ops_headers",
-    ] + [
         "//tensorflow/core/kernels/data:portable_all_op_kernels",
         "//tensorflow/core/kernels/image:adjust_contrast_op.cc",
         "//tensorflow/core/kernels/image:adjust_hue_op.cc",
@@ -7160,6 +7196,7 @@ cc_library(
     textual_hdrs = ANDROID_TEXTUAL_HDRS,
     visibility = ["//visibility:public"],
     deps = [
+        ":conv_ops_gpu_hdrs",
         "//tensorflow/core:portable_gif_internal",
         "//tensorflow/core:portable_jpeg_internal",
         "//tensorflow/core:portable_tensorflow_lib_lite",
@@ -7191,6 +7228,7 @@ cc_library(
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
         "@com_google_protobuf//:protobuf",
         "@ducc//:fft_wrapper",
         "@eigen_archive//:eigen3",
@@ -7991,6 +8029,7 @@ cc_library(
         "//tensorflow/core/framework:graph_proto_cc",
         "//tensorflow/core/framework:node_def_proto_cc",
         "//tensorflow/core/framework:types_proto_cc",
+        "@com_google_absl//absl/synchronization",
     ],
 )
 

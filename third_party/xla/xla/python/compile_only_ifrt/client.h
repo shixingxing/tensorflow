@@ -24,7 +24,6 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "absl/base/nullability.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
@@ -48,18 +47,22 @@ limitations under the License.
 #include "xla/python/ifrt/executable.h"
 #include "xla/python/ifrt/memory.h"
 #include "xla/python/ifrt/program.h"
+#include "xla/python/ifrt/remap_plan.h"
 #include "xla/python/ifrt/shape.h"
 #include "xla/python/ifrt/sharding.h"
 #include "xla/python/ifrt/topology.h"
+#include "xla/python/ifrt/tuple.h"
 #include "xla/python/ifrt/user_context.h"
 #include "xla/python/ifrt/value.h"
 #include "xla/python/pjrt_ifrt/pjrt_attribute_map_util.h"
 #include "xla/python/pjrt_ifrt/pjrt_dtype.h"
 #include "xla/python/pjrt_ifrt/pjrt_topology.h"
 #include "xla/service/computation_placer.h"
+#include "xla/tsl/concurrency/future.h"
 #include "xla/tsl/concurrency/ref_count.h"
-#include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
+#include "xla/util.h"
+#include "xla/xla_data.pb.h"
 
 namespace xla {
 
@@ -98,8 +101,10 @@ class CompileOnlyMemory
 class CompileOnlyDevice
     : public llvm::RTTIExtends<CompileOnlyDevice, ifrt::Device> {
  public:
-  explicit CompileOnlyDevice(const PjRtDeviceDescription* description)
+  explicit CompileOnlyDevice(const PjRtDeviceDescription* description,
+                             absl::string_view platform_name)
       : description_(std::move(description)),
+        platform_name_(platform_name),
         attributes_(ifrt::FromPjRtAttributeMap(description_->Attributes())) {}
 
   const PjRtDeviceDescription& description() const { return *description_; }
@@ -111,6 +116,8 @@ class CompileOnlyDevice
   }
 
   int ProcessIndex() const override { return description_->process_index(); }
+
+  absl::string_view PlatformName() const override { return platform_name_; }
 
   absl::string_view Kind() const override {
     return description_->device_kind();
@@ -147,6 +154,7 @@ class CompileOnlyDevice
 
  private:
   const PjRtDeviceDescription* description_;
+  const std::string platform_name_;
   ifrt::AttributeMap attributes_;
   ifrt::Memory* default_memory_ = nullptr;
   std::vector<ifrt::Memory*> unowned_memories_;
@@ -164,8 +172,12 @@ class CompileOnlyIfrtCompiler final
 
   absl::StatusOr<ifrt::ExecutableRef> Compile(
       std::unique_ptr<ifrt::Program> program, const ifrt::Topology& topology,
-      std::unique_ptr<ifrt::CompileOptions> options) override {
-    return Unimplemented("Compile not implemented.");
+      std::unique_ptr<ifrt::CompileOptions> options) override;
+
+  absl::Status IsExecutableVersionCompatible(
+      const xla::ifrt::ExecutableVersion& executable_version,
+      const xla::ifrt::DeviceListRef& devices) const override {
+    return absl::UnimplementedError("Not implemented");
   }
 
   absl::StatusOr<ifrt::LoadedExecutableRef> DeserializeLoadedExecutable(
@@ -186,8 +198,8 @@ class CompileOnlyIfRtClient final
         attributes_(ifrt::AttributeMap::Map()) {
     int offset = 0;
     for (auto& description : descriptions_) {
-      owned_devices_.push_back(
-          std::make_unique<CompileOnlyDevice>(description.get()));
+      owned_devices_.push_back(std::make_unique<CompileOnlyDevice>(
+          description.get(), topology_->platform_name()));
       auto* device = owned_devices_.back().get();
       devices_.push_back(device);
       if (description->process_index() == process_index()) {
@@ -209,24 +221,22 @@ class CompileOnlyIfRtClient final
       const void* data, xla::ifrt::DType dtype, xla::ifrt::Shape shape,
       std::optional<absl::Span<const int64_t>> byte_strides,
       xla::ifrt::ShardingRef sharding, HostBufferSemantics semantics,
-      std::function<void()> on_done_with_host_buffer,
-      tsl::RCReference<xla::ifrt::UserContext> user_context) override {
+      std::function<void()> on_done_with_host_buffer) override {
     return Unimplemented(
         "MakeArrayFromHostBuffer not available with compile-only client.");
   }
 
   absl::StatusOr<std::vector<ifrt::ArrayRef>> MakeArraysFromHostBufferShards(
       absl::Span<MakeArraysFromHostBufferShardsSpec> specs,
-      HostBufferSemantics semantics,
-      tsl::RCReference<xla::ifrt::UserContext> user_context) override {
+      HostBufferSemantics semantics) override {
     return Unimplemented(
         "MakeArraysFromHostBufferShards not available with compile-only "
         "client.");
   }
 
   absl::StatusOr<std::vector<ifrt::ArrayRef>> MakeErrorArrays(
-      const absl::Status& error, absl::Span<const ifrt::ArraySpec> array_specs,
-      tsl::RCReference<ifrt::UserContext> user_context) override {
+      const absl::Status& error,
+      absl::Span<const ifrt::ArraySpec> array_specs) override {
     return Unimplemented(
         "MakeErrorArrays not available with compile-only client.");
   }
@@ -255,9 +265,17 @@ class CompileOnlyIfRtClient final
     return Unimplemented("RemapArrays not available with compile-only client.");
   }
 
-  ifrt::Future<> GetReadyFuture(
+  absl::StatusOr<std::vector<xla::ifrt::ArrayRef>> ReshardArrays(
+      absl::Span<xla::ifrt::ArrayRef> arrays,
+      absl::Span<const xla::ifrt::ArraySpec> specs,
+      xla::ifrt::ArrayCopySemantics semantics) override {
+    return Unimplemented(
+        "ReshardArrays not available with compile-only client.");
+  }
+
+  tsl::Future<> GetReadyFuture(
       absl::Span<const ifrt::ValueRef> values) override {
-    return ifrt::Future<>(Unimplemented(
+    return tsl::Future<>(Unimplemented(
         "GetReadyFuture not available with compile-only client."));
   }
 
@@ -308,16 +326,12 @@ class CompileOnlyIfRtClient final
         "LookupAddressableDevice not available with compile-only client.");
   }
 
-  ifrt::DeviceListRef MakeDeviceList(
+  absl::StatusOr<ifrt::DeviceListRef> MakeDeviceList(
       absl::Span<ifrt::Device* const> devices) const override {
     return ifrt::BasicDeviceList::Create(devices);
   }
 
   ifrt::Compiler* GetDefaultCompiler() override { return &default_compiler_; }
-
-  tsl::RCReference<xla::ifrt::UserContext> CreateUserContext() override {
-    return tsl::RCReference<xla::ifrt::UserContext>();
-  }
 
   static char ID;  // NOLINT
 
@@ -328,7 +342,7 @@ class CompileOnlyIfRtClient final
     return topology_;
   }
 
-  absl::StatusOr<std::shared_ptr<const PjRtLayout>> GetDefaultLayout(
+  absl::StatusOr<std::shared_ptr<const PjRtLayout>> GetDefaultPjRtLayout(
       ifrt::DType dtype, absl::Span<const int64_t> dims, ifrt::Device* device,
       ifrt::MemoryKind memory_kind) const override {
     if (memory_kind == ifrt::MemoryKind(UnpinnedHostMemorySpace::kKind)) {

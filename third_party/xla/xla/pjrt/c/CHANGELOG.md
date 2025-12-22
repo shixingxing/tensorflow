@@ -1,5 +1,71 @@
 # PJRT C API changelog
 
+## 0.87
+
+* Add `PJRT_Executable_GetCompileOptions`.
+
+## 0.86
+
+* Add `PJRT_Device_CreateAsyncTrackingEvent`.
+
+* Add `PJRT_AsyncTrackingEvent_Destroy`.
+
+## 0.85
+
+* Add `PJRT_Device_PoisonExecution`.
+
+## 0.84
+
+* Add `PJRT_Buffer_CopyRawToHostFuture`.
+
+## 0.83
+
+* Add `PJRT_AsyncHostToDeviceTransferManager_TransferLiteral`.
+
+## 0.82
+
+* Add `PJRT_Client_CreateErrorBuffer`.
+
+## 0.81
+
+* Added `PJRT_Layouts_PJRT_Executable_GetOutputLayouts`.
+
+## 0.80
+
+* Added `PJRT_Extension_Type::PJRT_Extension_Type_HostAllocator`.
+
+## 0.79
+
+* Added `PJRT_LoadedExecutable_GetDeviceAssignment.`
+
+## 0.78
+
+* Add incarnations to `PJRT_ExecuteOptions`.
+
+## 0.77
+
+* Added buffer aliasing support to the PJRT C API
+
+## 0.76
+
+* Added `call_location` to `PJRT_ExecuteOptions`
+
+## 0.75
+
+* Added `PJRT_TopologyDescription_Deserialize`.
+
+## 0.74
+
+* Added `PJRT_Extension_Type::PJRT_Extension_Type_CrossHostTransfers`.
+
+## 0.73
+
+* Added `PJRT_Client_UpdateGlobalProcessInfo`.
+
+## 0.72
+
+* Added `peak_memory_in_bytes` to `CompiledMemoryStats`.
+
 ## 0.71
 
 *   Added `overridden_serialized_compile_options` and

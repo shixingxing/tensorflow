@@ -23,9 +23,9 @@ limitations under the License.
 #include "absl/types/span.h"
 #include "xla/backends/gpu/runtime/thunk.h"
 #include "xla/backends/gpu/runtime/thunk.pb.h"
+#include "xla/runtime/device_id.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/computation_placer.h"
-#include "xla/service/global_device_id.h"
 #include "xla/tsl/platform/statusor.h"
 
 namespace xla {
@@ -45,7 +45,9 @@ absl::Status ReplicaOrPartitionIdThunk::ExecuteOnStream(
 }
 
 absl::StatusOr<ThunkProto> ReplicaIdThunk::ToProto() const {
-  TF_ASSIGN_OR_RETURN(ThunkProto proto, Thunk::ToProto());
+  ThunkProto proto;
+  *proto.mutable_thunk_info() = thunk_info().ToProto();
+
   auto* replica_id_thunk_proto = proto.mutable_replica_id_thunk();
   TF_ASSIGN_OR_RETURN(*replica_id_thunk_proto->mutable_dest_buffer(),
                       dest().ToProto());
@@ -62,7 +64,9 @@ absl::StatusOr<std::unique_ptr<ReplicaIdThunk>> ReplicaIdThunk::FromProto(
 }
 
 absl::StatusOr<ThunkProto> PartitionIdThunk::ToProto() const {
-  TF_ASSIGN_OR_RETURN(ThunkProto proto, Thunk::ToProto());
+  ThunkProto proto;
+  *proto.mutable_thunk_info() = thunk_info().ToProto();
+
   auto* partition_id_thunk_proto = proto.mutable_partition_id_thunk();
   TF_ASSIGN_OR_RETURN(*partition_id_thunk_proto->mutable_dest_buffer(),
                       dest().ToProto());

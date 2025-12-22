@@ -15,25 +15,23 @@ limitations under the License.
 
 #include "xla/service/gpu/gpu_executable_run_options.h"
 
-#include <cstdint>
-#include <map>
 #include <optional>
 #include <utility>
 
 #include "absl/container/flat_hash_map.h"
 #include "xla/backends/gpu/collectives/gpu_collectives.h"
 #include "xla/executable_run_options.h"
-#include "xla/service/global_device_id.h"
+#include "xla/runtime/device_id.h"
 
 namespace xla::gpu {
 
 GpuExecutableRunOptions& GpuExecutableRunOptions::set_gpu_global_device_ids(
-    std::optional<std::map<int, GlobalDeviceId>> gpu_global_device_ids) {
+    std::optional<DeviceIdMap> gpu_global_device_ids) {
   gpu_global_device_ids_ = std::move(gpu_global_device_ids);
   return *this;
 }
 
-const std::optional<std::map<int, GlobalDeviceId>>&
+const std::optional<GpuExecutableRunOptions::DeviceIdMap>&
 GpuExecutableRunOptions::gpu_global_device_ids() const {
   return gpu_global_device_ids_;
 }
@@ -59,12 +57,12 @@ GpuCollectives* GpuExecutableRunOptions::collectives() const {
 }
 
 GpuExecutableRunOptions& GpuExecutableRunOptions::set_incarnations(
-    absl::flat_hash_map<GlobalDeviceId, uint64_t> incarnations) {
+    absl::flat_hash_map<GlobalDeviceId, IncarnationId> incarnations) {
   incarnations_ = std::move(incarnations);
   return *this;
 }
 
-const std::optional<absl::flat_hash_map<GlobalDeviceId, uint64_t>>&
+const std::optional<absl::flat_hash_map<GlobalDeviceId, IncarnationId>>&
 GpuExecutableRunOptions::incarnations() const {
   return incarnations_;
 }

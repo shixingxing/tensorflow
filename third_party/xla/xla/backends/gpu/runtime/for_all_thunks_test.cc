@@ -20,14 +20,18 @@ limitations under the License.
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "xla/backends/gpu/runtime/command_buffer_cmd.h"
 #include "xla/backends/gpu/runtime/command_buffer_thunk.h"
 #include "xla/backends/gpu/runtime/conditional_thunk.h"
 #include "xla/backends/gpu/runtime/dynamic_slice_thunk.h"
 #include "xla/backends/gpu/runtime/sequential_thunk.h"
 #include "xla/backends/gpu/runtime/thunk.h"
+#include "xla/backends/gpu/runtime/thunk.pb.h"
 #include "xla/backends/gpu/runtime/while_thunk.h"
 #include "xla/service/buffer_assignment.h"
+#include "xla/shape.h"
+#include "xla/shape_util.h"
 
 namespace xla::gpu {
 namespace {
@@ -49,6 +53,8 @@ struct DummyThunk : public Thunk {
   absl::Status ExecuteOnStream(const ExecuteParams& params) override {
     return absl::OkStatus();
   }
+
+  absl::StatusOr<ThunkProto> ToProto() const override { return ThunkProto{}; }
 };
 
 TEST(ForAllThunksTest, SingleThunk) {
@@ -102,11 +108,14 @@ TEST(ForAllThunksTest, ConditionalThunk) {
       Thunk::ThunkInfo(), std::move(thunk_sequence));
   SequentialThunk* sequential_thunk_ptr = sequential_thunk.get();
 
+  BufferAllocation alloc(0, 1024, 0);
+  BufferAllocation::Slice slice(&alloc, 0, 4);
+  Shape shape = ShapeUtil::MakeShape(S32, {});
+
   std::vector<std::unique_ptr<SequentialThunk>> branch_thunks;
   branch_thunks.push_back(std::move(sequential_thunk));
-  ConditionalThunk conditional_thunk(
-      Thunk::ThunkInfo(), BufferAllocation::Slice(), std::move(branch_thunks),
-      /*branch_index_is_bool=*/false);
+  ConditionalThunk conditional_thunk(Thunk::ThunkInfo(), {slice, shape},
+                                     std::move(branch_thunks));
 
   EXPECT_THAT(GetAllThunks(&conditional_thunk),
               UnorderedElementsAre(thunk_ptr, sequential_thunk_ptr,

@@ -334,6 +334,10 @@ TokKind HloLexer::LexIdentifier() {
   KEYWORD(HloModule);
   KEYWORD(ENTRY);
   KEYWORD(ROOT);
+  KEYWORD(FileLocations);
+  KEYWORD(FileNames);
+  KEYWORD(FunctionNames);
+  KEYWORD(StackFrames);
   KEYWORD(maximal);
   KEYWORD(replicated);
   KEYWORD(manual);
@@ -341,6 +345,7 @@ TokKind HloLexer::LexIdentifier() {
   KEYWORD(shard_as);
   KEYWORD(shard_like);
   KEYWORD(unknown);
+  KEYWORD(unreduced);
 
 #undef KEYWORD
 
@@ -353,13 +358,6 @@ TokKind HloLexer::LexIdentifier() {
       current_ptr_ = consumable.data();
       token_state_.str_val.assign(token_state_.token_start, current_ptr_);
       return TokKind::kDimLabels;
-    }
-    static LazyRE2 sparsity_desc_pattern = {
-        R"(([LR]\.[0-9]+@[0-9]+:[0-9]+_?)+)"};
-    if (RE2::Consume(&consumable, *sparsity_desc_pattern)) {
-      current_ptr_ = consumable.data();
-      token_state_.str_val.assign(token_state_.token_start, current_ptr_);
-      return TokKind::kSparsityDesc;
     }
   }
 
@@ -696,6 +694,14 @@ std::string TokKindToString(TokKind kind) {
       return "kw_ENTRY";
     case TokKind::kw_ROOT:
       return "kw_ROOT";
+    case TokKind::kw_FileNames:
+      return "kw_FileNames";
+    case TokKind::kw_FunctionNames:
+      return "kw_FunctionNames";
+    case TokKind::kw_FileLocations:
+      return "kw_FileLocations";
+    case TokKind::kw_StackFrames:
+      return "kw_StackFrames";
     case TokKind::kw_true:
       return "kw_true";
     case TokKind::kw_false:
@@ -714,6 +720,8 @@ std::string TokKindToString(TokKind kind) {
       return "kw_shard_like";
     case TokKind::kw_unknown:
       return "kw_unknown";
+    case TokKind::kw_unreduced:
+      return "kw_unreduced";
     case TokKind::kw_inf:
       return "kw_inf";
     case TokKind::kNegInf:
@@ -730,8 +738,6 @@ std::string TokKindToString(TokKind kind) {
       return "kDxD";
     case TokKind::kPad:
       return "kPad";
-    case TokKind::kSparsityDesc:
-      return "kSparsityDesc";
     case TokKind::kIdent:
       return "kIdent";
     case TokKind::kString:

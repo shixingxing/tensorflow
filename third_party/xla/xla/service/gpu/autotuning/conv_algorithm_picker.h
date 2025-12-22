@@ -36,7 +36,7 @@ limitations under the License.
 #include "xla/service/gpu/cublas_cudnn.h"
 #include "xla/service/gpu/gpu_conv_runner.h"
 #include "xla/service/hlo_module_config.h"
-#include "xla/stream_executor/device_memory.h"
+#include "xla/stream_executor/device_address.h"
 #include "xla/stream_executor/dnn.h"
 #include "xla/xla.pb.h"
 
@@ -93,8 +93,8 @@ class GpuConvAlgorithmPicker : public HloModulePass {
     return IsCustomCallToDnnConvolution(*instr);
   }
 
-  using HloPassInterface::Run;
-  absl::StatusOr<bool> Run(
+ protected:
+  absl::StatusOr<bool> RunImpl(
       HloModule* module,
       const absl::flat_hash_set<absl::string_view>& execution_threads) override;
 
@@ -107,12 +107,11 @@ class GpuConvAlgorithmPicker : public HloModulePass {
   absl::StatusOr<AutotuneResult> PickBestAlgorithmNoCache(
       const HloCustomCallInstruction* instr);
 
-#if (defined(GOOGLE_CUDA) && GOOGLE_CUDA)
   // Simple bundle of an algorithm and its output, for comparing results across
   // autotuned algorithms.
   struct ReferenceResult {
     stream_executor::dnn::AlgorithmDesc algorithm;
-    std::vector<stream_executor::DeviceMemoryBase> buffers;
+    std::vector<stream_executor::DeviceAddressBase> buffers;
   };
 
   // Execution environment for autotuning. Runtime autotuning requires runtime
@@ -133,13 +132,12 @@ class GpuConvAlgorithmPicker : public HloModulePass {
       GenericConvRunner* runner,
       std::optional<ReferenceResult>* reference_result,
       absl::Span<const stream_executor::dnn::AlgorithmDesc> disabled_algos,
-      absl::string_view instr_str,
+      const HloCustomCallInstruction& instr,
       const AutotuneRuntimeArguments& runtime_arguments);
 
   // Pick the best algorithm for CUDA platform.
   absl::StatusOr<AutotuneResult> PickBestAlgorithmNoCacheCuda(
       const HloCustomCallInstruction* instr);
-#endif
 
   absl::StatusOr<AutotuneResult> PickBestAlgorithmNoCacheRocm(
       const HloCustomCallInstruction* instr);

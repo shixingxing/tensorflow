@@ -62,6 +62,7 @@ limitations under the License.
 #include "xla/python/ifrt/ir/transforms/utils.h"
 #include "xla/python/ifrt/support/sharding_conversions.h"
 #include "xla/service/hlo.pb.h"
+#include "xla/xla_data.pb.h"
 
 namespace xla {
 namespace ifrt {
@@ -388,10 +389,16 @@ IfrtCompileAndPropagateShardingsPass::GetInputShardingParams(
     if (llvm::isa<IfrtUnspecifiedShardingAttr>(
             in_array_type.getShardingAttr())) {
       if (!in_shardings.has_value()) {
-        in_shardings = compile_result.executable->GetParameterShardings();
-        if (!in_shardings.has_value()) {
-          return call_op.emitError()
-                 << "executable does not have input shardings";
+        if (call_op.getDevices().size() == 1) {
+          // Use replicated sharding for single-device inputs without calling
+          // `GetParameterShardings` since it may return `std::nullopt`.
+          in_shardings.emplace(call_op.getOutputs().size());
+        } else {
+          in_shardings = compile_result.executable->GetParameterShardings();
+          if (!in_shardings.has_value()) {
+            return call_op.emitError()
+                   << "executable does not have input shardings";
+          }
         }
         if (in_shardings->size() != call_op.getOutputs().size()) {
           return call_op.emitError()
@@ -443,10 +450,16 @@ IfrtCompileAndPropagateShardingsPass::GetOutputShardingParams(
     if (llvm::isa<IfrtUnspecifiedShardingAttr>(
             out_array_type.getShardingAttr())) {
       if (!out_shardings.has_value()) {
-        out_shardings = compile_result.executable->GetOutputShardings();
-        if (!out_shardings.has_value()) {
-          return call_op.emitError()
-                 << "executable does not have output shardings";
+        if (call_op.getDevices().size() == 1) {
+          // Use replicated sharding for single-device inputs without calling
+          // `GetParameterShardings` since it may return `std::nullopt`.
+          out_shardings.emplace(call_op.getOutputs().size());
+        } else {
+          out_shardings = compile_result.executable->GetOutputShardings();
+          if (!out_shardings.has_value()) {
+            return call_op.emitError()
+                   << "executable does not have output shardings";
+          }
         }
         if (out_shardings->size() != call_op.getOutputs().size()) {
           return call_op.emitError()
@@ -565,8 +578,8 @@ IfrtCompileAndPropagateShardingsPass::PropagateShardings(
 
   if (replace_call_op) {
     builder.setInsertionPointAfter(call_op);
-    auto new_call_op = builder.create<CallOp>(
-        call_op.getLoc(), /*outputs=*/new_call_op_result_types,
+    auto new_call_op = CallOp::create(
+        builder, call_op.getLoc(), /*outputs=*/new_call_op_result_types,
         /*control_output=*/builder.getType<IfrtControlType>(),
         /*inputs=*/call_op.getInputs(),
         /*control_inputs=*/call_op.getControlInputs(),
@@ -602,10 +615,9 @@ IfrtCompileAndPropagateShardingsPass::GenerateLoadedExecutableOp(
     output_types.push_back(output.getType());
   }
   builder.setInsertionPointAfter(module_op);
-  builder.create<LoadedExecutableOp>(
-      module_op.getLoc(), symbol_name,
-      builder.getFunctionType(input_types, output_types),
-      call_op.getDevicesAttr());
+  LoadedExecutableOp::create(builder, module_op.getLoc(), symbol_name,
+                             builder.getFunctionType(input_types, output_types),
+                             call_op.getDevicesAttr());
   return mlir::SymbolRefAttr::get(&getContext(), symbol_name);
 }
 
@@ -613,8 +625,8 @@ void IfrtCompileAndPropagateShardingsPass::ReplaceCallOpWithCallLoadedOp(
     CallOp call_op, mlir::SymbolRefAttr loaded_exec_op_callee,
     mlir::OpBuilder& builder) {
   builder.setInsertionPointAfter(call_op);
-  auto call_loaded_op = builder.create<CallLoadedExecutableOp>(
-      call_op.getLoc(), call_op.getResultTypes(), call_op.getInputs(),
+  auto call_loaded_op = CallLoadedExecutableOp::create(
+      builder, call_op.getLoc(), call_op.getResultTypes(), call_op.getInputs(),
       call_op.getControlInputs(), call_op.getArgAttrsAttr(),
       call_op.getResAttrsAttr(), loaded_exec_op_callee, call_op.getIoAliases(),
       call_op.getDonatedInputIndices());
@@ -625,7 +637,7 @@ void IfrtCompileAndPropagateShardingsPass::ReplaceCallOpWithCallLoadedOp(
 }  // namespace
 
 std::unique_ptr<mlir::OperationPass<mlir::ModuleOp>>
-CreateIfrtCompileAndPropagateShardingsPass(
+createIfrtCompileAndPropagateShardingsPass(
     std::shared_ptr<AtomProgramCompiler> compiler,
     std::shared_ptr<
         absl::flat_hash_map<std::string, std::unique_ptr<CompileOptions>>>
@@ -637,7 +649,7 @@ CreateIfrtCompileAndPropagateShardingsPass(
       std::move(atom_executable_map));
 }
 
-void RegisterIfrtCompileAndPropagateShardingsPass(
+void registerIfrtCompileAndPropagateShardingsPass(
     std::shared_ptr<AtomProgramCompiler> compiler,
     std::shared_ptr<
         absl::flat_hash_map<std::string, std::unique_ptr<CompileOptions>>>
@@ -648,7 +660,7 @@ void RegisterIfrtCompileAndPropagateShardingsPass(
        compile_options_overrides = std::move(compile_options_overrides),
        atom_executable_map =
            std::move(atom_executable_map)]() -> std::unique_ptr<mlir::Pass> {
-        return CreateIfrtCompileAndPropagateShardingsPass(
+        return createIfrtCompileAndPropagateShardingsPass(
             std::move(compiler), std::move(compile_options_overrides),
             std::move(atom_executable_map));
       });
