@@ -45,20 +45,20 @@ using StatusScopedDiagnosticHandlerTest = ErrorUtilTest;
 TEST_F(StatusScopedDiagnosticHandlerTest,
        OkWithoutDiagnosticGetsPassedThrough) {
   TF_ASSERT_OK(
-      StatusScopedDiagnosticHandler(&context_).Combine(tensorflow::OkStatus()));
+      StatusScopedDiagnosticHandler(&context_).Combine(absl::OkStatus()));
 }
 
 TEST_F(StatusScopedDiagnosticHandlerTest,
        VerifyDiagnosticsAreCapturedAsUnknownStatus) {
   StatusScopedDiagnosticHandler handler(&context_);
   emitError(loc_) << "Diagnostic message";
-  ASSERT_TRUE(tensorflow::errors::IsUnknown(handler.ConsumeStatus()));
+  ASSERT_TRUE(absl::IsUnknown(handler.ConsumeStatus()));
 }
 
 TEST_F(StatusScopedDiagnosticHandlerTest, VerifyPassedInErrorsArePropagated) {
   const Status err = tensorflow::errors::Internal("Passed in error");
-  ASSERT_TRUE(tensorflow::errors::IsInternal(
-      StatusScopedDiagnosticHandler(&context_).Combine(err)));
+  ASSERT_TRUE(
+      absl::IsInternal(StatusScopedDiagnosticHandler(&context_).Combine(err)));
 }
 
 TEST_F(StatusScopedDiagnosticHandlerTest,
@@ -68,7 +68,7 @@ TEST_F(StatusScopedDiagnosticHandlerTest,
   emitError(loc_) << "Second diagnostic message reported";
   const Status s =
       ssdh.Combine(tensorflow::errors::Internal("Passed in error"));
-  ASSERT_TRUE(tensorflow::errors::IsInternal(s));
+  ASSERT_TRUE(absl::IsInternal(s));
   EXPECT_THAT(s.message(), HasSubstr("Passed in error"));
   EXPECT_THAT(s.message(), HasSubstr("Diagnostic message reported"));
   EXPECT_THAT(s.message(), HasSubstr("Second diagnostic message reported"));

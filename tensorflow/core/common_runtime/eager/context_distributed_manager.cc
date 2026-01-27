@@ -28,6 +28,7 @@ limitations under the License.
 #include <vector>
 
 #include "google/protobuf/any.pb.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/notification.h"
 #include "absl/time/time.h"
 #include "xla/tsl/platform/errors.h"
@@ -80,11 +81,11 @@ limitations under the License.
 #if (defined(PLATFORM_GOOGLE) && defined(TF_PLATFORM_LINUX_X86_64))
 #define TF_GPU_USE_PJRT
 #include "xla/pjrt/distributed/key_value_store_interface.h"
-#include "xla/pjrt/gpu/gpu_topology.h"
 #include "xla/pjrt/gpu/se_gpu_pjrt_client.h"
 #include "xla/pjrt/local_device_state.h"
 #include "xla/pjrt/pjrt_compiler.h"
 #include "xla/service/gpu/gpu_executable_run_options.h"
+#include "xla/service/gpu_topology.h"
 #include "tensorflow/core/framework/resource_base.h"
 #include "tensorflow/core/framework/resource_mgr.h"
 #include "tensorflow/core/tfrt/common/global_state.h"
@@ -129,6 +130,17 @@ class XlaKeyValueStore : public xla::KeyValueStoreInterface {
   absl::StatusOr<std::string> TryGet(std::string_view key) override {
     return coordination_service_agent_->TryGetKeyValue(
         absl::StrCat(key_prefix_, key));
+  }
+
+  // Async version of `Get`. The `done` callback is invoked when the key-value
+  // becomes available.
+  // The caller can cancel the underlying RPC call with the `StartCancel()` and
+  // `ClearCancelCallback()` methods on the returned `CallOptions`.
+  std::shared_ptr<tsl::CallOptions> AsyncGet(
+      absl::string_view key,
+      tsl::CoordinationServiceAgent::StatusOrValueCallback done) override {
+    return coordination_service_agent_->GetKeyValueAsync(
+        absl::StrCat(key_prefix_, key), std::move(done));
   }
 
   absl::Status Set(std::string_view key, std::string_view value) override {

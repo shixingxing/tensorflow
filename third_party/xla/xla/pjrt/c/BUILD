@@ -61,6 +61,19 @@ cc_library(
 )
 
 cc_library(
+    name = "pjrt_c_api_tpu_executable_extension_hdrs",
+    hdrs = ["pjrt_c_api_tpu_executable_extension.h"],
+    visibility = ["//visibility:public"],
+    deps = [":pjrt_c_api_hdrs"],
+)
+
+cc_library(
+    name = "pjrt_c_api_megascale_extension_hdrs",
+    hdrs = ["pjrt_c_api_megascale_extension.h"],
+    deps = [":pjrt_c_api_hdrs"],
+)
+
+cc_library(
     name = "pjrt_c_api_ffi_extension_hdrs",
     hdrs = ["pjrt_c_api_ffi_extension.h"],
     visibility = ["//visibility:public"],
@@ -218,7 +231,7 @@ cc_library(
         "//xla/tsl/platform:statusor",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-        "@local_tsl//tsl/platform:casts",
+        "@tsl//tsl/platform:casts",
     ],
 )
 
@@ -283,6 +296,8 @@ cc_library(
         "//xla/runtime:device_id",
         "//xla/service:computation_placer_hdr",
         "//xla/service:hlo_proto_cc",
+        "//xla/tsl/distributed_runtime:call_options",
+        "//xla/tsl/distributed_runtime/coordination:coordination_service_agent",
         "//xla/tsl/framework:allocator",
         "//xla/tsl/platform:errors",
         "//xla/tsl/platform:statusor",
@@ -302,8 +317,8 @@ cc_library(
         "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:span",
         "@llvm-project//mlir:IR",
-        "@local_tsl//tsl/profiler/lib:connected_traceme",
-        "@local_tsl//tsl/profiler/lib:context_types_hdrs",
+        "@tsl//tsl/profiler/lib:connected_traceme",
+        "@tsl//tsl/profiler/lib:context_types_hdrs",
     ],
 )
 
@@ -342,9 +357,9 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:span",
-        "@local_tsl//tsl/profiler/lib:connected_traceme",
-        "@local_tsl//tsl/profiler/lib:context_types_hdrs",
         "@stablehlo//:version",
+        "@tsl//tsl/profiler/lib:connected_traceme",
+        "@tsl//tsl/profiler/lib:context_types_hdrs",
     ],
 )
 
@@ -454,7 +469,6 @@ cc_library(
         "//xla/pjrt:pjrt_executable",
         "//xla/pjrt/extensions/cross_host_transfers:pjrt_c_api_cross_host_transfer_extension",
         "//xla/pjrt/gpu:gpu_helpers",
-        "//xla/pjrt/gpu:gpu_topology",
         "//xla/pjrt/gpu:se_gpu_pjrt_client",
         "//xla/pjrt/gpu:se_gpu_pjrt_compiler",  # buildcleaner: keep to register GPU AOT compiler
         "//xla/pjrt/plugin/xla_gpu:xla_gpu_pjrt_client",
@@ -464,6 +478,7 @@ cc_library(
         "//xla/python:inspect_sharding",  # To register "InspectSharding" custom partitioning handler.
         "//xla/service:compiler",
         "//xla/service:custom_call_target_registry",
+        "//xla/service:gpu_topology",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings:str_format",
@@ -482,7 +497,7 @@ cc_library(
         ":pjrt_c_api_macros",
         "@com_google_absl//absl/base",
         "@com_google_absl//absl/log:initialize",
-        "@local_tsl//tsl/platform",
+        "@tsl//tsl/platform",
     ],
     alwayslink = 1,
 )
@@ -594,7 +609,7 @@ xla_test(
         "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/types:span",
         "@com_google_googletest//:gtest_main",
-        "@local_tsl//tsl/platform:platform_port",
+        "@tsl//tsl/platform:platform_port",
     ],
 )
 
@@ -605,13 +620,16 @@ xla_cc_test(
         ":pjrt_c_api_hdrs",
         ":pjrt_c_api_helpers",
         ":pjrt_c_api_wrapper_impl",
+        "//xla:future",
         "//xla:shape_util",
         "//xla/pjrt:pjrt_common",
         "//xla/pjrt/distributed:in_memory_key_value_store",
+        "//xla/tsl/distributed_runtime:call_options",
         "//xla/tsl/lib/core:status_test_util",
         "//xla/tsl/platform:statusor",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_matchers",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/time",
         "@com_google_googletest//:gtest_main",

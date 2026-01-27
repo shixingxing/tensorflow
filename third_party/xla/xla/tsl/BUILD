@@ -28,6 +28,12 @@ config_setting(
     visibility = ["//visibility:public"],
 )
 
+config_setting(
+    name = "google",
+    flag_values = {":oss_setting": "False"},
+    visibility = ["//visibility:public"],
+)
+
 # Non-configurable setting to indicate open source build.
 bool_setting(
     name = "oss_setting",
@@ -582,6 +588,13 @@ bool_flag(
     visibility = ["//visibility:public"],
 )
 
+alias(
+    name = "libtpu_on_gce",
+    # This should never point to a set `config_setting` in OSS.
+    actual = if_google("//tools/cc_target_os:gce", ":google"),
+    visibility = ["//visibility:public"],
+)
+
 bzl_library(
     name = "tsl_bzl",
     srcs = ["tsl.bzl"],
@@ -596,7 +609,7 @@ bzl_library(
         "//xla/tsl/mkl:build_defs_bzl",
         "//xla/tsl/platform:rules_cc_bzl",
         "@local_config_tensorrt//:build_defs_bzl",
-        "@local_xla//third_party/py/rules_pywrap:pywrap_bzl",
+        "@xla//third_party/py/rules_pywrap:pywrap_bzl",
         "@local_config_rocm//rocm:build_defs_bzl",
         "//third_party/compute_library:build_defs_bzl",
     ],
