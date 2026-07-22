@@ -1,7 +1,22 @@
+# Copyright 2026 The OpenXLA Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Targets related to hlo_module_splitting, linking, and more generally
 # incremental compilation of HLO.
 
-load("//xla/tests:build_defs.bzl", "xla_test")
+load("//xla:xla.default.bzl", "xla_cc_test")
 load("//xla/tsl:tsl.bzl", "internal_visibility")
 load("//xla/tsl/platform:rules_cc.bzl", "cc_library")
 
@@ -34,12 +49,14 @@ cc_library(
         "//xla/service:compilation_environments",
         "//xla/service:hlo_module_config",
         "//xla/tsl/platform:errors",
+        "//xla/tsl/platform:status_macros",
         "//xla/tsl/platform:statusor",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/hash",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/log:vlog_is_on",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
@@ -58,12 +75,14 @@ cc_library(
         "//xla/hlo/transforms/simplifiers:hlo_dce",
         "//xla/service:compilation_environments",
         "//xla/tsl/platform:errors",
+        "//xla/tsl/platform:status_macros",
         "//xla/tsl/platform:statusor",
         "@com_google_absl//absl/base:nullability",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/log:vlog_is_on",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
@@ -72,16 +91,16 @@ cc_library(
 
 # Tests below
 
-xla_test(
+xla_cc_test(
     name = "hlo_module_splitting_test",
     size = "small",
     srcs = ["hlo_module_splitting_test.cc"],
-    backends = ["cpu"],
     deps = [
         ":hlo_module_splitting",
         "//xla/hlo/ir:hlo",
         "//xla/hlo/testlib:hlo_hardware_independent_test_base",
         "//xla/service:compiler",
+        "//xla/service:cpu_plugin",  # fixdeps: keep
         "//xla/service:platform_util",
         "//xla/stream_executor:platform",
         "//xla/tsl/lib/core:status_test_util",
@@ -93,11 +112,10 @@ xla_test(
     ],
 )
 
-xla_test(
+xla_cc_test(
     name = "hlo_module_linking_test",
     size = "small",
     srcs = ["hlo_module_linking_test.cc"],
-    backends = ["cpu"],
     deps = [
         ":hlo_linking_manifest",
         ":hlo_module_linking",
@@ -105,6 +123,7 @@ xla_test(
         "//xla/hlo/ir:hlo",
         "//xla/hlo/testlib:hlo_hardware_independent_test_base",
         "//xla/service:compiler",
+        "//xla/service:cpu_plugin",  # fixdeps: keep
         "//xla/service:hlo_verifier",
         "//xla/service:platform_util",
         "//xla/stream_executor:platform",

@@ -1,6 +1,22 @@
+# Copyright 2026 The OpenXLA Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Tools and utilities that aid in XLA development and usage.
 
-load("//xla:py_strict.bzl", "py_strict_binary", "py_strict_library")
+load("@xla//third_party/rules_python/python:py_binary.bzl", "py_binary")
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
 load(
     "//xla:xla.default.bzl",
     "xla_cc_binary",
@@ -16,10 +32,13 @@ package(
 # Filegroup used to collect source files for dependency checking.
 filegroup(
     name = "c_srcs",
-    data = glob([
-        "**/*.cc",
-        "**/*.h",
-    ]),
+    data = glob(
+        [
+            "**/*.cc",
+            "**/*.h",
+        ],
+        allow_empty = True,
+    ),
     visibility = ["//xla:internal"],
 )
 
@@ -152,12 +171,14 @@ xla_cc_binary(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "generate_hlo_test_checks_lib",
     srcs = ["generate_hlo_test_checks.py"],
+    strict_deps = True,
 )
 
-py_strict_binary(
+py_binary(
     name = "generate_hlo_test_checks",
     srcs = ["generate_hlo_test_checks.py"],
+    strict_deps = True,
 )

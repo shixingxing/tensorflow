@@ -1,6 +1,20 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load("//tensorflow:pytype.default.bzl", "pytype_strict_library")
-load("//tensorflow:strict.default.bzl", "py_strict_test")
-load("//tensorflow:tensorflow.bzl", "if_google")
+load("//tensorflow:tensorflow.bzl", "if_google", "py_test")
 load(
     "//tensorflow/dtensor:build_defs.bzl",
     "ALL_BACKENDS",
@@ -69,11 +83,12 @@ pytype_strict_library(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "api_test",
     srcs = [
         "api_test.py",
     ],
+    strict_deps = True,
     deps = [
         ":test_util",
         "//tensorflow/dtensor/python:api",
@@ -305,11 +320,12 @@ dtensor_test(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "input_util_test",
     size = "medium",
     srcs = ["input_util_test.py"],
     shard_count = 8,
+    strict_deps = True,
     deps = [
         ":test_util",
         "//tensorflow/dtensor/python:api",
@@ -332,7 +348,7 @@ py_strict_test(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "multi_client_input_util_test",
     timeout = "long",
     srcs = ["multi_client_input_util_test.py"],
@@ -340,6 +356,7 @@ py_strict_test(
         "TF2_BEHAVIOR": "1",
     },
     shard_count = 8,
+    strict_deps = True,
     tags = [
         # ThreadSanitizer does not support starting new threads after multi-threaded fork.
         "notsan",

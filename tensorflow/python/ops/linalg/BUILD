@@ -1,4 +1,19 @@
-load("//tensorflow:strict.default.bzl", "py_strict_library")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
@@ -6,9 +21,10 @@ package(
     licenses = ["notice"],
 )
 
-py_strict_library(
+py_library(
     name = "linalg_impl",
     srcs = ["linalg_impl.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/framework:constant_op",
         "//tensorflow/python/framework:dtypes",
@@ -32,9 +48,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "linear_operator_util",
     srcs = ["linear_operator_util.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/framework:dtypes",
         "//tensorflow/python/framework:ops",
@@ -51,9 +68,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "linear_operator_low_rank_update",
     srcs = ["linear_operator_low_rank_update.py"],
+    strict_deps = True,
     deps = [
         ":linear_operator",
         ":linear_operator_diag",
@@ -69,9 +87,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "linear_operator_circulant",
     srcs = ["linear_operator_circulant.py"],
+    strict_deps = True,
     deps = [
         ":linalg_impl",
         ":linear_operator",
@@ -92,9 +111,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "linear_operator_identity",
     srcs = ["linear_operator_identity.py"],
+    strict_deps = True,
     deps = [
         ":linalg_impl",
         ":linear_operator",
@@ -116,9 +136,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "linear_operator_kronecker",
     srcs = ["linear_operator_kronecker.py"],
+    strict_deps = True,
     deps = [
         ":linalg_impl",
         ":linear_operator",
@@ -136,14 +157,16 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "property_hint_util",
     srcs = ["property_hint_util.py"],
+    strict_deps = True,
 )
 
-py_strict_library(
+py_library(
     name = "linear_operator_block_lower_triangular",
     srcs = ["linear_operator_block_lower_triangular.py"],
+    strict_deps = True,
     deps = [
         ":linalg_impl",
         ":linear_operator",
@@ -166,7 +189,7 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "linear_operator",
     srcs = [
         "linear_operator.py",
@@ -175,6 +198,7 @@ py_strict_library(
         "linear_operator_inversion.py",
         "linear_operator_lower_triangular.py",
     ],
+    strict_deps = True,
     deps = [
         ":linalg_impl",
         ":linear_operator_util",
@@ -211,9 +235,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "linear_operator_tridiag",
     srcs = ["linear_operator_tridiag.py"],
+    strict_deps = True,
     deps = [
         ":linalg_impl",
         ":linear_operator",
@@ -231,9 +256,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "linear_operator_toeplitz",
     srcs = ["linear_operator_toeplitz.py"],
+    strict_deps = True,
     deps = [
         ":linalg_impl",
         ":linear_operator",
@@ -249,9 +275,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "linear_operator_block_diag",
     srcs = ["linear_operator_block_diag.py"],
+    strict_deps = True,
     deps = [
         ":linear_operator",
         ":linear_operator_util",
@@ -269,9 +296,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "linear_operator_test_util",
     srcs = ["linear_operator_test_util.py"],
+    strict_deps = True,
     deps = [
         ":linalg_impl",
         ":linear_operator_util",
@@ -301,9 +329,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "linear_operator_permutation",
     srcs = ["linear_operator_permutation.py"],
+    strict_deps = True,
     deps = [
         ":linalg_impl",
         ":linear_operator",
@@ -320,9 +349,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "linalg",
     srcs = ["linalg.py"],
+    strict_deps = True,
     deps = [
         ":linalg_impl",
         ":linear_operator",
@@ -342,9 +372,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "linear_operator_full_matrix",
     srcs = ["linear_operator_full_matrix.py"],
+    strict_deps = True,
     deps = [
         ":linear_operator",
         ":linear_operator_util",
@@ -356,9 +387,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "linear_operator_householder",
     srcs = ["linear_operator_householder.py"],
+    strict_deps = True,
     deps = [
         ":linalg_impl",
         ":linear_operator",
@@ -374,9 +406,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "slicing",
     srcs = ["slicing.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/framework:for_generated_wrappers",
         "//tensorflow/python/framework:tensor_util",
@@ -386,9 +419,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "linear_operator_zeros",
     srcs = ["linear_operator_zeros.py"],
+    strict_deps = True,
     deps = [
         ":linalg_impl",
         ":linear_operator",
@@ -406,9 +440,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "linear_operator_diag",
     srcs = ["linear_operator_diag.py"],
+    strict_deps = True,
     deps = [
         ":linalg_impl",
         ":linear_operator",
@@ -423,9 +458,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "linear_operator_addition",
     srcs = ["linear_operator_addition.py"],
+    strict_deps = True,
     deps = [
         ":linear_operator",
         ":linear_operator_diag",

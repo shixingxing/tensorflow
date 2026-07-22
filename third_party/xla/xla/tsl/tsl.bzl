@@ -1,8 +1,21 @@
+# Copyright 2026 The OpenXLA Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 """Provides build configuration for TSL"""
 
-load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
-load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
-load("@rules_python//python:py_library.bzl", "py_library")
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
 load("@bazel_skylib//lib:new_sets.bzl", "sets")
 load(
     "@local_config_cuda//cuda:build_defs.bzl",
@@ -26,6 +39,10 @@ load(
     "if_rocm",
 )
 load(
+    "@local_config_sycl//sycl:build_defs.bzl",
+    "if_sycl",
+)
+load(
     "//xla/tsl/platform:rules_cc.bzl",
     "cc_binary",
     "cc_library",
@@ -36,7 +53,12 @@ load(
     "if_tensorrt",
 )
 load(
-    "@xla//third_party/py/rules_pywrap:pywrap.default.bzl",
+    "//xla/tsl:transitive_dependencies.bzl",
+    _transitive_hdrs = "transitive_hdrs",
+    _transitive_parameters_library = "transitive_parameters_library",
+)
+load(
+    "@rules_ml_toolchain//py/rules_pywrap:pywrap.default.bzl",
     "use_pywrap_rules",
 )
 load(
@@ -124,13 +146,13 @@ def if_google(google_value, oss_value = []):
     _ = (google_value, oss_value)  # buildifier: disable=unused-variable
     return oss_value  # copybara:comment_replace return google_value
 
-def internal_visibility(internal_targets):
+def internal_visibility(internal_targets, or_else = ["//visibility:public"]):
     """Returns internal_targets in g3, but returns public in OSS.
 
     Useful for targets that are part of the XLA/TSL API surface but want finer-grained visibilites
     internally.
     """
-    return if_google(internal_targets, ["//visibility:public"])
+    return if_google(internal_targets, or_else)
 
 # TODO(jakeharmon): Use this to replace if_static
 # TODO(b/356020232): remove completely after migration is done
@@ -337,6 +359,7 @@ def tsl_copts(
         if_xla_available(["-DTENSORFLOW_USE_XLA=1"]) +
         if_tensorrt(["-DGOOGLE_TENSORRT=1"]) +
         if_rocm(["-DTENSORFLOW_USE_ROCM=1"]) +
+        if_sycl(["-DTENSORFLOW_USE_SYCL=1"]) +
         # Compile in oneDNN based ops when building for x86 platforms
         if_onednn(["-DXLA_ONEDNN"]) +
         # Enable additional ops (e.g., ops with non-NHWC data layout) and
@@ -411,7 +434,7 @@ def tsl_gpu_library(deps = None, cuda_deps = None, copts = tsl_copts(), **kwargs
             "@local_config_rocm//rocm:hip",
             "@local_config_rocm//rocm:rocm_headers",
         ]),
-        copts = (copts + if_cuda(["-DGOOGLE_CUDA=1", "-DNV_CUDNN_DISABLE_EXCEPTION"]) + if_rocm(["-DTENSORFLOW_USE_ROCM=1"]) + if_xla_available(["-DTENSORFLOW_USE_XLA=1"]) + if_onednn(["-DXLA_ONEDNN"]) + if_enable_mkl(["-DENABLE_MKL"]) + if_tensorrt(["-DGOOGLE_TENSORRT=1"])),
+        copts = (copts + if_cuda(["-DGOOGLE_CUDA=1", "-DNV_CUDNN_DISABLE_EXCEPTION"]) + if_rocm(["-DTENSORFLOW_USE_ROCM=1"]) + if_sycl(["-DTENSORFLOW_USE_SYCL=1"]) + if_xla_available(["-DTENSORFLOW_USE_XLA=1"]) + if_onednn(["-DXLA_ONEDNN"]) + if_enable_mkl(["-DENABLE_MKL"]) + if_tensorrt(["-DGOOGLE_TENSORRT=1"])),
         **kwargs
     )
 
@@ -508,21 +531,6 @@ def if_not_mobile_or_arm_or_macos_or_lgpl_restricted(a):
         "//conditions:default": [],
     })
 
-# Bazel rule for collecting the header files that a target depends on.
-def _transitive_hdrs_impl(ctx):
-    outputs = _get_transitive_headers([], ctx.attr.deps)
-    return DefaultInfo(files = outputs)
-
-_transitive_hdrs = rule(
-    attrs = {
-        "deps": attr.label_list(
-            allow_files = True,
-            providers = [CcInfo],
-        ),
-    },
-    implementation = _transitive_hdrs_impl,
-)
-
 def transitive_hdrs(name, deps = [], **kwargs):
     _transitive_hdrs(name = name + "_gather", deps = deps)
     native.filegroup(name = name, srcs = [":" + name + "_gather"], **kwargs)
@@ -578,60 +586,6 @@ def custom_op_cc_header_only_library(name, deps = [], includes = [], extra_deps 
         **kwargs
     )
 
-def _get_transitive_headers(hdrs, deps):
-    """Obtain the header files for a target and its transitive dependencies.
-
-      Args:
-        hdrs: a list of header files
-        deps: a list of targets that are direct dependencies
-
-      Returns:
-        a collection of the transitive headers
-      """
-    return depset(
-        hdrs,
-        transitive = [dep[CcInfo].compilation_context.headers for dep in deps],
-    )
-
-# Bazel rule for collecting the transitive parameters from a set of dependencies into a library.
-# Propagates defines and includes.
-def _transitive_parameters_library_impl(ctx):
-    defines = depset(
-        transitive = [dep[CcInfo].compilation_context.defines for dep in ctx.attr.original_deps],
-    )
-    system_includes = depset(
-        transitive = [dep[CcInfo].compilation_context.system_includes for dep in ctx.attr.original_deps],
-    )
-    includes = depset(
-        transitive = [dep[CcInfo].compilation_context.includes for dep in ctx.attr.original_deps],
-    )
-    quote_includes = depset(
-        transitive = [dep[CcInfo].compilation_context.quote_includes for dep in ctx.attr.original_deps],
-    )
-    framework_includes = depset(
-        transitive = [dep[CcInfo].compilation_context.framework_includes for dep in ctx.attr.original_deps],
-    )
-    return CcInfo(
-        compilation_context = cc_common.create_compilation_context(
-            defines = depset(direct = defines.to_list()),
-            system_includes = depset(direct = system_includes.to_list()),
-            includes = depset(direct = includes.to_list()),
-            quote_includes = depset(direct = quote_includes.to_list()),
-            framework_includes = depset(direct = framework_includes.to_list()),
-        ),
-    )
-
-_transitive_parameters_library = rule(
-    attrs = {
-        "original_deps": attr.label_list(
-            allow_empty = True,
-            allow_files = True,
-            providers = [CcInfo],
-        ),
-    },
-    implementation = _transitive_parameters_library_impl,
-)
-
 # buildozer: disable=function-docstring-args
 def tsl_pybind_extension_opensource(
         name,
@@ -649,6 +603,7 @@ def tsl_pybind_extension_opensource(
         deprecation = None,
         enable_stub_generation = False,  # @unused
         features = [],
+        local_defines = [],
         licenses = None,
         linkopts = [],
         pytype_deps = [],
@@ -716,6 +671,7 @@ def tsl_pybind_extension_opensource(
                 ],
             }),
             defines = defines,
+            local_defines = local_defines,
             features = features + ["-use_header_modules"],
             restricted_to = restricted_to,
             testonly = testonly,
@@ -741,6 +697,11 @@ def tsl_pybind_extension_opensource(
                     # not being exported.  There should be a better way to deal with this.
                     "-Wl,-w",
                     "-Wl,-exported_symbols_list,$(location %s)" % exported_symbols_file,
+                    # Resolve Python C API symbols at module load time. Without
+                    # this the link fails on macOS because libpython is not
+                    # available at link time for the extension .so.
+                    "-undefined",
+                    "dynamic_lookup",
                 ],
                 clean_dep("//xla/tsl:windows"): [],
                 "//conditions:default": [
@@ -780,6 +741,11 @@ def tsl_pybind_extension_opensource(
                     # not being exported.  There should be a better way to deal with this.
                     "-Wl,-w",
                     "-Wl,-exported_symbols_list,$(location %s)" % exported_symbols_file,
+                    # Resolve Python C API symbols at module load time. Without
+                    # this the link fails on macOS because libpython is not
+                    # available at link time for the extension .so.
+                    "-undefined",
+                    "dynamic_lookup",
                 ],
                 clean_dep("//xla/tsl:windows"): [],
                 "//conditions:default": [
@@ -792,6 +758,7 @@ def tsl_pybind_extension_opensource(
                 version_script_file,
             ],
             defines = defines,
+            local_defines = local_defines,
             features = features + ["-use_header_modules"],
             linkshared = 1,
             testonly = testonly,
@@ -843,6 +810,10 @@ def nvtx_headers():
 
 def tsl_google_bzl_deps():
     return []
+
+def if_include_google_deps(default_deps, no_google_deps = []):
+    _ = default_deps  # buildifier: disable=unused-variable
+    return no_google_deps
 
 def tsl_extra_config_settings():
     pass

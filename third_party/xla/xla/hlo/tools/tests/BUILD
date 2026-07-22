@@ -1,7 +1,22 @@
+# Copyright 2026 The OpenXLA Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@xla//third_party/rules_python/python:py_test.bzl", "py_test")
 load("//xla:lit.bzl", "enforce_glob", "lit_test_suite")
-load("//xla:py_strict.bzl", "py_strict_test")
 load("//xla/tsl:tsl.default.bzl", "filegroup")
 
 package(
@@ -53,7 +68,7 @@ lit_test_suite(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "generate_hlo_test_checks_test",
     srcs = ["generate_hlo_test_checks_test.py"],
     data = [
@@ -61,6 +76,7 @@ py_strict_test(
         "generate_hlo_test_checks_test_output.hlo",
         "//xla/hlo/tools:hlo-opt",
     ],
+    strict_deps = True,
     deps = [
         "//xla/hlo/tools:generate_hlo_test_checks_lib",
         "@absl_py//absl/testing:absltest",
@@ -97,6 +113,7 @@ cc_library(
         "//xla/hlo/transforms/simplifiers:algebraic_simplifier",
         "//xla/service:hlo_module_config",
         "//xla/tsl/platform:errors",
+        "//xla/tsl/platform:status_macros",
         "//xla/tsl/platform:statusor",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/log:check",

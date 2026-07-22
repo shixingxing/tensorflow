@@ -1,7 +1,22 @@
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 
 # Contains targets that expose client session APIs
-load("//tensorflow:strict.default.bzl", "py_strict_library")
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
 load("//tensorflow:tensorflow.bzl", "tf_cuda_library")
 load("//tensorflow:tensorflow.default.bzl", "cuda_py_strict_test", "tf_py_strict_test", "tf_python_pybind_extension")
 load("//tensorflow/core/platform:build_config_root.bzl", "if_pywrap", "if_static")
@@ -18,9 +33,10 @@ package(
     licenses = ["notice"],
 )
 
-py_strict_library(
+py_library(
     name = "pywrap_tf_session",
     srcs = ["pywrap_tf_session.py"],
+    strict_deps = True,
     visibility = ["//visibility:public"],
     deps = [
         ":_pywrap_tf_session",
@@ -123,6 +139,7 @@ tf_python_pybind_extension(
         "//tensorflow/python/lib/core:pybind11_proto",
         "//tensorflow/python/lib/core:pybind11_status",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
         "@pybind11",
         "@xla//third_party/python_runtime:headers",
     ],
@@ -151,9 +168,10 @@ tf_python_pybind_extension(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "client",
     srcs = ["client_lib.py"],
+    strict_deps = True,
     deps = [
         ":_pywrap_device_lib",
         "//tensorflow/core:protos_all_py",
@@ -182,9 +200,10 @@ tf_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "device_lib",
     srcs = ["device_lib.py"],
+    strict_deps = True,
     visibility = [
         "//tensorflow:internal",
         "//third_party/py/cleverhans:__subpackages__",
@@ -213,6 +232,7 @@ tf_python_pybind_extension(
         "//tensorflow/core/common_runtime:device_factory",
         "//tensorflow/python/lib/core:pybind11_proto",
         "//tensorflow/python/lib/core:pybind11_status",
+        "@com_google_absl//absl/status",
         "@pybind11",
         "@xla//third_party/python_runtime:headers",
     ],
@@ -245,6 +265,7 @@ cc_library(
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/memory",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings:str_format",
     ] + if_static(
         extra_deps = [
             "//tensorflow/core/protobuf:master_proto_cc",
@@ -288,9 +309,10 @@ tf_cuda_library(
     alwayslink = 1,
 )
 
-py_strict_library(
+py_library(
     name = "session",
     srcs = ["session.py"],
+    strict_deps = True,
     # copybara:uncomment_begin(google-only)
     # visibility = [
     # "//third_party/cloud_tpu/convergence_tools:__subpackages__",
@@ -328,9 +350,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "timeline",
     srcs = ["timeline.py"],
+    strict_deps = True,
     visibility = ["//visibility:public"],
     deps = [
         "//tensorflow/core:protos_all_py",
@@ -348,6 +371,7 @@ tf_cuda_library(
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
+        "@com_google_absl//absl/status",
     ],
     alwayslink = 1,
 )

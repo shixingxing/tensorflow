@@ -1,5 +1,20 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load("@rules_python//python:proto.bzl", "py_proto_library")
-load("//tensorflow:strict.default.bzl", "py_strict_binary")
+load("@xla//third_party/rules_python/python:py_binary.bzl", "py_binary")
 load(
     "//tensorflow/core/platform:build_config.bzl",
     "tf_proto_library",
@@ -57,9 +72,10 @@ tf_proto_library(
 #     ],
 # )
 #
-# py_strict_binary(
+# py_binary(
 #     name = "split_gen",
 #     srcs = ["split_gen.py"],
+#     strict_deps = True,
 #     deps = [
 #         ":test_message_proto_py_pb2",
 #         "//tensorflow/python/lib/io:file_io",
@@ -72,9 +88,10 @@ tf_proto_library(
 #     ],
 # )
 #
-# py_strict_binary(
+# py_binary(
 #     name = "split_graph_def_gen",
 #     srcs = ["split_graph_def_gen.py"],
+#     strict_deps = True,
 #     deps = [
 #         "//tensorflow/core:protos_all_py",
 #         "//tensorflow/python/lib/io:file_io",
@@ -87,9 +104,10 @@ tf_proto_library(
 #     ],
 # )
 #
-# py_strict_binary(
+# py_binary(
 #     name = "split_saved_model_gen",
 #     srcs = ["split_saved_model_gen.py"],
+#     strict_deps = True,
 #     deps = [
 #         "//tensorflow/core:protos_all_py",
 #         "//tensorflow/python/lib/io:file_io",
@@ -102,9 +120,10 @@ tf_proto_library(
 #     ],
 # )
 #
-# py_strict_binary(
+# py_binary(
 #     name = "many_field_gen",
 #     srcs = ["many_field_gen.py"],
+#     strict_deps = True,
 #     deps = [
 #         ":test_message_proto_py_pb2",
 #         "//tensorflow/python/lib/io:file_io",

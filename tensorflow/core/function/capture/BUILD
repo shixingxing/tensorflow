@@ -1,5 +1,21 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
 load("//tensorflow:pytype.default.bzl", "pytype_strict_library")
-load("//tensorflow:strict.default.bzl", "py_strict_library", "py_strict_test")
+load("//tensorflow:tensorflow.bzl", "py_test")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
@@ -8,11 +24,12 @@ package(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "free_vars_detect",
     srcs = [
         "free_vars_detect.py",
     ],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/autograph/pyct:anno",
         "//tensorflow/python/autograph/pyct:inspect_utils",
@@ -24,9 +41,10 @@ py_strict_library(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "free_vars_detect_test",
     srcs = ["free_vars_detect_test.py"],
+    strict_deps = True,
     tags = [
         "no_oss",  # TODO(b/247102978)
     ],
@@ -39,9 +57,10 @@ py_strict_test(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "by_ref_capture_test",
     srcs = ["by_ref_capture_test.py"],
+    strict_deps = True,
     deps = [
         "@absl_py//absl/testing:parameterized",
         #internal proto upb dep
@@ -68,9 +87,10 @@ pytype_strict_library(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "capture_container_test",
     srcs = ["capture_container_test.py"],
+    strict_deps = True,
     deps = [
         ":capture_container",
         "@absl_py//absl/testing:parameterized",
@@ -80,9 +100,10 @@ py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "restore_captures",
     srcs = ["restore_captures.py"],
+    strict_deps = True,
     visibility = ["//tensorflow:internal"],
     deps = [
         "//tensorflow/core/function/polymorphism:function_type",

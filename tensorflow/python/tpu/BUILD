@@ -1,9 +1,25 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
 load("@rules_python//python:proto.bzl", "py_proto_library")
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
 
 # Description: Operations defined for Cloud TPUs
 load("//tensorflow:pytype.default.bzl", "pytype_strict_library")
-load("//tensorflow:strict.default.bzl", "py_strict_library", "py_strict_test")
+load("//tensorflow:tensorflow.bzl", "py_test")
 load("//tensorflow:tensorflow.default.bzl", "tf_py_strict_test", "tf_python_pybind_extension")
 load("//tensorflow/core/platform:build_config.bzl", "tf_proto_library")
 load("//tensorflow/core/platform:build_config_root.bzl", "if_pywrap")
@@ -40,27 +56,30 @@ bzl_library(
     srcs = ["tpu_test_wrapper.bzl"],
 )
 
-py_strict_library(
+py_library(
     name = "tpu_test_wrapper",
     srcs = ["tpu_test_wrapper.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/platform:flags",
         "//tensorflow/python/util:tf_inspect",
     ],
 )
 
-py_strict_library(
+py_library(
     name = "embedding_context_utils",
     srcs = ["embedding_context_utils.py"],
+    strict_deps = True,
     deps = [
         "@absl_py//absl/logging",
     ],
 )
 
-py_strict_test(
+py_test(
     name = "tpu_test_wrapper_test",
     srcs = ["tpu_test_wrapper_test.py"],
     main = "tpu_test_wrapper_test.py",
+    strict_deps = True,
     tags = [
         "no_oss_py35",
         "no_pip",
@@ -76,6 +95,9 @@ py_strict_test(
 tf_py_strict_test(
     name = "tpu_embedding_v3_cpu_ops_test",
     srcs = ["tpu_embedding_v3_cpu_ops_test.py"],
+    exec_properties = {
+        "cpp_link.mem": "16g",
+    },
     shard_count = 8,
     tags = ["no_oss"],
     deps = [
@@ -176,9 +198,10 @@ pytype_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "tpu_replication",
     srcs = ["tpu_replication.py"],
+    strict_deps = True,
     deps = [
         ":device_assignment",
         "//tensorflow/core:protos_all_py",
@@ -199,9 +222,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "functional",
     srcs = ["functional.py"],
+    strict_deps = True,
     visibility = [
         "//visibility:public",
     ],
@@ -221,20 +245,22 @@ pytype_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "tpu",
     srcs = [
         "__init__.py",
     ],
+    strict_deps = True,
     deps = ["//tensorflow/python/framework:versions"],
 )
 
-py_strict_library(
+py_library(
     name = "tpu_noestimator",
     srcs = [
         "__init__.py",
         "api.py",
     ],
+    strict_deps = True,
     deps = [
         ":feature_column_v2",
         ":tpu_embedding_for_serving",
@@ -608,9 +634,10 @@ pytype_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "tpu_name_util",
     srcs = ["tpu_name_util.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/util:tf_export",
     ],
@@ -948,6 +975,7 @@ tpu_py_strict_test(
         ":tpu_py",
         ":tpu_replication",
         "//tensorflow/core:protos_all_py",
+        "//tensorflow/python:pywrap_tensorflow",
         "//tensorflow/python/distribute:tpu_strategy",
         "//tensorflow/python/distribute/cluster_resolver:tpu_cluster_resolver_py",
         "//tensorflow/python/eager:def_function",
@@ -979,8 +1007,9 @@ tpu_py_strict_test(
 )
 
 # NOTE this target should only be depended on by the tpu_test_wrapper macro.
-py_strict_library(
+py_library(
     name = "tpu_test_deps",
+    strict_deps = True,
     visibility = ["//visibility:public"],
     deps = [
         "//tensorflow/python/platform:client_testlib",
@@ -1048,9 +1077,10 @@ tf_python_pybind_extension(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "tpu_embedding_v3",
     srcs = ["tpu_embedding_v3.py"],
+    strict_deps = True,
     deps = [
         ":_pywrap_sparse_core_layout",  # buildcleaner: keep
         ":_pywrap_tpu_embedding",  # buildcleaner: keep

@@ -1,5 +1,21 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("//tensorflow:strict.default.bzl", "py_strict_binary", "py_strict_library")
+load("@xla//third_party/rules_python/python:py_binary.bzl", "py_binary")
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
 load("//tensorflow:tensorflow.bzl", "if_not_windows")
 load("//tensorflow:tensorflow.default.bzl", "cuda_py_strict_test", "get_compatible_with_portable", "tf_py_strict_test", "tf_pybind_cc_library_wrapper", "tf_python_pybind_extension")
 load("//tensorflow/core/platform:build_config.bzl", "tf_protos_grappler")
@@ -129,9 +145,10 @@ tf_python_pybind_extension(
     ] + if_pywrap(["//tensorflow/python/grappler:model_analyzer_lib"]),
 )
 
-py_strict_library(
+py_library(
     name = "tf_item",
     srcs = ["item.py"],
+    strict_deps = True,
     visibility = ["//visibility:public"],
     deps = [
         ":_pywrap_tf_item",
@@ -230,9 +247,10 @@ tf_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "tf_cluster",
     srcs = ["cluster.py"],
+    strict_deps = True,
     visibility = ["//visibility:public"],
     deps = [
         ":_pywrap_tf_cluster",
@@ -321,9 +339,10 @@ cuda_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "tf_optimizer",
     srcs = ["tf_optimizer.py"],
+    strict_deps = True,
     visibility = ["//visibility:public"],
     deps = [
         ":_pywrap_tf_optimizer",
@@ -525,9 +544,10 @@ cuda_py_strict_test(
 #     xla_enable_strict_auto_jit = False,
 # )
 
-py_strict_library(
+py_library(
     name = "cost_analyzer",
     srcs = ["cost_analyzer.py"],
+    strict_deps = True,
     deps = [
         ":_pywrap_cost_analyzer",
         ":tf_cluster",
@@ -535,9 +555,10 @@ py_strict_library(
     ],
 )
 
-py_strict_binary(
+py_binary(
     name = "cost_analyzer_tool",
     srcs = ["cost_analyzer_tool.py"],
+    strict_deps = True,
     deps = [
         ":cost_analyzer",
         ":tf_optimizer",
@@ -579,11 +600,12 @@ tf_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "model_analyzer",
     srcs = [
         "model_analyzer.py",
     ],
+    strict_deps = True,
     deps = [":_pywrap_model_analyzer"],
 )
 
@@ -689,9 +711,10 @@ tf_python_pybind_extension(
     ],
 )
 
-py_strict_binary(
+py_binary(
     name = "graph_analyzer",
     srcs = ["graph_analyzer.py"],
+    strict_deps = True,
     deps = [
         ":_pywrap_graph_analyzer",
         "@absl_py//absl:app",

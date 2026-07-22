@@ -1,6 +1,22 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Structured Tensors
 
-load("//tensorflow:strict.default.bzl", "py_strict_library", "py_strict_test")
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
+load("//tensorflow:tensorflow.bzl", "py_test")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
@@ -11,27 +27,30 @@ package(
     licenses = ["notice"],
 )
 
-py_strict_library(
+py_library(
     name = "structured",
     srcs = ["__init__.py"],
+    strict_deps = True,
     tags = ["nofixdeps"],
     deps = [
         ":structured_ops",
     ],
 )
 
-py_strict_library(
+py_library(
     name = "structured_ops",
     srcs = ["structured_ops.py"],
+    strict_deps = True,
     deps = [
         ":structured_array_ops",
         ":structured_tensor",
     ],
 )
 
-py_strict_library(
+py_library(
     name = "structured_tensor",
     srcs = ["structured_tensor.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/framework:constant_op",
         "//tensorflow/python/framework:dtypes",
@@ -55,11 +74,12 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "structured_tensor_dynamic",
     srcs = [
         "structured_tensor_dynamic.py",
     ],
+    strict_deps = True,
     deps = [
         ":structured_tensor",
         "//tensorflow/python/framework:tensor",
@@ -69,11 +89,12 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "structured_array_ops",
     srcs = [
         "structured_array_ops.py",
     ],
+    strict_deps = True,
     deps = [
         ":structured_tensor",
         "//tensorflow/core/config:flags_py",
@@ -92,9 +113,10 @@ py_strict_library(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "structured_tensor_test",
     srcs = ["structured_tensor_test.py"],
+    strict_deps = True,
     deps = [
         ":structured_array_ops",
         ":structured_tensor",
@@ -121,9 +143,10 @@ py_strict_test(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "structured_tensor_spec_test",
     srcs = ["structured_tensor_spec_test.py"],
+    strict_deps = True,
     deps = [
         ":structured_tensor",
         "@absl_py//absl/testing:parameterized",
@@ -144,9 +167,10 @@ py_strict_test(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "structured_array_ops_test",
     srcs = ["structured_array_ops_test.py"],
+    strict_deps = True,
     deps = [
         ":structured_array_ops",
         ":structured_tensor",
@@ -170,9 +194,10 @@ py_strict_test(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "structured_tensor_slice_test",
     srcs = ["structured_tensor_slice_test.py"],
+    strict_deps = True,
     deps = [
         ":structured_tensor",
         "@absl_py//absl/testing:parameterized",

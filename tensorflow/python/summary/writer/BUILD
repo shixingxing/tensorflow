@@ -1,4 +1,19 @@
-load("//tensorflow:strict.default.bzl", "py_strict_library")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
 load("//tensorflow:tensorflow.default.bzl", "tf_py_strict_test")
 
 package(
@@ -6,10 +21,11 @@ package(
     licenses = ["notice"],
 )
 
-py_strict_library(
+py_library(
     name = "fake_summary_writer",
     testonly = 1,
     srcs = ["fake_summary_writer.py"],
+    strict_deps = True,
     visibility = ["//visibility:public"],
     deps = [
         ":writer",
@@ -19,9 +35,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "writer",
     srcs = ["writer.py"],
+    strict_deps = True,
     visibility = ["//visibility:public"],
     deps = [
         ":event_file_writer",
@@ -37,9 +54,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "event_file_writer",
     srcs = ["event_file_writer.py"],
+    strict_deps = True,
     visibility = ["//visibility:public"],
     deps = [
         "//tensorflow/python/client:_pywrap_events_writer",
@@ -49,9 +67,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "writer_cache",
     srcs = ["writer_cache.py"],
+    strict_deps = True,
     visibility = ["//visibility:public"],
     deps = [
         ":writer",
@@ -60,9 +79,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "event_file_writer_v2",
     srcs = ["event_file_writer_v2.py"],
+    strict_deps = True,
     visibility = ["//visibility:public"],
     deps = [
         "//tensorflow/python/framework:constant_op",

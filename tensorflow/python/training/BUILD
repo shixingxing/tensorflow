@@ -1,5 +1,20 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load("@rules_python//python:proto.bzl", "py_proto_library")
-load("//tensorflow:strict.default.bzl", "py_strict_library")
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
 load("//tensorflow:tensorflow.default.bzl", "cuda_py_strict_test", "tf_py_strict_test")
 load("//tensorflow/core/platform:build_config.bzl", "tf_proto_library")
 load("//tensorflow/core/platform:distribute.bzl", "distribute_py_strict_test")
@@ -16,9 +31,10 @@ exports_files(
     visibility = ["//tensorflow/python:__pkg__"],
 )
 
-py_strict_library(
+py_library(
     name = "training_lib",
     srcs = ["training.py"],
+    strict_deps = True,
     visibility = [
         "//tensorflow:internal",
         "//third_party/py/tf_slim:__subpackages__",
@@ -68,8 +84,9 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "training",
+    strict_deps = True,
     visibility = [
         "//tensorflow:internal",
         "//tensorflow_minigo:__subpackages__",
@@ -85,9 +102,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "adadelta",
     srcs = ["adadelta.py"],
+    strict_deps = True,
     deps = [
         ":optimizer",
         "//tensorflow/python/framework:ops",
@@ -97,9 +115,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "adagrad_da",
     srcs = ["adagrad_da.py"],
+    strict_deps = True,
     deps = [
         ":optimizer",
         "//tensorflow/python/framework:constant_op",
@@ -111,9 +130,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "adagrad",
     srcs = ["adagrad.py"],
+    strict_deps = True,
     deps = [
         ":optimizer",
         "//tensorflow/python/framework:ops",
@@ -126,9 +146,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "adam",
     srcs = ["adam.py"],
+    strict_deps = True,
     deps = [
         ":optimizer",
         "//tensorflow/python/eager:context",
@@ -142,18 +163,20 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "basic_loops",
     srcs = ["basic_loops.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/framework:errors",
         "//tensorflow/python/util:tf_export",
     ],
 )
 
-py_strict_library(
+py_library(
     name = "checkpoint_ops",
     srcs = ["checkpoint_ops.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/framework:dtypes",
         "//tensorflow/python/framework:ops",
@@ -164,9 +187,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "checkpoint_utils",
     srcs = ["checkpoint_utils.py"],
+    strict_deps = True,
     deps = [
         ":py_checkpoint_reader",
         "//tensorflow/python/checkpoint:checkpoint_management",
@@ -183,9 +207,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "coordinator",
     srcs = ["coordinator.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/framework:errors",
         "//tensorflow/python/platform:tf_logging",
@@ -194,9 +219,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "device_setter",
     srcs = ["device_setter.py"],
+    strict_deps = True,
     visibility = [
         "//tensorflow:internal",
         "//third_party/py/tf_slim/ops:__pkg__",
@@ -210,9 +236,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "evaluation",
     srcs = ["evaluation.py"],
+    strict_deps = True,
     visibility = [
         "//tensorflow:internal",
         "//third_party/py/tf_slim/training:__pkg__",
@@ -232,9 +259,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "ftrl",
     srcs = ["ftrl.py"],
+    strict_deps = True,
     deps = [
         ":optimizer",
         "//tensorflow/python/framework:dtypes",
@@ -246,9 +274,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "gradient_descent",
     srcs = ["gradient_descent.py"],
+    strict_deps = True,
     visibility = [
         "//tensorflow:internal",
         "//third_party/py/tf_slim/layers:__pkg__",
@@ -265,9 +294,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "input",
     srcs = ["input.py"],
+    strict_deps = True,
     visibility = [
         "//tensorflow:internal",
         "//tensorflow/contrib/training:__pkg__",
@@ -299,9 +329,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "momentum",
     srcs = ["momentum.py"],
+    strict_deps = True,
     visibility = [
         "//tensorflow:internal",
         "//third_party/py/tf_slim/losses:__pkg__",
@@ -315,9 +346,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "moving_averages",
     srcs = ["moving_averages.py"],
+    strict_deps = True,
     visibility = [
         "//tensorflow:internal",
         "//third_party/py/tf_slim/layers:__pkg__",
@@ -342,9 +374,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "optimizer",
     srcs = ["optimizer.py"],
+    strict_deps = True,
     visibility = [
         "//tensorflow:internal",
         "//third_party/py/tf_slim/layers:__pkg__",
@@ -375,9 +408,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "proximal_adagrad",
     srcs = ["proximal_adagrad.py"],
+    strict_deps = True,
     deps = [
         ":optimizer",
         "//tensorflow/python/framework:constant_op",
@@ -388,9 +422,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "proximal_gradient_descent",
     srcs = ["proximal_gradient_descent.py"],
+    strict_deps = True,
     deps = [
         ":optimizer",
         "//tensorflow/python/framework:ops",
@@ -400,9 +435,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "quantize_training",
     srcs = ["quantize_training.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/core:protos_all_py",
         "//tensorflow/python:_pywrap_quantize_training",
@@ -411,9 +447,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "queue_runner_impl",
     srcs = ["queue_runner_impl.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/core:protos_all_py",
         "//tensorflow/python/client:session",
@@ -426,9 +463,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "queue_runner",
     srcs = ["queue_runner.py"],
+    strict_deps = True,
     visibility = [
         "//tensorflow:internal",
         "//tensorflow/contrib/training:__pkg__",
@@ -436,9 +474,10 @@ py_strict_library(
     deps = [":queue_runner_impl"],
 )
 
-py_strict_library(
+py_library(
     name = "rmsprop",
     srcs = ["rmsprop.py"],
+    strict_deps = True,
     deps = [
         ":optimizer",
         "//tensorflow/python/framework:ops",
@@ -450,9 +489,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "session_manager",
     srcs = ["session_manager.py"],
+    strict_deps = True,
     deps = [
         ":saver",
         "//tensorflow/python/checkpoint:checkpoint_lib",
@@ -466,9 +506,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "slot_creator",
     srcs = ["slot_creator.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/compiler/xla/experimental:xla_sharding",
         "//tensorflow/python/distribute:distribute_lib",
@@ -483,9 +524,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "summary_io",
     srcs = ["summary_io.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/summary:summary_iterator",
         "//tensorflow/python/summary/writer",
@@ -494,9 +536,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "sync_replicas_optimizer",
     srcs = ["sync_replicas_optimizer.py"],
+    strict_deps = True,
     deps = [
         ":optimizer",
         ":queue_runner",
@@ -518,9 +561,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "warm_starting_util",
     srcs = ["warm_starting_util.py"],
+    strict_deps = True,
     deps = [
         ":checkpoint_ops",
         ":checkpoint_utils",
@@ -719,9 +763,10 @@ tf_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "py_checkpoint_reader",
     srcs = ["py_checkpoint_reader.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/framework:dtypes",
         "//tensorflow/python/framework:errors",
@@ -744,18 +789,20 @@ tf_proto_library(
 # )
 # copybara:uncomment_end
 
-py_strict_library(
+py_library(
     name = "checkpoint_management",
     srcs = ["checkpoint_management.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/checkpoint:checkpoint_management",
         "//tensorflow/python/util:deprecation",
     ],
 )
 
-py_strict_library(
+py_library(
     name = "saver",
     srcs = ["saver.py"],
+    strict_deps = True,
     # copybara:uncomment_begin(google-only)
     # visibility = [
     # "//third_party/py/tf_slim:__subpackages__",
@@ -796,15 +843,17 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "learning_rate_decay",
     srcs = ["learning_rate_decay.py"],
+    strict_deps = True,
     deps = ["//tensorflow/python/keras/optimizer_v2:legacy_learning_rate_decay"],
 )
 
-py_strict_library(
+py_library(
     name = "saver_test_utils",
     srcs = ["saver_test_utils.py"],
+    strict_deps = True,
     deps = [
         ":saver",
         "//tensorflow/python/eager:context",
@@ -905,9 +954,10 @@ tf_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "basic_session_run_hooks",
     srcs = ["basic_session_run_hooks.py"],
+    strict_deps = True,
     visibility = [
         "//tensorflow:internal",
         "//third_party/py/tf_slim:__subpackages__",
@@ -931,9 +981,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "session_run_hook",
     srcs = ["session_run_hook.py"],
+    strict_deps = True,
     visibility = [
         "//tensorflow:internal",
         "//third_party/py/tf_slim:__subpackages__",
@@ -941,9 +992,10 @@ py_strict_library(
     deps = ["//tensorflow/python/util:tf_export"],
 )
 
-py_strict_library(
+py_library(
     name = "supervisor",
     srcs = ["supervisor.py"],
+    strict_deps = True,
     deps = [
         ":coordinator",
         ":saver",
@@ -997,13 +1049,11 @@ tf_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "server_lib",
     srcs = ["server_lib.py"],
-    visibility = [
-        "//smartass/brain/ops:__subpackages__",
-        "//tensorflow:internal",
-    ],
+    strict_deps = True,
+    visibility = ["//tensorflow:internal"],
     deps = [
         "//tensorflow/core:protos_all_py",
         "//tensorflow/python/client:pywrap_tf_session",
@@ -1014,9 +1064,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "training_util",
     srcs = ["training_util.py"],
+    strict_deps = True,
     visibility = [
         "//tensorflow:internal",
         "//third_party/cloud_tpu/convergence_tools:__subpackages__",
@@ -1406,6 +1457,7 @@ distribute_py_strict_test(
         "//tensorflow/python/eager:def_function",
         "//tensorflow/python/framework:constant_op",
         "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/framework:errors",
         "//tensorflow/python/framework:ops",
         "//tensorflow/python/framework:test_lib",
         "//tensorflow/python/ops:math_ops",
@@ -1576,9 +1628,10 @@ tf_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "monitored_session",
     srcs = ["monitored_session.py"],
+    strict_deps = True,
     visibility = [
         "//tensorflow:internal",
         "//third_party/py/tf_slim/training:__pkg__",

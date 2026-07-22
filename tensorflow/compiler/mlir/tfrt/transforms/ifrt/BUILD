@@ -1,3 +1,18 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load(
@@ -25,7 +40,6 @@ package_group(
         "//learning/brain/tfrt/tfrt_session/...",
         # Allow visibility from the mlir language server.
         "//learning/brain/mlir/mlir_lsp_server/...",
-        "//learning/infra/mira/experimental/orbax_model/serving/sidecar/...",
         "//smartass/brain/util/...",
     ]),
 )
@@ -67,6 +81,7 @@ cc_library(
     name = "tf_ifrt_passes",
     srcs = [
         "lower_to_ifrt_restore_variable.cc",
+        "propagate_static_shapes.cc",
         "rewrite_cluster_to_ifrt_call.cc",
         "sink_variable_as_named_array.cc",
         "tf_device_cleanup.cc",
@@ -85,6 +100,8 @@ cc_library(
         ":pass_inc_gen",
         "//tensorflow/compiler/mlir/tensorflow",
         "//tensorflow/compiler/mlir/tensorflow:bridge_logger",
+        "//tensorflow/compiler/mlir/tensorflow:convert_tensor",
+        "//tensorflow/compiler/mlir/tensorflow:convert_type",
         "//tensorflow/compiler/mlir/tensorflow:device_util",
         "//tensorflow/compiler/mlir/tensorflow:dump_mlir_util",
         "//tensorflow/compiler/mlir/tensorflow:error_util",
@@ -96,7 +113,9 @@ cc_library(
         "//tensorflow/compiler/mlir/tensorflow/transforms:tensorflow_passes",
         "//tensorflow/compiler/mlir/tensorflow/transforms/host_runtime:tpu_metadata_utils",
         "//tensorflow/compiler/mlir/tfrt:tf_to_tfrt",
+        "//tensorflow/compiler/mlir/tfrt/ir/mlrt:tf_mlrt_ops",
         "//tensorflow/core:framework",
+        "//tensorflow/core/ir/types:Dialect",
         "//tensorflow/core/platform:protobuf",
         "//tensorflow/core/platform:random",
         "//tensorflow/core/protobuf/tpu:compile_metadata_proto_cc",
@@ -130,6 +149,7 @@ cc_library(
         "//tensorflow/compiler/jit:xla_cpu_jit",
         "//tensorflow/compiler/mlir/tensorflow:dump_mlir_util",
         "//tensorflow/compiler/mlir/tensorflow:serialize_mlir_module_utils",
+        "//tensorflow/compiler/mlir/tf2xla:compile_mlir_util",
         "//tensorflow/compiler/mlir/tf2xla/api/v2:legalize_tf",
         "//tensorflow/compiler/tf2xla:layout_util",
         "//tensorflow/compiler/tf2xla:xla_compiler",
@@ -162,6 +182,7 @@ cc_library(
         "@xla//xla/service:computation_placer_hdr",
         "@xla//xla/service:hlo_proto_cc",
         "@xla//xla/stream_executor:platform_manager",
+        "@xla//xla/tsl/platform:errors",
     ],
 )
 
@@ -214,6 +235,9 @@ tf_cc_test(
         "@llvm-project//mlir:Parser",
         "@llvm-project//mlir:RegisterAllDialects",  # buildcleaner: keep
         "@tsl//tsl/platform:protobuf",
+        "@xla//xla:debug_options_flags",
+        "@xla//xla:shape_util",
+        "@xla//xla/backends/cpu:target_machine_options",
         "@xla//xla/pjrt:pjrt_compiler",
         "@xla//xla/pjrt/plugin/xla_cpu:cpu_topology_description",
         "@xla//xla/python/ifrt",
@@ -275,6 +299,7 @@ tf_cc_test(
         "//tensorflow/core/tfrt/ifrt:ifrt_executable_registry",
         "//tensorflow/core/tfrt/ifrt:ifrt_model_context",
         "//tensorflow/core/tfrt/ifrt:ifrt_serving_core_selector",
+        "//tensorflow/core/tfrt/ifrt:sharding_utils",
         "//tensorflow/core/tfrt/runtime",
         "//tensorflow/core/tfrt/saved_model:saved_model_testutil",
         "@com_google_absl//absl/status",
@@ -286,7 +311,7 @@ tf_cc_test(
         "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Parser",
-        "@llvm-project//mlir:RegisterAllDialects",
+        "@llvm-project//mlir:RegisterAllDialects",  # buildcleaner: keep
         "@tf_runtime//:hostcontext",
         "@xla//xla/python/ifrt",
         "@xla//xla/python/ifrt:test_util",
@@ -305,5 +330,24 @@ tf_proto_library(
         "@xla//xla/service:hlo_proto",
         "//tensorflow/core:protos_all",
         "//tensorflow/core/protobuf/tpu:compile_metadata_proto",
+    ],
+    deps = [
+        "@xla//xla:xla_data_proto",
+        "@xla//xla/python/ifrt:layout_proto",
+    ],
+)
+
+cc_library(
+    name = "pack_inputs_pass",
+    srcs = ["pack_inputs_pass.cc"],
+    hdrs = ["pack_inputs_pass.h"],
+    deps = [
+        "@com_google_absl//absl/strings",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:Support",
+        "@stablehlo//:stablehlo_ops",
     ],
 )

@@ -1,6 +1,21 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load("@rules_python//python:proto.bzl", "py_proto_library")
 load("//tensorflow:pytype.default.bzl", "pytype_strict_library")
-load("//tensorflow:strict.default.bzl", "py_strict_test")
+load("//tensorflow:tensorflow.bzl", "py_test")
 load(
     "//tensorflow/core/platform:build_config.bzl",
     "tf_proto_library",
@@ -22,9 +37,10 @@ pytype_strict_library(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "type_dispatch_test",
     srcs = ["type_dispatch_test.py"],
+    strict_deps = True,
     deps = [
         ":function_type",
         ":type_dispatch",
@@ -47,10 +63,11 @@ pytype_strict_library(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "function_cache_test",
     size = "medium",
     srcs = ["function_cache_test.py"],
+    strict_deps = True,
     # TODO(b/213375459): For continuous benchmark monitoring
     visibility = ["//learning/brain/contrib/eager/python/examples:__pkg__"],
     deps = [
@@ -99,9 +116,10 @@ tf_proto_library(
 # )
 # copybara:uncomment_end
 
-py_strict_test(
+py_test(
     name = "function_type_test",
     srcs = ["function_type_test.py"],
+    strict_deps = True,
     deps = [
         ":function_type",
         #internal proto upb dep

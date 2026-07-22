@@ -113,6 +113,7 @@ TfLiteStatus SelectPrepare(TfLiteContext* context, TfLiteNode* node) {
         TF_LITE_ENSURE_OK(context, CalculateShapeForBroadcast(
                                        context, input_condition, input_x,
                                        input_y, &output_size));
+        TF_LITE_ENSURE(context, output_size->size <= 8);
         data->requires_broadcast = true;
         break;
       }
@@ -151,27 +152,17 @@ TfLiteStatus SelectEval(TfLiteContext* context, TfLiteNode* node) {
   // Select is basically just a conditional copy, so we don't care what the type
   // of the values as long as the type is the correct size.
 #define TF_LITE_SWITCH(type, op)                                             \
-  switch (type) {                                                            \
-    case kTfLiteBool:                                                        \
-      TF_LITE_SELECT(bool, op);                                              \
-      break;                                                                 \
-    case kTfLiteUInt32:                                                      \
-    case kTfLiteInt32:                                                       \
-    case kTfLiteFloat32:                                                     \
-      TF_LITE_SELECT(uint32_t, op);                                          \
-      break;                                                                 \
-    case kTfLiteUInt16:                                                      \
-    case kTfLiteInt16:                                                       \
-    case kTfLiteFloat16:                                                     \
-    case kTfLiteBFloat16:                                                    \
-      TF_LITE_SELECT(uint16_t, op);                                          \
-      break;                                                                 \
-    case kTfLiteUInt8:                                                       \
-    case kTfLiteInt8:                                                        \
+  switch (TfLiteTypeGetSizeBits(type)) {                                     \
+    case 8:                                                                  \
       TF_LITE_SELECT(uint8_t, op);                                           \
       break;                                                                 \
-    case kTfLiteUInt64:                                                      \
-    case kTfLiteInt64:                                                       \
+    case 16:                                                                 \
+      TF_LITE_SELECT(uint16_t, op);                                          \
+      break;                                                                 \
+    case 32:                                                                 \
+      TF_LITE_SELECT(uint32_t, op);                                          \
+      break;                                                                 \
+    case 64:                                                                 \
       TF_LITE_SELECT(uint64_t, op);                                          \
       break;                                                                 \
     default:                                                                 \

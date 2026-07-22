@@ -1,3 +1,18 @@
+# Copyright 2026 The OpenXLA Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 
 # Device runtime profiling.
@@ -21,7 +36,6 @@ exports_files(
     [
         "device_time_measurement.h",
         "no_op_device_time_measurement.h",
-        "profiling_context.h",
     ],
     visibility = internal_visibility([
         "//learning/brain/google/runtime:__subpackages__",
@@ -49,19 +63,6 @@ cc_library(
 )
 
 cc_library(
-    name = "profiling_context_no_op",
-    srcs = [
-        "profiling_context.h",
-        "profiling_context_no_op.cc",
-        "profiling_context_no_op.h",
-    ],
-    # copybara:uncomment_begin(google-only)
-    # compatible_with = ["//buildenv/target:non_prod"],
-    # copybara:uncomment_end
-    deps = ["@llvm-project//llvm:Support"],
-)
-
-cc_library(
     name = "device_time_measurement",
     # copybara:uncomment_begin(google-only)
     # compatible_with = ["//buildenv/target:non_prod"],
@@ -78,22 +79,5 @@ cc_library(
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/time",
         "//xla/pjrt:pjrt_compiler",
-    ],
-)
-
-cc_library(
-    name = "profiling_context",
-    # copybara:uncomment_begin(google-only)
-    # compatible_with = ["//buildenv/target:non_prod"],
-    # copybara:uncomment_end
-    textual_hdrs = ["profiling_context.h"],
-    deps = [
-        # copybara:comment_begin(oss-only)
-        ":profiling_context_no_op",
-        # copybara:comment_end
-        # copybara:uncomment_begin(google-only)
-        # "//learning/brain/google/runtime:profiling_context",  # buildcleaner: keep
-        # copybara:uncomment_end
-        "@llvm-project//llvm:Support",
     ],
 )

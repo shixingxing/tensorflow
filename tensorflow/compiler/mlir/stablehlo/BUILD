@@ -1,9 +1,24 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@xla//third_party/rules_python/python:py_test.bzl", "py_test")
 load("@xla//xla/tsl:tsl.default.bzl", "tsl_pybind_extension")
 load("@xla//xla/tsl/platform:build_config_root.bzl", "if_static")
 load("//tensorflow:pytype.default.bzl", "pytype_strict_library")
-load("//tensorflow:strict.default.bzl", "py_strict_test")
 load("//tensorflow:tensorflow.bzl", "tf_cc_test")
 load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable")
 
@@ -19,7 +34,6 @@ package(
 package_group(
     name = "friends",
     packages = [
-        "//platforms/darwinn/tools/visualization/graph_conversions/...",
         "//tensorflow/compiler/mlir/lite/...",
         "//tensorflow/compiler/mlir/quantization/...",
         "//tensorflow/compiler/mlir/quantization/tensorflow/...",
@@ -61,9 +75,10 @@ pytype_strict_library(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "stablehlo_test",
     srcs = ["stablehlo_test.py"],
+    strict_deps = True,
     deps = [
         ":stablehlo",
         #internal proto upb dep

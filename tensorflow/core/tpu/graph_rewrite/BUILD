@@ -1,3 +1,18 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Contains graph rewrites for TPU runtimes and optimizations.
 
 load(
@@ -67,13 +82,12 @@ cc_library(
     deps = [
         "//tensorflow/core:core_cpu_base",
         "//tensorflow/core:framework",
+        "//tensorflow/core:lib",
         "//tensorflow/core:portable_gif_internal",
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core/common_runtime:device_set",
         "//tensorflow/core/platform:errors",
         "//tensorflow/core/platform:status",
-        "//tensorflow/core/platform:str_util",
-        "//tensorflow/core/platform:strcat",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
@@ -233,11 +247,10 @@ cc_library(
         "@xla//xla:xla_proto_cc",
         "@xla//xla/hlo/builder:sharding_builder",
         "@xla//xla/service:computation_placer",
-        "@xla//xla/stream_executor/tpu:c_api_decl",
-        "@xla//xla/stream_executor/tpu:tpu_api",
-        "@xla//xla/stream_executor/tpu:tpu_ops_c_api_hdrs",
-        "@xla//xla/stream_executor/tpu:tpu_platform_interface",
-        "@xla//xla/stream_executor/tpu:tpu_topology_external",
+        "@xla//xla/tpu:c_api_decl",
+        "@xla//xla/tpu:tpu_api",
+        "@xla//xla/tpu:tpu_ops_c_api_hdrs",
+        "@xla//xla/tpu:tpu_topology_external",
         "@xla//xla/tsl/platform:logging",
     ] + if_static(
         [
@@ -362,7 +375,7 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
         "@xla//xla:status_macros",
-        "@xla//xla/stream_executor/tpu:tpu_ops_c_api_hdrs",
+        "@xla//xla/tpu:tpu_ops_c_api_hdrs",
         "@xla//xla/tsl/platform:logging",
     ],
 )
@@ -384,6 +397,7 @@ cc_library(
         "//tensorflow/core/protobuf/tpu:tpu_embedding_configuration_proto_cc",
         "//tensorflow/core/tpu:tpu_embedding_configuration_proto_rewrite",
         "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:vlog_is_on",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings:string_view",

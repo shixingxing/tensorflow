@@ -1,13 +1,28 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 #   Utilities for splitting and joining large protos > 2GB.
 
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_python//python:proto.bzl", "py_proto_library")
 load("//tensorflow:pytype.default.bzl", "pytype_strict_library")
-load("//tensorflow:strict.default.bzl", "py_strict_test")
 load(
     "//tensorflow:tensorflow.bzl",
     "if_oss",
+    "py_test",
     "tf_cc_test",
 )
 load(
@@ -84,9 +99,10 @@ pytype_strict_library(
     srcs = ["version.py"],
 )
 
-py_strict_test(
+py_test(
     name = "split_test",
     srcs = ["split_test.py"],
+    strict_deps = True,
     tags = [
         "no_mac",  # b/291933687
         "no_windows",  # b/291001524
@@ -121,9 +137,10 @@ pytype_strict_library(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "split_graph_def_test",
     srcs = ["split_graph_def_test.py"],
+    strict_deps = True,
     tags = [
         "no_mac",  # b/291933687
         "no_windows",  # b/291001524
@@ -146,9 +163,10 @@ pytype_strict_library(
     deps = [":chunk_proto_py"],
 )
 
-py_strict_test(
+py_test(
     name = "util_test",
     srcs = ["util_test.py"],
+    strict_deps = True,
     deps = [
         ":util",
         #internal proto upb dep
@@ -185,11 +203,9 @@ cc_library(
     name = "merge",
     hdrs = ["merge.h"],
     visibility = [
-        "//platforms/darwinn/contrib/waymo:__subpackages__",
         "//tensorflow:internal",
         "//tensorflow/cc/experimental/tf2:__subpackages__",
         "//tensorflow/cc/saved_model/image_format:__subpackages__",
-        "//waymo/onboard/ml/chauffeur_net/utils:__subpackages__",
     ],
     deps = [
         ":chunk_proto_cc",

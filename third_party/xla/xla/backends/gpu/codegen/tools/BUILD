@@ -1,9 +1,30 @@
+# Copyright 2026 The OpenXLA Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 load(
     "@local_config_rocm//rocm:build_defs.bzl",
     "if_rocm_is_configured",
 )
+load(
+    "@local_config_sycl//sycl:build_defs.bzl",
+    "if_sycl_is_configured",
+)
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("//xla:py_strict.bzl", "py_strict_binary", "py_strict_library", "py_strict_test")
+load("@xla//third_party/rules_python/python:py_binary.bzl", "py_binary")
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
+load("@xla//third_party/rules_python/python:py_test.bzl", "py_test")
 load("//xla:xla.default.bzl", "xla_cc_binary")
 load(
     "//xla/tsl/platform/default:cuda_build_defs.bzl",
@@ -18,7 +39,7 @@ package(
 package_group(
     name = "codegen_tests",
     packages = [
-        "//xla/backends/gpu/codegen/emitters/tests",
+        "//xla/backends/gpu/codegen/...",
         "//xla/codegen/emitters/tests",
     ],
 )
@@ -28,10 +49,11 @@ cc_library(
     testonly = 1,
     srcs = ["test_lib.cc"],
     hdrs = ["test_lib.h"],
+    visibility = [":codegen_tests"],
     deps = [
         "//xla:status_macros",
         "//xla/backends/gpu/codegen:fusions",
-        "//xla/backends/gpu/codegen/emitters:emitter_base",
+        "//xla/backends/gpu/codegen/emitters:mlir_kernel_emitter",
         "//xla/hlo/ir:hlo",
         "//xla/service/gpu:gpu_device_info_for_tests",
         "//xla/service/gpu:hlo_fusion_analysis",
@@ -54,12 +76,12 @@ xla_cc_binary(
     deps = [
         ":test_lib",
         "//xla/codegen/tools:test_lib",
-        "//xla/hlo/analysis:symbolic_expr",
+        "//xla/hlo/analysis:symbolic_map",
+        "//xla/tsl/platform:status_macros",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
         "@llvm-project//llvm:Support",
         "@tsl//tsl/platform:platform_port",
-        "@tsl//tsl/platform:statusor",
     ],
 )
 
@@ -80,7 +102,7 @@ xla_cc_binary(
         "//xla/codegen/tools:test_lib",
         "//xla/hlo/analysis:indexing_analysis",
         "//xla/hlo/analysis:indexing_test_utils",
-        "//xla/hlo/analysis:symbolic_expr",
+        "//xla/hlo/analysis:symbolic_map",
         "//xla/service:gpu_plugin",
         "//xla/service/gpu:hlo_fusion_analysis",
         "//xla/tests:hlo_pjrt_interpreter_reference_mixin",
@@ -101,6 +123,8 @@ xla_cc_binary(
         "//xla/stream_executor/cuda:all_runtime",
     ]) + if_rocm_is_configured([
         "//xla/stream_executor/rocm:all_runtime",
+    ]) + if_sycl_is_configured([
+        "//xla/stream_executor/sycl:all_runtime",
     ]),
 )
 
@@ -111,6 +135,7 @@ xla_cc_binary(
     visibility = ["//visibility:private"],
     deps = [
         "//xla/codegen/tools:test_lib",
+        "//xla/tsl/platform:status_macros",
         "//xla/tsl/platform:statusor",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
@@ -119,9 +144,10 @@ xla_cc_binary(
     ],
 )
 
-py_strict_binary(
+py_binary(
     name = "ncu_rep",
     srcs = ["ncu_rep.py"],
+    strict_deps = True,
     deps = [
         ":ncu_rep_lib",
         "@absl_py//absl:app",
@@ -129,15 +155,17 @@ py_strict_binary(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "ncu_rep_lib",
     srcs = ["ncu_rep_lib.py"],
+    strict_deps = True,
     deps = ["@absl_py//absl:app"],
 )
 
-py_strict_test(
+py_test(
     name = "ncu_rep_test",
     srcs = ["ncu_rep_test.py"],
+    strict_deps = True,
     deps = [
         ":ncu_rep_lib",
         "@absl_py//absl/testing:absltest",

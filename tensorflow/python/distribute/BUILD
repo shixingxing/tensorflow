@@ -1,5 +1,21 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
 load("//tensorflow:pytype.default.bzl", "pytype_strict_library")
-load("//tensorflow:strict.default.bzl", "py_strict_library", "py_strict_test")
+load("//tensorflow:tensorflow.bzl", "py_test")
 load("//tensorflow:tensorflow.default.bzl", "cuda_py_strict_test", "tf_py_strict_test")
 load("//tensorflow/core/platform:distribute.bzl", "distribute_py_strict_test")
 load("//tensorflow/python/tpu:tpu.bzl", "tpu_py_strict_test")
@@ -12,8 +28,9 @@ package(
     licenses = ["notice"],
 )
 
-py_strict_library(
+py_library(
     name = "distribute_test_lib_pip",
+    strict_deps = True,
     deps = [
         ":combinations",
         ":multi_worker_test_base",
@@ -26,9 +43,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "cross_device_ops",
     srcs = ["cross_device_ops.py"],
+    strict_deps = True,
     deps = [
         ":collective_util",
         ":cross_device_utils",
@@ -82,9 +100,10 @@ pytype_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "device_util",
     srcs = ["device_util.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/eager:context",
         "//tensorflow/python/framework:config",
@@ -110,9 +129,10 @@ cuda_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "distribute",
     srcs = ["__init__.py"],
+    strict_deps = True,
     deps = [
         ":cross_device_ops",
         ":distribute_lib",
@@ -130,11 +150,12 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "distribute_lib",
     srcs = [
         "distribute_lib.py",
     ],
+    strict_deps = True,
     deps = [
         ":collective_util",
         ":device_util",
@@ -175,10 +196,11 @@ py_strict_library(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "distribute_lib_test",
     size = "small",
     srcs = ["distribute_lib_test.py"],
+    strict_deps = True,
     deps = [
         ":combinations",
         ":distribute_lib",
@@ -202,19 +224,21 @@ py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "distribute_config",
     srcs = [
         "distribute_config.py",
     ],
+    strict_deps = True,
     deps = [],
 )
 
-py_strict_library(
+py_library(
     name = "distribute_coordinator",
     srcs = [
         "distribute_coordinator.py",
     ],
+    strict_deps = True,
     deps = [
         ":distribute_coordinator_context",
         ":multi_worker_util",
@@ -227,10 +251,11 @@ py_strict_library(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "distribute_coordinator_test",
     size = "medium",
     srcs = ["distribute_coordinator_test.py"],
+    strict_deps = True,
     tags = [
         "notsan",  # TODO(b/220133218)
     ],
@@ -254,17 +279,19 @@ py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "distribute_coordinator_context",
     srcs = [
         "distribute_coordinator_context.py",
     ],
+    strict_deps = True,
     deps = [],
 )
 
-py_strict_library(
+py_library(
     name = "mirrored_run",
     srcs = ["mirrored_run.py"],
+    strict_deps = True,
     deps = [
         ":distribute_lib",
         ":distribute_utils",
@@ -284,9 +311,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "distribute_utils",
     srcs = ["distribute_utils.py"],
+    strict_deps = True,
     deps = [
         ":distribute_lib",
         ":reduce_util",
@@ -307,9 +335,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "tpu_util",
     srcs = ["tpu_util.py"],
+    strict_deps = True,
     deps = [
         ":packed_distributed_variable",
         "//tensorflow/python/eager:context",
@@ -321,9 +350,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "mirrored_strategy",
     srcs = ["mirrored_strategy.py"],
+    strict_deps = True,
     deps = [
         ":collective_util",
         ":cross_device_ops",
@@ -359,9 +389,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "parameter_server_strategy",
     srcs = ["parameter_server_strategy.py"],
+    strict_deps = True,
     visibility = ["//tensorflow:internal"],
     deps = [
         ":cross_device_ops",
@@ -391,9 +422,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "central_storage_strategy",
     srcs = ["central_storage_strategy.py"],
+    strict_deps = True,
     visibility = ["//tensorflow:internal"],
     deps = [
         ":device_util",
@@ -403,9 +435,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "one_device_strategy",
     srcs = ["one_device_strategy.py"],
+    strict_deps = True,
     visibility = ["//tensorflow:internal"],
     deps = [
         ":device_util",
@@ -425,9 +458,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "collective_all_reduce_strategy",
     srcs = ["collective_all_reduce_strategy.py"],
+    strict_deps = True,
     visibility = ["//tensorflow:internal"],
     deps = [
         ":collective_util",
@@ -462,11 +496,12 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "multi_worker_util",
     srcs = [
         "multi_worker_util.py",
     ],
+    strict_deps = True,
     deps = [
         ":distribute_coordinator_context",
         "//tensorflow/core:protos_all_py",
@@ -504,9 +539,10 @@ cuda_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "numpy_dataset",
     srcs = ["numpy_dataset.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/data/ops:dataset_ops",
         "//tensorflow/python/eager:context",
@@ -520,10 +556,11 @@ py_strict_library(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "numpy_dataset_test",
     size = "small",
     srcs = ["numpy_dataset_test.py"],
+    strict_deps = True,
     deps = [
         ":numpy_dataset",
         "//tensorflow/python/eager:test",
@@ -533,9 +570,10 @@ py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "input_lib",
     srcs = ["input_lib.py"],
+    strict_deps = True,
     deps = [
         ":device_util",
         ":distribute_lib",
@@ -575,9 +613,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "input_ops",
     srcs = ["input_ops.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/data/experimental/ops:distribute",
         "//tensorflow/python/data/ops:dataset_ops",
@@ -609,9 +648,10 @@ cuda_py_strict_test(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "multi_worker_util_test",
     srcs = ["multi_worker_util_test.py"],
+    strict_deps = True,
     deps = [
         ":multi_worker_util",
         "//tensorflow/core:protos_all_py",
@@ -644,9 +684,10 @@ cuda_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "tpu_strategy",
     srcs = ["tpu_strategy.py"],
+    strict_deps = True,
     visibility = ["//tensorflow:internal"],
     deps = [
         ":cross_device_ops",
@@ -821,18 +862,20 @@ tpu_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "reduce_util",
     srcs = ["reduce_util.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/ops:variable_scope",
         "//tensorflow/python/util:tf_export",
     ],
 )
 
-py_strict_library(
+py_library(
     name = "collective_util",
     srcs = ["collective_util.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/util:deprecation",
         "//tensorflow/python/util:tf_export",
@@ -848,14 +891,16 @@ tf_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "shared_variable_creator",
     srcs = ["shared_variable_creator.py"],
+    strict_deps = True,
 )
 
-py_strict_test(
+py_test(
     name = "shared_variable_creator_test",
     srcs = ["shared_variable_creator_test.py"],
+    strict_deps = True,
     deps = [
         ":shared_variable_creator",
         "//tensorflow/python/eager:test",
@@ -865,9 +910,10 @@ py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "summary_op_util",
     srcs = ["summary_op_util.py"],
+    strict_deps = True,
     deps = [
         ":distribute_lib",
         "//tensorflow/python/framework:tensor",
@@ -875,9 +921,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "packed_distributed_variable",
     srcs = ["packed_distributed_variable.py"],
+    strict_deps = True,
     deps = [
         ":device_util",
         "//tensorflow/python/eager:context",
@@ -888,9 +935,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "values",
     srcs = ["values.py"],
+    strict_deps = True,
     deps = [
         ":device_util",
         ":distribute_lib",
@@ -924,9 +972,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "values_v2",
     srcs = ["values_v2.py"],
+    strict_deps = True,
     deps = [
         ":device_util",
         ":tpu_util",
@@ -964,9 +1013,10 @@ distribute_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "ps_values",
     srcs = ["ps_values.py"],
+    strict_deps = True,
     deps = [
         ":distribute_lib",
         ":distribute_utils",
@@ -990,9 +1040,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "values_util",
     srcs = ["values_util.py"],
+    strict_deps = True,
     deps = [
         ":distribute_lib",
         ":reduce_util",
@@ -1008,13 +1059,11 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "tpu_values",
     srcs = ["tpu_values.py"],
-    visibility = [
-        "//smartass/brain/ops:__subpackages__",
-        "//tensorflow:internal",
-    ],
+    strict_deps = True,
+    visibility = ["//tensorflow:internal"],
     deps = [
         ":packed_distributed_variable",
         ":tpu_replicated_variable",
@@ -1030,9 +1079,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "tpu_replicated_variable",
     srcs = ["tpu_replicated_variable.py"],
+    strict_deps = True,
     deps = [
         ":tpu_util",
         "//tensorflow/python/compiler/xla/experimental:xla_sharding",
@@ -1066,9 +1116,10 @@ tpu_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "combinations",
     srcs = ["combinations.py"],
+    strict_deps = True,
     visibility = [
         "//tensorflow:internal",
         "//tensorflow_models:__subpackages__",
@@ -1111,9 +1162,10 @@ distribute_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "strategy_combinations",
     srcs = ["strategy_combinations.py"],
+    strict_deps = True,
     visibility = [
         "//tensorflow:internal",
         "//tensorflow_models:__subpackages__",
@@ -1175,13 +1227,11 @@ distribute_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "multi_worker_test_base",
     srcs = ["multi_worker_test_base.py"],
-    visibility = [
-        "//smartass/brain/ops:__subpackages__",
-        "//tensorflow:internal",
-    ],
+    strict_deps = True,
+    visibility = ["//tensorflow:internal"],
     deps = [
         ":distribute_coordinator",
         ":multi_process_runner",
@@ -1211,7 +1261,7 @@ tf_py_strict_test(
     srcs = ["multi_worker_test_base_test.py"],
     exec_properties = select({
         # copybara:uncomment_begin(google-only)
-        # "//tools/cpp:asan_build": {"mem": "16g"},
+        # "@bazel_tools//tools/cpp:asan_build": {"mem": "16g"},
         # copybara:uncomment_end
         "//conditions:default": None,
     }),
@@ -1431,9 +1481,10 @@ cuda_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "sharded_variable",
     srcs = ["sharded_variable.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/framework:composite_tensor",
         "//tensorflow/python/framework:constant_op",
@@ -1449,7 +1500,6 @@ py_strict_library(
         "//tensorflow/python/ops:embedding_ops",
         "//tensorflow/python/ops:math_ops",
         "//tensorflow/python/ops:partitioned_variables",
-        "//tensorflow/python/ops:resource_variable_ops",
         "//tensorflow/python/ops:variables",
         "//tensorflow/python/saved_model:save_context",
         "//tensorflow/python/trackable:base",
@@ -1508,9 +1558,10 @@ tf_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "strategy_test_lib",
     srcs = ["strategy_test_lib.py"],
+    strict_deps = True,
     deps = [
         ":collective_all_reduce_strategy",
         ":distribute_lib",
@@ -1880,9 +1931,10 @@ distribute_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "single_loss_example",
     srcs = ["single_loss_example.py"],
+    strict_deps = True,
     deps = [
         ":step_fn",
         ":strategy_test_lib",
@@ -1895,9 +1947,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "step_fn",
     srcs = ["step_fn.py"],
+    strict_deps = True,
     visibility = ["//tensorflow:internal"],
     deps = [
         "//tensorflow/python/eager:backprop",
@@ -2225,16 +2278,14 @@ cuda_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "multi_process_runner",
     srcs = ["multi_process_runner.py"],
+    strict_deps = True,
     tags = [
         "no_oss",  # b/241013307 disable flaky under docker
     ],
-    visibility = [
-        "//smartass/brain/ops:__subpackages__",
-        "//tensorflow:internal",
-    ],
+    visibility = ["//tensorflow:internal"],
     deps = [
         ":multi_process_lib",
         ":multi_worker_util",
@@ -2250,9 +2301,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "multi_process_lib",
     srcs = ["multi_process_lib.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/eager:test",
         "@absl_py//absl:app",
@@ -2260,9 +2312,10 @@ py_strict_library(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "packed_distributed_variable_test",
     srcs = ["packed_distributed_variable_test.py"],
+    strict_deps = True,
     tags = [
         "nomac",  #TODO(b/145922293): It would cause a Python segfault on macos
     ],
@@ -2304,9 +2357,10 @@ cuda_py_strict_test(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "multi_process_runner_no_init_test",
     srcs = ["multi_process_runner_no_init_test.py"],
+    strict_deps = True,
     deps = [
         ":multi_process_runner",
         ":multi_worker_test_base",
@@ -2414,9 +2468,10 @@ distribute_py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "test_util",
     srcs = ["test_util.py"],
+    strict_deps = True,
     deps = [
         ":collective_all_reduce_strategy",
         ":multi_process_runner",
@@ -2460,10 +2515,7 @@ distribute_py_strict_test(
 pytype_strict_library(
     name = "parameter_server_strategy_v2",
     srcs = ["parameter_server_strategy_v2.py"],
-    visibility = [
-        "//smartass/brain/ops:__subpackages__",
-        "//tensorflow:internal",
-    ],
+    visibility = ["//tensorflow:internal"],
     deps = [
         ":cross_device_ops",
         ":device_util",
@@ -2640,11 +2692,12 @@ pytype_strict_library(
     deps = ["//tensorflow/python/util:tf_export"],
 )
 
-py_strict_library(
+py_library(
     name = "merge_call_interim",
     srcs = [
         "merge_call_interim.py",
     ],
+    strict_deps = True,
     deps = [
         ":distribute_lib",
         "//tensorflow/python/util:tf_export",

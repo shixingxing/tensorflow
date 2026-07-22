@@ -1,6 +1,21 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # python/layers package
 
-load("//tensorflow:strict.default.bzl", "py_strict_library")
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
 
 visibility = [
     "//tensorflow:__subpackages__",
@@ -12,27 +27,28 @@ package(
     licenses = ["notice"],
 )
 
-py_strict_library(
+py_library(
     name = "layers_base",
     srcs = [
         "__init__.py",
         "base.py",
     ],
+    strict_deps = True,
     visibility = visibility + [
         "//tensorflow:internal",
         "//tensorflow_models:__subpackages__",
-        "//third_party/mlperf:__subpackages__",
     ],
     deps = [
         "//tensorflow/python/keras/legacy_tf_layers:layers_base",
     ],
 )
 
-py_strict_library(
+py_library(
     name = "layers_util",
     srcs = [
         "utils.py",
     ],
+    strict_deps = True,
     visibility = ["//tensorflow:internal"],
     deps = [
         "//tensorflow/python/framework:smart_cond",
@@ -41,7 +57,7 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "layers",
     srcs = [
         "convolutional.py",
@@ -50,6 +66,7 @@ py_strict_library(
         "normalization.py",
         "pooling.py",
     ],
+    strict_deps = True,
     # copybara:uncomment_begin(google-only)
     # visibility = [
     # "//third_party/cloud_tpu/convergence_tools:__subpackages__",

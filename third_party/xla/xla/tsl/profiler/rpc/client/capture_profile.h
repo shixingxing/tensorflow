@@ -1,4 +1,4 @@
-/* Copyright 2017 The TensorFlow Authors All Rights Reserved.
+/* Copyright 2017 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,9 +19,11 @@ limitations under the License.
 
 #include <string>
 #include <variant>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
-#include "xla/tsl/platform/status.h"
+#include "absl/status/status.h"
+#include "absl/strings/string_view.h"
 #include "tsl/profiler/protobuf/profiler_options.pb.h"
 #include "tsl/profiler/protobuf/profiler_service.pb.h"
 #include "tsl/profiler/protobuf/xplane.pb.h"
@@ -40,6 +42,21 @@ absl::Status ExportToTensorBoard(const tensorflow::profiler::XSpace& xspace,
                                  const std::string& run,
                                  bool also_export_trace_json = false);
 
+// Exports multiple XSpace chunks sequentially into a single Riegeli file
+// at <logdir>/plugins/profile/<run>/<host>.xplane.riegeli.
+// As each XSpace chunk is written, it is cleared from `xspaces` to conserve
+// memory.
+absl::Status ExportToTensorBoard(
+    absl::string_view logdir, absl::string_view run,
+    std::vector<tensorflow::profiler::XSpace>& xspaces);
+
+// Exports multiple XSpace chunks to a run directory named after the current
+// timestamp. As each XSpace chunk is written, it is cleared from `xspaces` to
+// conserve memory.
+absl::Status ExportToTensorBoard(
+    absl::string_view logdir,
+    std::vector<tensorflow::profiler::XSpace>& xspaces);
+
 // Collects one sample of monitoring profile and shows user-friendly metrics.
 // If timestamp flag is true, timestamp will be displayed in "%H:%M:%S" format.
 absl::Status Monitor(const std::string& service_addr, int duration_ms,
@@ -49,6 +66,8 @@ absl::Status Monitor(const std::string& service_addr, int duration_ms,
 absl::Status StartContinuousProfiling(
     const char* service_addr,
     const tensorflow::RemoteProfilerSessionManagerOptions& opts);
+
+absl::Status StopContinuousProfiling(const char* service_addr);
 
 absl::Status GetSnapshot(const char* service_addr, const char* logdir);
 

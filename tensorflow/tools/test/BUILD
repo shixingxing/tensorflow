@@ -1,7 +1,23 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 # Tools for testing
 
-load("//tensorflow:strict.default.bzl", "py_strict_binary", "py_strict_library")
+load("@xla//third_party/rules_python/python:py_binary.bzl", "py_binary")
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
 load(
     "//tensorflow/tools/test:performance.bzl",
     "tf_cc_logged_benchmark",
@@ -19,9 +35,10 @@ exports_files([
     "run_and_gather_logs.py",
 ])
 
-py_strict_library(
+py_library(
     name = "system_info_lib",
     srcs = ["system_info_lib.py"],
+    strict_deps = True,
     deps = [
         ":gpu_info_lib",
         "//tensorflow:tensorflow_py",
@@ -33,9 +50,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "gpu_info_lib",
     srcs = ["gpu_info_lib.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow:tensorflow_py",
         "//tensorflow/core:protos_all_py",
@@ -45,20 +63,22 @@ py_strict_library(
     ],
 )
 
-py_strict_binary(
+py_binary(
     name = "system_info",
     srcs = ["system_info.py"],
+    strict_deps = True,
     deps = [
         ":system_info_lib",
         "@absl_py//absl:app",
     ],
 )
 
-py_strict_library(
+py_library(
     name = "run_and_gather_logs_lib",
     srcs = [
         "run_and_gather_logs_lib.py",
     ],
+    strict_deps = True,
     deps = [
         ":gpu_info_lib",
         ":system_info_lib",
@@ -69,9 +89,10 @@ py_strict_library(
     ],
 )
 
-py_strict_binary(
+py_binary(
     name = "run_and_gather_logs",
     srcs = ["run_and_gather_logs.py"],
+    strict_deps = True,
     visibility = ["//visibility:public"],
     deps = [
         ":run_and_gather_logs_main_lib",
@@ -79,9 +100,10 @@ py_strict_binary(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "run_and_gather_logs_main_lib",
     srcs = ["run_and_gather_logs.py"],
+    strict_deps = True,
     visibility = ["//visibility:public"],
     deps = [
         ":run_and_gather_logs_lib",

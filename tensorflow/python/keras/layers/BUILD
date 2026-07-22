@@ -1,7 +1,22 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 #   Contains the Keras layers (internal TensorFlow version).
 
-load("//tensorflow:py.default.bzl", "py_library")
+load("@xla//third_party/rules_python/python:defs.bzl", "py_library")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
@@ -33,6 +48,7 @@ py_library(
         "serialization.py",
     ],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         ":advanced_activations",
         ":convolutional",
@@ -53,6 +69,7 @@ py_library(
     name = "advanced_activations",
     srcs = ["advanced_activations.py"],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         "//tensorflow/python/keras:backend",
         "//tensorflow/python/keras:base_layer",
@@ -70,6 +87,7 @@ py_library(
     name = "convolutional",
     srcs = ["convolutional.py"],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         ":pooling",
         "//tensorflow/python/eager:context",
@@ -94,6 +112,7 @@ py_library(
     name = "convolutional_recurrent",
     srcs = ["convolutional_recurrent.py"],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         ":recurrent",
         "//tensorflow/python/keras:activations",
@@ -116,6 +135,7 @@ py_library(
     name = "core",
     srcs = ["core.py"],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         "//tensorflow/python/eager:backprop",
         "//tensorflow/python/eager:context",
@@ -156,6 +176,7 @@ py_library(
     name = "dense_attention",
     srcs = ["dense_attention.py"],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         "//tensorflow/python/framework:dtypes",
         "//tensorflow/python/framework:ops",
@@ -176,6 +197,7 @@ py_library(
     name = "embeddings",
     srcs = ["embeddings.py"],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         "//tensorflow/python/eager:context",
         "//tensorflow/python/framework:ops",
@@ -195,6 +217,7 @@ py_library(
     name = "merge",
     srcs = ["merge.py"],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         "//tensorflow/python/keras:backend",
         "//tensorflow/python/keras:base_layer",
@@ -210,6 +233,7 @@ py_library(
     name = "pooling",
     srcs = ["pooling.py"],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         "//tensorflow/python/framework:tensor_shape",
         "//tensorflow/python/keras:backend",
@@ -227,6 +251,7 @@ py_library(
     name = "recurrent",
     srcs = ["recurrent.py"],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         "//tensorflow/python/distribute:distribute_lib",
         "//tensorflow/python/eager:context",
@@ -259,6 +284,7 @@ py_library(
     name = "rnn_cell_wrapper_v2",
     srcs = ["rnn_cell_wrapper_v2.py"],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         ":recurrent",
         "//tensorflow/python/keras/layers/legacy_rnn:rnn_cell_wrapper_impl",

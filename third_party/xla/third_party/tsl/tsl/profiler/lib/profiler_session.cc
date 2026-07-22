@@ -15,21 +15,28 @@ limitations under the License.
 
 #include "tsl/profiler/lib/profiler_session.h"
 
+#include <cstdint>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "absl/memory/memory.h"
 #include "absl/status/status.h"
 #include "absl/synchronization/mutex.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/logging.h"
+#include "xla/tsl/profiler/utils/xplane_builder.h"
+#include "xla/tsl/profiler/utils/xplane_schema.h"
+#include "xla/tsl/profiler/utils/xplane_utils.h"
 #include "tsl/profiler/protobuf/profiler_options.pb.h"
 #include "tsl/profiler/protobuf/xplane.pb.h"
 
 #if !defined(IS_MOBILE_PLATFORM)
+#include "xla/tsl/platform/env.h"
 #include "xla/tsl/profiler/convert/post_process_single_host_xplane.h"
 #include "xla/tsl/profiler/utils/time_utils.h"
 #include "tsl/platform/host_info.h"
+#include "tsl/profiler/lib/continuous_profiler_orchestrator.h"
 #include "tsl/profiler/lib/profiler_collection.h"
 #include "tsl/profiler/lib/profiler_factory.h"
 #include "tsl/profiler/lib/profiler_interface.h"
@@ -41,12 +48,22 @@ namespace {
 
 using tensorflow::ProfileOptions;
 using tensorflow::profiler::XSpace;
+using ::tsl::profiler::XPlaneBuilder;
 
 ProfileOptions GetOptions(const ProfileOptions& opts) {
   if (opts.version()) return opts;
   ProfileOptions options = ProfilerSession::DefaultOptions();
   options.set_include_dataset_ops(opts.include_dataset_ops());
   return options;
+}
+
+void SetProfileOptionsIntoSpace(const ProfileOptions& options, XSpace* space) {
+  XPlaneBuilder xplane(profiler::FindOrAddMutablePlaneWithName(
+      space, tsl::profiler::kTaskEnvPlaneName));
+  xplane.AddStatValue(
+      *xplane.GetOrCreateStatMetadata(tsl::profiler::GetTaskEnvStatTypeStr(
+          tsl::profiler::kEnvProfileOptions)),
+      options);
 }
 
 };  // namespace
@@ -59,6 +76,55 @@ ProfileOptions GetOptions(const ProfileOptions& opts) {
 absl::Status ProfilerSession::Status() {
   absl::MutexLock l(mutex_);
   return status_;
+}
+
+bool ProfilerSession::IsContinuousProfilingEnabled() const {
+#if defined(IS_MOBILE_PLATFORM)
+  return false;
+#else
+  const auto& advanced_config = options_.advanced_configuration();
+  auto it = advanced_config.find("enable_continuous_profiling");
+  return (it != advanced_config.end()) && it->second.bool_value();
+#endif
+}
+
+absl::Status ProfilerSession::Stop() {
+#if !defined(IS_MOBILE_PLATFORM)
+  absl::MutexLock l(mutex_);
+  if (profilers_ != nullptr) {
+    auto status = profilers_->Stop();
+    stop_time_ns_ = profiler::GetCurrentTimeNanos();
+    return status;
+  }
+#endif
+  return absl::OkStatus();
+}
+
+std::vector<tensorflow::profiler::XSpace> ProfilerSession::SerializeChunks() {
+  std::vector<tensorflow::profiler::XSpace> spaces;
+#if !defined(IS_MOBILE_PLATFORM)
+  absl::MutexLock l(mutex_);
+  if (profilers_ == nullptr) {
+    profiler_lock_.ReleaseIfActive();
+    return spaces;
+  }
+
+  auto* orchestrator = dynamic_cast<
+      profiler::ContinuousProfilerOrchestrator<profiler::ProfilerInterface>*>(
+      profilers_.get());
+  if (orchestrator != nullptr) {
+    spaces = orchestrator->SerializeChunks();
+  }
+  for (auto& space : spaces) {
+    profiler::SetXSpacePidIfNotSet(space, tsl::Env::Default()->GetProcessId());
+    profiler::PostProcessSingleHostXSpace(&space, start_time_ns_,
+                                          stop_time_ns_);
+    SetProfileOptionsIntoSpace(options_, &space);
+  }
+  profilers_.reset();
+  profiler_lock_.ReleaseIfActive();
+#endif
+  return spaces;
 }
 
 #if !defined(IS_MOBILE_PLATFORM)
@@ -82,8 +148,10 @@ absl::Status ProfilerSession::CollectData(XSpace* space) {
 #if !defined(IS_MOBILE_PLATFORM)
   space->add_hostnames(port::Hostname());
   TF_RETURN_IF_ERROR(CollectDataInternal(space));
+  profiler::SetXSpacePidIfNotSet(*space, tsl::Env::Default()->GetProcessId());
   profiler::PostProcessSingleHostXSpace(space, start_time_ns_, stop_time_ns_);
 #endif
+  SetProfileOptionsIntoSpace(options_, space);
   return absl::OkStatus();
 }
 
@@ -119,8 +187,21 @@ ProfilerSession::ProfilerSession(const ProfileOptions& options)
   start_time_ns_ = profiler::GetCurrentTimeNanos();
 
   DCHECK(profiler_lock_.Active());
-  profilers_ = std::make_unique<tsl::profiler::ProfilerCollection>(
-      profiler::CreateProfilers(options_));
+  std::unique_ptr<tsl::profiler::ProfilerInterface> collection =
+      std::make_unique<tsl::profiler::ProfilerCollection>(
+          profiler::CreateProfilers(options_));
+
+  const auto& advanced_config = options_.advanced_configuration();
+  auto it = advanced_config.find("enable_continuous_profiling");
+  bool enable_continuous_profiling =
+      (it != advanced_config.end()) && it->second.bool_value();
+
+  if (enable_continuous_profiling) {
+    profilers_ = std::make_unique<tsl::profiler::ContinuousProfilerOrchestrator<
+        tsl::profiler::ProfilerInterface> >(std::move(collection));
+  } else {
+    profilers_ = std::move(collection);
+  }
 
   absl::Status status = profilers_->Start();
   if (options_.raise_error_on_start_failure()) {

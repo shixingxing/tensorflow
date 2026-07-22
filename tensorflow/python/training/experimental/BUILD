@@ -1,4 +1,20 @@
-load("//tensorflow:strict.default.bzl", "py_strict_library", "py_strict_test")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
+load("//tensorflow:tensorflow.bzl", "py_test")
 load("//tensorflow:tensorflow.default.bzl", "cuda_py_strict_test")
 
 package(
@@ -7,9 +23,10 @@ package(
     licenses = ["notice"],
 )
 
-py_strict_library(
+py_library(
     name = "loss_scale",
     srcs = ["loss_scale.py"],
+    strict_deps = True,
     deps = [
         "//tensorflow/python/distribute:distribute_lib",
         "//tensorflow/python/distribute:reduce_util",
@@ -29,9 +46,10 @@ py_strict_library(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "loss_scale_optimizer",
     srcs = ["loss_scale_optimizer.py"],
+    strict_deps = True,
     deps = [
         ":loss_scale",
         "//tensorflow/python/distribute:distribute_lib",
@@ -45,10 +63,11 @@ py_strict_library(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "loss_scale_optimizer_test",
     size = "small",
     srcs = ["loss_scale_optimizer_test.py"],
+    strict_deps = True,
     deps = [
         ":loss_scale",
         ":loss_scale_optimizer",
@@ -71,10 +90,11 @@ py_strict_test(
     ],
 )
 
-py_strict_test(
+py_test(
     name = "loss_scale_test",
     size = "medium",
     srcs = ["loss_scale_test.py"],
+    strict_deps = True,
     deps = [
         ":loss_scale",
         "//tensorflow/python/data/ops:dataset_ops",
@@ -96,15 +116,17 @@ py_strict_test(
     ],
 )
 
-py_strict_library(
+py_library(
     name = "mixed_precision_global_state",
     srcs = ["mixed_precision_global_state.py"],
+    strict_deps = True,
     deps = ["//tensorflow/python/util:tf_export"],
 )
 
-py_strict_library(
+py_library(
     name = "mixed_precision",
     srcs = ["mixed_precision.py"],
+    strict_deps = True,
     deps = [
         ":loss_scale_optimizer",
         ":mixed_precision_global_state",

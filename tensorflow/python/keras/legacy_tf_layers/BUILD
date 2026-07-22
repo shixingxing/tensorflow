@@ -1,7 +1,22 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 #   Contains the legacy TF layers (internal TensorFlow version).
 
-load("//tensorflow:py.default.bzl", "py_library")
+load("@xla//third_party/rules_python/python:defs.bzl", "py_library")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
@@ -26,6 +41,7 @@ py_library(
         "variable_scope_shim.py",
     ],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         "//tensorflow/python/eager:context",
         "//tensorflow/python/framework:dtypes",
@@ -46,6 +62,7 @@ py_library(
     name = "convolutional",
     srcs = ["convolutional.py"],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         ":layers_base",
         "//tensorflow/python/keras/layers",
@@ -58,6 +75,7 @@ py_library(
     name = "core",
     srcs = ["core.py"],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         ":layers_base",
         "//tensorflow/python/keras/layers",
@@ -70,6 +88,7 @@ py_library(
     name = "pooling",
     srcs = ["pooling.py"],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         ":layers_base",
         "//tensorflow/python/keras/layers",

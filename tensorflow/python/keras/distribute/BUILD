@@ -1,8 +1,23 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 #   keras/distribute package is intended to serve as the centralized place for things
 #   related to dist-strat used by Keras..
 
-load("//tensorflow:py.default.bzl", "py_library")
+load("@xla//third_party/rules_python/python:defs.bzl", "py_library")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
@@ -29,6 +44,7 @@ py_library(
         "distributed_training_utils_v1.py",
     ],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         ":distribute_coordinator_utils",
         "//tensorflow/python/data",
@@ -62,6 +78,7 @@ py_library(
     name = "optimizer_combinations",
     srcs = ["optimizer_combinations.py"],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         "//tensorflow/python/distribute:combinations",
         "//tensorflow/python/distribute:strategy_combinations",
@@ -76,6 +93,7 @@ py_library(
         "worker_training_state.py",
     ],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         ":distributed_file_utils",
         "//tensorflow/python/checkpoint",
@@ -96,6 +114,7 @@ py_library(
         "distributed_file_utils.py",
     ],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         "//tensorflow/python/distribute:distribute_lib",
         "//tensorflow/python/lib/io:file_io",
@@ -108,6 +127,7 @@ py_library(
         "distribute_coordinator_utils.py",
     ],
     srcs_version = "PY3",
+    strict_deps = False,
     deps = [
         "//tensorflow/core:protos_all_py",
         "//tensorflow/python/client:session",
