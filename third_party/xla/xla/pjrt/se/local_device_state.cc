@@ -17,7 +17,6 @@ limitations under the License.
 
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -29,11 +28,12 @@ limitations under the License.
 #include "absl/functional/any_invocable.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
-#include "xla/tsl/platform/status_macros.h"
 #include "xla/client/local_client.h"
 #include "xla/pjrt/async_work_runner.h"
 #include "xla/pjrt/se/buffer_sequencing_event.h"
@@ -60,11 +60,13 @@ LocalDeviceState::LocalDeviceState(se::StreamExecutor* executor,
                                    bool allow_event_reuse,
                                    bool use_callback_stream, int device_ordinal,
                                    std::optional<StreamOptions> stream_options,
-                                   bool schedule_async)
+                                   bool schedule_async,
+                                   DeviceErrorCallback device_error_callback)
     : allocation_model_(allocation_model),
       event_pool_(allow_event_reuse),
       executor_(executor),
-      client_(client) {
+      client_(client),
+      device_error_callback_(std::move(device_error_callback)) {
   if (max_inflight_computations.has_value()) {
     compute_semaphore_.emplace(*max_inflight_computations);
   }
@@ -265,7 +267,7 @@ absl::Status LocalDeviceState::ThenExecuteCallback(
       auto it = callback_stream_map_->find(stream);
       if (it == callback_stream_map_->end()) {
         tsl::profiler::TraceMe traceme_create("CreateCallbackStream");
-        ASSIGN_OR_RETURN(auto new_stream, executor_->CreateStream());
+        ABSL_ASSIGN_OR_RETURN(auto new_stream, executor_->CreateStream());
         new_stream->SetName(
             absl::StrFormat("Callback for %s", stream->GetName()));
         it =
@@ -274,14 +276,20 @@ absl::Status LocalDeviceState::ThenExecuteCallback(
       callback_exec_stream = it->second.get();
     }
     tsl::profiler::TraceMe traceme_create("LocalDeviceState::WaitFor");
-    RETURN_IF_ERROR(callback_exec_stream->WaitFor(stream));
+    ABSL_RETURN_IF_ERROR(callback_exec_stream->WaitFor(stream));
     stream = callback_exec_stream;
   }
-  if (error_cb) {
-    error_cb = [cb = std::move(error_cb),
+  if (error_cb || device_error_callback_) {
+    error_cb = [this, cb = std::move(error_cb),
                 worker = callback_thread_.get()](absl::Status status) mutable {
-      worker->Schedule(
-          [cb = std::move(cb), status]() mutable { std::move(cb)(status); });
+      worker->Schedule([this, cb = std::move(cb), status]() mutable {
+        if (device_error_callback_ && !absl::IsCancelled(status)) {
+          device_error_callback_(status);
+        }
+        if (cb) {
+          std::move(cb)(status);
+        }
+      });
     };
   }
   return stream->DoHostCallback(
@@ -390,7 +398,7 @@ absl::Status LocalDeviceState::AllocateAndRecordEvent(
     se::Stream* stream, absl::string_view tag,
     absl::AnyInvocable<void() &&> cleanup) {
   auto status = [&]() {
-    ASSIGN_OR_RETURN(
+    ABSL_ASSIGN_OR_RETURN(
         EventPool::Handle device_event,
         event_pool().AllocateEvent(async_work_runner, stream->parent()));
     event_pool().ThenRecordEvent(stream, device_event);

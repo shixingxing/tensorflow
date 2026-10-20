@@ -37,6 +37,7 @@ limitations under the License.
 #include "xla/stream_executor/dnn.h"
 #include "xla/stream_executor/engine_options.h"
 #include "xla/stream_executor/scratch_allocator.h"
+#include "xla/stream_executor/semantic_version.h"
 #include "xla/stream_executor/stream_executor.h"
 #include "xla/tsl/protobuf/dnn.pb.h"
 
@@ -94,6 +95,16 @@ class CudnnGraph : public dnn::DnnGraph {
       absl::Span<DeviceAddressBase> operands, DeviceAddressBase& workspace,
       std::optional<int64_t> local_device_ordinal = std::nullopt) const;
 };
+
+// Minimum cuDNN runtime for deviceless cuDNN graph compilation.
+// Technically older versions support deviceless compilation, but they have
+// various bugs.
+inline constexpr SemanticVersion kMinDevicelessCudnnVersion{9, 23, 0};
+
+// Returns whether the loaded cuDNN runtime is at least
+// kMinDevicelessCudnnVersion. CudnnGraph::Prepare refuses deviceless
+// preparation on older runtimes.
+bool SupportsDevicelessCudnnCompilation();
 
 // cudnn-library based DNN support. For details on overridden interface
 // functions, see dnn.h.

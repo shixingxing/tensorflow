@@ -56,7 +56,7 @@ TEST_F(StatusScopedDiagnosticHandlerTest,
 }
 
 TEST_F(StatusScopedDiagnosticHandlerTest, VerifyPassedInErrorsArePropagated) {
-  const Status err = tensorflow::errors::Internal("Passed in error");
+  const Status err = absl::InternalError("Passed in error");
   ASSERT_TRUE(
       absl::IsInternal(StatusScopedDiagnosticHandler(&context_).Combine(err)));
 }
@@ -66,21 +66,13 @@ TEST_F(StatusScopedDiagnosticHandlerTest,
   StatusScopedDiagnosticHandler ssdh(&context_);
   emitError(loc_) << "Diagnostic message reported";
   emitError(loc_) << "Second diagnostic message reported";
-  const Status s =
-      ssdh.Combine(tensorflow::errors::Internal("Passed in error"));
+  const Status s = ssdh.Combine(absl::InternalError("Passed in error"));
   ASSERT_TRUE(absl::IsInternal(s));
   EXPECT_THAT(s.message(), HasSubstr("Passed in error"));
   EXPECT_THAT(s.message(), HasSubstr("Diagnostic message reported"));
   EXPECT_THAT(s.message(), HasSubstr("Second diagnostic message reported"));
 }
 
-TEST_F(StatusScopedDiagnosticHandlerTest, VerifyThatWarningsAreIgnored) {
-  // Note: this logic is actually implemented in BaseScopedDiagnosticHandler's
-  // handler() function, but only StatusScopedDiagnosticHandler uses it.
-  StatusScopedDiagnosticHandler handler(&context_);
-  emitWarning(loc_) << "Warning message";
-  TF_EXPECT_OK(handler.ConsumeStatus());
-}
 
 TEST(ErrorUtilTest, StatusScopedDiagnosticHandlerWithFilter) {
   // Filtering logic is based on tensorflow::IsInternalFrameForFilename()

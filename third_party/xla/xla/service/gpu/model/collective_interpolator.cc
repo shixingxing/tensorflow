@@ -30,11 +30,10 @@ limitations under the License.
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/time.h"
-#include "xla/tsl/platform/status_macros.h"
-#include "google/protobuf/text_format.h"
 #include "xla/backends/gpu/transforms/collectives/collective_ops_utils.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_computation.h"
@@ -63,19 +62,18 @@ namespace {
 absl::string_view GetDefaultCollectivePerfTable() {
   const struct FileToc* toc = config::default_collective_perf_table_create();
   for (size_t i = 0; i < config::default_collective_perf_table_size(); ++i) {
-    if (absl::string_view(toc[i].name) ==
-        "default_collective_perf_table.txtpb") {
+    if (absl::string_view(toc[i].name) == "default_collective_perf_table.pb") {
       return absl::string_view(toc[i].data, toc[i].size);
     }
   }
-  LOG(FATAL) << "Embedded file not found: default_collective_perf_table.txtpb";
+  LOG(FATAL) << "Embedded file not found: default_collective_perf_table.pb";
 }
 
 static const DeviceHloInstructionProfiles& Profile() {
   static const DeviceHloInstructionProfiles* profile = []() {
     auto* profile = new DeviceHloInstructionProfiles();
-    CHECK(tsl::protobuf::TextFormat::ParseFromString(
-        GetDefaultCollectivePerfTable(), profile))
+    CHECK(profile->ParseFromArray(GetDefaultCollectivePerfTable().data(),
+                                  GetDefaultCollectivePerfTable().size()))
         << "Cannot parse a default profile.";
     return profile;
   }();
@@ -123,7 +121,7 @@ absl::StatusOr<int> GetNumParticipatingDevices(
 }
 
 absl::StatusOr<InterpolationSpecification> Spec(
-    int num_devices_per_host, const HloInstructionProfile& profile,
+    int num_devices_per_partition, const HloInstructionProfile& profile,
     const se::DeviceDescription& device_info) {
   auto module = CollectiveInterpolator::ConstructModule(profile);
   if (module == nullptr) {
@@ -135,11 +133,10 @@ absl::StatusOr<InterpolationSpecification> Spec(
   if (instr->opcode() == HloOpcode::kCollectivePermute) {
     auto* cp = Cast<HloCollectivePermuteInstruction>(instr);
     GpuHloCostAnalysis analysis(GpuHloCostAnalysis::Options(), device_info);
-    RETURN_IF_ERROR(cp->Accept(&analysis));
+    ABSL_RETURN_IF_ERROR(cp->Accept(&analysis));
     int64_t bytes_transferred = analysis.BytesTransferred(*cp);
     CollectivePermuteCostModelType permute_type =
-        GetCollectivePermuteCostModelType(
-            *cp, /*num_devices_per_partition=*/num_devices_per_host);
+        GetCollectivePermuteCostModelType(*cp, num_devices_per_partition);
     VLOG(10) << "Spec permute_type: " << static_cast<int>(permute_type);
     return InterpolationSpecification{/*opcode=*/cp->opcode(),
                                       /*num_devices=*/2,
@@ -151,12 +148,12 @@ absl::StatusOr<InterpolationSpecification> Spec(
 
   auto collective = Cast<HloCollectiveInstruction>(instr);
   GpuHloCostAnalysis analysis(GpuHloCostAnalysis::Options(), device_info);
-  RETURN_IF_ERROR(collective->Accept(&analysis));
+  ABSL_RETURN_IF_ERROR(collective->Accept(&analysis));
   int64_t bytes_transferred = analysis.BytesTransferred(*collective);
-  ASSIGN_OR_RETURN(GPUCommunicationType comm,
-                   CommunicationType(num_devices_per_host, *collective,
+  ABSL_ASSIGN_OR_RETURN(GPUCommunicationType comm,
+                   CommunicationType(num_devices_per_partition, *collective,
                                      device_info.gpu_compute_capability()));
-  ASSIGN_OR_RETURN(int num_devices,
+  ABSL_ASSIGN_OR_RETURN(int num_devices,
                    GetNumParticipatingDevices(*collective->device_list()));
 
   CollectiveDeviceList list_of_devices =
@@ -441,7 +438,7 @@ bool RequiresAccumulation(HloOpcode opcode) {
 absl::StatusOr<std::unique_ptr<
     absl::flat_hash_map<CollectiveInterpolator::ExactInterpolatorKey,
                         std::unique_ptr<InterpolatorBase<int64_t, 1>>>>>
-ConstructExactInterpolators(int num_devices_per_host,
+ConstructExactInterpolators(int num_devices_per_partition,
                             const HloInstructionProfileList& profiles,
                             const se::DeviceDescription& device_info) {
   auto exact_interpolators = std::make_unique<
@@ -449,8 +446,8 @@ ConstructExactInterpolators(int num_devices_per_host,
                           std::unique_ptr<InterpolatorBase<int64_t, 1>>>>();
 
   for (auto& profile : profiles.entries()) {
-    ASSIGN_OR_RETURN(InterpolationSpecification spec,
-                     Spec(num_devices_per_host, profile, device_info));
+    ABSL_ASSIGN_OR_RETURN(InterpolationSpecification spec,
+                     Spec(num_devices_per_partition, profile, device_info));
     // Construct exact interpolators.
     CollectiveInterpolator::ExactInterpolatorKey exact_key = std::visit(
         absl::Overload{[&](PermuteOpSpecInfo permute_op_info) {
@@ -491,7 +488,7 @@ ConstructExactInterpolators(int num_devices_per_host,
 absl::StatusOr<std::unique_ptr<
     absl::flat_hash_map<CollectiveInterpolator::ExactInterpolatorKey,
                         std::unique_ptr<InterpolatorBase<int64_t, 1>>>>>
-ConstructExactNNInterpolators(int num_devices_per_host,
+ConstructExactNNInterpolators(int num_devices_per_partition,
                               const HloInstructionProfileList& profiles,
                               const se::DeviceDescription& device_info) {
   VLOG(10) << "ConstructExactNNInterpolators called.";
@@ -501,8 +498,8 @@ ConstructExactNNInterpolators(int num_devices_per_host,
 
   for (auto& profile : profiles.entries()) {
     VLOG(10) << "Processing profile: " << profile.DebugString();
-    ASSIGN_OR_RETURN(InterpolationSpecification spec,
-                     Spec(num_devices_per_host, profile, device_info));
+    ABSL_ASSIGN_OR_RETURN(InterpolationSpecification spec,
+                     Spec(num_devices_per_partition, profile, device_info));
     std::visit(absl::Overload{
                    [&](PermuteOpSpecInfo permute_op_info) {
                      VLOG(10) << "  Spec: opcode=" << spec.opcode
@@ -566,7 +563,7 @@ ConstructExactNNInterpolators(int num_devices_per_host,
 absl::StatusOr<std::unique_ptr<
     absl::flat_hash_map<CollectiveInterpolator::FallbackInterpolatorKey,
                         std::unique_ptr<InterpolatorBase<int64_t, 2>>>>>
-ConstructFallbackInterpolators(int num_devices_per_host,
+ConstructFallbackInterpolators(int num_devices_per_partition,
                                const HloInstructionProfileList& profiles,
                                const se::DeviceDescription& device_info) {
   auto fallback_interpolators = std::make_unique<
@@ -574,8 +571,8 @@ ConstructFallbackInterpolators(int num_devices_per_host,
                           std::unique_ptr<InterpolatorBase<int64_t, 2>>>>();
 
   for (auto& profile : profiles.entries()) {
-    ASSIGN_OR_RETURN(InterpolationSpecification spec,
-                     Spec(num_devices_per_host, profile, device_info));
+    ABSL_ASSIGN_OR_RETURN(InterpolationSpecification spec,
+                     Spec(num_devices_per_partition, profile, device_info));
     std::optional<GPUCommunicationType> collective_comm;
     std::visit(absl::Overload{[&](PermuteOpSpecInfo permute_op_info) {},
                               [&](const CollectiveOpSpecInfo& op_info) {
@@ -619,7 +616,7 @@ ConstructFallbackInterpolators(int num_devices_per_host,
 absl::StatusOr<std::unique_ptr<
     absl::flat_hash_map<CollectiveInterpolator::FallbackInterpolatorKey,
                         std::unique_ptr<InterpolatorBase<int64_t, 2>>>>>
-ConstructFallbackNNInterpolators(int num_devices_per_host,
+ConstructFallbackNNInterpolators(int num_devices_per_partition,
                                  const HloInstructionProfileList& profiles,
                                  const se::DeviceDescription& device_info) {
   auto fallback_interpolators = std::make_unique<
@@ -627,8 +624,8 @@ ConstructFallbackNNInterpolators(int num_devices_per_host,
                           std::unique_ptr<InterpolatorBase<int64_t, 2>>>>();
 
   for (auto& profile : profiles.entries()) {
-    ASSIGN_OR_RETURN(InterpolationSpecification spec,
-                     Spec(num_devices_per_host, profile, device_info));
+    ABSL_ASSIGN_OR_RETURN(InterpolationSpecification spec,
+                     Spec(num_devices_per_partition, profile, device_info));
     std::optional<GPUCommunicationType> collective_comm;
     std::visit(absl::Overload{[&](PermuteOpSpecInfo permute_op_info) {},
                               [&](const CollectiveOpSpecInfo& op_info) {
@@ -666,41 +663,47 @@ ConstructFallbackNNInterpolators(int num_devices_per_host,
 // We can get rid of `analysis` being nullptr once we get rid of stats
 // collection passes.
 /*static*/ absl::StatusOr<std::unique_ptr<CollectiveInterpolator>>
-CollectiveInterpolator::Create(int num_devices_per_host,
+CollectiveInterpolator::Create(int num_devices_per_partition,
                                const se::DeviceDescription& device_info,
                                const GpuHloCostAnalysis* analysis) {
-  ASSIGN_OR_RETURN(HloInstructionProfileList profiles,
+  ABSL_ASSIGN_OR_RETURN(HloInstructionProfileList profiles,
                    ReadDefaultProfiles(device_info));
+  int table_partition_size = profiles.partition_size() > 0
+                                 ? profiles.partition_size()
+                                 : num_devices_per_partition;
 
-  ASSIGN_OR_RETURN(
+  ABSL_ASSIGN_OR_RETURN(
       auto exact_interpolators,
-      ConstructExactInterpolators(num_devices_per_host, profiles, device_info));
+      ConstructExactInterpolators(table_partition_size, profiles, device_info));
 
-  ASSIGN_OR_RETURN(auto fallback_interpolators,
-                   ConstructFallbackInterpolators(num_devices_per_host,
+  ABSL_ASSIGN_OR_RETURN(auto fallback_interpolators,
+                   ConstructFallbackInterpolators(table_partition_size,
                                                   profiles, device_info));
 
   return std::unique_ptr<CollectiveInterpolator>(new CollectiveInterpolator(
       std::move(exact_interpolators), std::move(fallback_interpolators),
-      device_info, num_devices_per_host, analysis));
+      device_info, num_devices_per_partition, analysis));
 }
 
 /*static*/ absl::StatusOr<std::unique_ptr<CollectiveInterpolator>>
-CollectiveInterpolator::Create(int num_devices_per_host,
+CollectiveInterpolator::Create(int num_devices_per_partition,
                                const HloInstructionProfileList& profiles,
                                const se::DeviceDescription& device_info,
                                const GpuHloCostAnalysis* analysis) {
-  ASSIGN_OR_RETURN(auto exact_interpolators,
-                   ConstructExactNNInterpolators(num_devices_per_host, profiles,
+  int table_partition_size = profiles.partition_size() > 0
+                                 ? profiles.partition_size()
+                                 : num_devices_per_partition;
+  ABSL_ASSIGN_OR_RETURN(auto exact_interpolators,
+                   ConstructExactNNInterpolators(table_partition_size, profiles,
                                                  device_info));
 
-  ASSIGN_OR_RETURN(auto fallback_interpolators,
-                   ConstructFallbackNNInterpolators(num_devices_per_host,
+  ABSL_ASSIGN_OR_RETURN(auto fallback_interpolators,
+                   ConstructFallbackNNInterpolators(table_partition_size,
                                                     profiles, device_info));
 
   return std::unique_ptr<CollectiveInterpolator>(new CollectiveInterpolator(
       std::move(exact_interpolators), std::move(fallback_interpolators),
-      device_info, num_devices_per_host, analysis));
+      device_info, num_devices_per_partition, analysis));
 }
 
 absl::StatusOr<absl::Duration> CollectiveInterpolator::EstimatedRuntime(
@@ -769,10 +772,10 @@ absl::StatusOr<absl::Duration> CollectiveInterpolator::EstimatedRuntime(
         absl::StrCat("Cannot find key for instr: ", instr.ToString()));
   }
   auto* channel_instr = Cast<HloChannelInstruction>(&instr);
-  ASSIGN_OR_RETURN(auto comm,
-                   CommunicationType(num_devices_per_host_, *channel_instr,
+  ABSL_ASSIGN_OR_RETURN(auto comm,
+                   CommunicationType(num_devices_per_partition_, *channel_instr,
                                      device_info_.gpu_compute_capability()));
-  ASSIGN_OR_RETURN(auto num_devices, GetReplicaGroupCountAndSize(&instr));
+  ABSL_ASSIGN_OR_RETURN(auto num_devices, GetReplicaGroupCountAndSize(&instr));
   std::array<int64_t, 2> point({bytes_transferred, num_devices->second});
   HloOpcode opcode = instr.opcode();
   if (instr.opcode() == HloOpcode::kAllGatherStart) {

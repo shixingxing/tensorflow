@@ -19,9 +19,9 @@ limitations under the License.
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
-#include "xla/tsl/platform/status_macros.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
@@ -36,6 +36,10 @@ TupleSimplifier::TupleSimplifier(bool exclude_entry_computation)
 
 absl::StatusOr<HloInstruction*> TupleSimplifier::RemoveWholeTuple(
     HloInstruction* tuple) {
+  if (tuple->get_frontend_attribute(kDisableTupleSimplifierAttribute) ==
+      "true") {
+    return nullptr;
+  }
   HloInstruction* top_tuple = nullptr;
   for (int64_t operand_number = 0; operand_number < tuple->operand_count();
        ++operand_number) {
@@ -56,7 +60,7 @@ absl::StatusOr<HloInstruction*> TupleSimplifier::RemoveWholeTuple(
   if (top_tuple == nullptr) {
     return nullptr;
   }
-  ASSIGN_OR_RETURN(bool changed,
+  ABSL_ASSIGN_OR_RETURN(bool changed,
                    tuple->parent()->ReplaceInstruction(
                        tuple, top_tuple, /*preserve_sharding=*/true));
   if (changed) {
@@ -77,7 +81,7 @@ absl::StatusOr<bool> TupleSimplifier::RunImpl(
     }
     for (auto* instruction : computation->MakeInstructionPostOrder()) {
       if (instruction->opcode() == HloOpcode::kTuple) {
-        ASSIGN_OR_RETURN(HloInstruction * instr, RemoveWholeTuple(instruction));
+        ABSL_ASSIGN_OR_RETURN(HloInstruction * instr, RemoveWholeTuple(instruction));
         if (instr != nullptr) {
           changed = true;
         }
@@ -115,7 +119,7 @@ absl::StatusOr<bool> TupleSimplifier::RunImpl(
         }
 
         if (replacement) {
-          ASSIGN_OR_RETURN(bool replaced,
+          ABSL_ASSIGN_OR_RETURN(bool replaced,
                            computation->ReplaceInstruction(
                                instruction, replacement,
                                /*preserve_sharding=*/true,
@@ -127,7 +131,7 @@ absl::StatusOr<bool> TupleSimplifier::RunImpl(
   }
 
   if (changed && module->has_schedule()) {
-    RETURN_IF_ERROR(module->schedule().Update());
+    ABSL_RETURN_IF_ERROR(module->schedule().Update());
   }
 
   return changed;

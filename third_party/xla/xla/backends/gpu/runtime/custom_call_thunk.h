@@ -16,9 +16,12 @@ limitations under the License.
 #ifndef XLA_BACKENDS_GPU_RUNTIME_CUSTOM_CALL_THUNK_H_
 #define XLA_BACKENDS_GPU_RUNTIME_CUSTOM_CALL_THUNK_H_
 
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -31,6 +34,7 @@ limitations under the License.
 #include "xla/backends/gpu/runtime/collective_cliques.h"
 #include "xla/backends/gpu/runtime/collective_memory.h"
 #include "xla/backends/gpu/runtime/command.h"
+#include "xla/backends/gpu/runtime/per_device_state.h"
 #include "xla/backends/gpu/runtime/thunk.h"
 #include "xla/backends/gpu/runtime/thunk.pb.h"
 #include "xla/backends/gpu/runtime/traced_command.h"
@@ -44,13 +48,17 @@ limitations under the License.
 #include "xla/ffi/invoke.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/runtime/buffer_use.h"
-#include "xla/runtime/object_pool.h"
 #include "xla/service/buffer_assignment.h"
 #include "xla/service/gpu/buffer_allocations.h"
 #include "xla/service/shaped_slice.h"
+#include "xla/stream_executor/command_buffer.h"
 #include "xla/stream_executor/device_address_allocator.h"
 #include "xla/stream_executor/device_description.h"
 #include "xla/stream_executor/stream.h"
+
+namespace xla {
+class CustomOptions;
+}  // namespace xla
 
 namespace xla::gpu {
 
@@ -82,12 +90,7 @@ class CustomCallThunk : public TracedCommand {
     std::unique_ptr<xla::ffi::Ffi> instantiate;
     std::unique_ptr<xla::ffi::Ffi> prepare;
     std::unique_ptr<xla::ffi::Ffi> execute;
-  };
-
-  // A per-execution state that holds state for prepare and initialize stages.
-  struct PrepareAndInitState {
-    ffi::ExecutionState prepare;
-    ffi::ExecutionState init;
+    std::unique_ptr<xla::ffi::Ffi> record;
   };
 
   // Creates a serializable custom call thunk. The callback is resolved using
@@ -101,7 +104,8 @@ class CustomCallThunk : public TracedCommand {
       const se::GpuComputeCapability& gpu_compute_capability,
       std::unique_ptr<xla::ffi::ExecutionState> execution_state = nullptr,
       std::optional<xla::cpu::TargetMachineOptions> cpu_target_machine_options =
-          std::nullopt);
+          std::nullopt,
+      bool use_pdl = false);
 
   // Creates a serializable custom call thunk from the given XLA FFI handler
   // bundle. Note that `target_name` needs to refer to a registered XLA FFI
@@ -115,7 +119,8 @@ class CustomCallThunk : public TracedCommand {
       const se::GpuComputeCapability& gpu_compute_capability,
       std::unique_ptr<xla::ffi::ExecutionState> execution_state = nullptr,
       std::optional<xla::cpu::TargetMachineOptions> cpu_target_machine_options =
-          std::nullopt);
+          std::nullopt,
+      bool use_pdl = false);
 
   // Creates a custom call thunk from a bundle of handlers created with
   // xla::ffi::Bind(). Any pointer or reference lambda captures must be valid
@@ -134,9 +139,16 @@ class CustomCallThunk : public TracedCommand {
   absl::Status Initialize(const InitializeParams& params) override;
   absl::Status ExecuteOnStream(const ExecuteParams& params) override;
 
+  absl::StatusOr<const se::CommandBuffer::Command*> Record(
+      const Thunk::ExecuteParams& execute_params,
+      const RecordParams& record_params, RecordAction record_action,
+      se::CommandBuffer* command_buffer) override;
+
   bool requires_warmup() const override { return true; }
 
   const std::string& target_name() const { return target_name_; }
+
+  bool use_pdl() const { return use_pdl_; }
 
   std::optional<XLA_FFI_Handler_Bundle> bundle() const {
     const XLA_FFI_Handler_Bundle* c_bundle =
@@ -183,7 +195,50 @@ class CustomCallThunk : public TracedCommand {
       const se::GpuComputeCapability& gpu_compute_capability,
       std::optional<xla::cpu::TargetMachineOptions> cpu_target_machine_options);
 
+  // A buffer argument resolved at construction time. `present == false`
+  // represents a null pointer argument.
+  struct BufferArg {
+    BufferAllocation::Index index = -1;
+    int64_t offset = 0;
+    int64_t size = 0;
+    bool present = false;
+  };
+
  private:
+  // Per-device call frame reused across executions. `busy` is set while a
+  // `CallFrameLease` refers to `frame`; concurrent executions on the same
+  // device fall back to a private copy of the reference call frame.
+  struct CallFrameSlot {
+    std::optional<ffi::CallFrame> frame;
+    std::atomic<bool> busy{false};
+  };
+
+  // RAII handle to a call frame: either the per-device slot (released on
+  // destruction) or an owned copy.
+  class CallFrameLease {
+   public:
+    explicit CallFrameLease(CallFrameSlot* slot) : slot_(slot) {}
+    explicit CallFrameLease(ffi::CallFrame frame) : owned_(std::move(frame)) {}
+    ~CallFrameLease() {
+      if (slot_ != nullptr) {
+        slot_->busy.store(false, std::memory_order_release);
+      }
+    }
+    CallFrameLease(CallFrameLease&& other) noexcept
+        : slot_(std::exchange(other.slot_, nullptr)),
+          owned_(std::move(other.owned_)) {}
+    CallFrameLease& operator=(CallFrameLease&&) = delete;
+    CallFrameLease(const CallFrameLease&) = delete;
+    CallFrameLease& operator=(const CallFrameLease&) = delete;
+
+    ffi::CallFrame& operator*() { return slot_ ? *slot_->frame : *owned_; }
+    ffi::CallFrame* operator->() { return &**this; }
+
+   private:
+    CallFrameSlot* slot_ = nullptr;
+    std::optional<ffi::CallFrame> owned_;
+  };
+
   CustomCallThunk(
       ThunkInfo thunk_info, std::string target_name,
       std::variant<XLA_FFI_Handler_Bundle, OwnedHandlerBundle> bundle,
@@ -192,10 +247,12 @@ class CustomCallThunk : public TracedCommand {
       xla::ffi::AttributesMap attributes,
       std::unique_ptr<ffi::ExecutionState> execution_state,
       const HloComputation* called_computation,
-      std::optional<xla::cpu::TargetMachineOptions> cpu_target_machine_options);
+      const se::GpuComputeCapability& gpu_compute_capability,
+      std::optional<xla::cpu::TargetMachineOptions> cpu_target_machine_options,
+      bool use_pdl = false);
 
-  absl::StatusOr<ObjectPool<xla::ffi::CallFrame>::BorrowedObject>
-  BuildCallFrame(const BufferAllocations* absl_nullable buffer_allocations);
+  absl::StatusOr<CallFrameLease> BuildCallFrame(
+      const BufferAllocations* absl_nullable buffer_allocations);
 
   xla::ffi::InvokeContext BuildInvokeContext(
       RunId run_id, se::Stream* absl_nullable stream,
@@ -207,31 +264,36 @@ class CustomCallThunk : public TracedCommand {
       const CollectiveCliques* absl_nullable collective_cliques,
       const CollectiveMemory* absl_nullable collective_memory,
       const ffi::ExecutionContext* absl_nullable execution_context,
+      const CustomOptions* absl_nullable custom_options,
       absl::Span<se::Stream* const> computation_streams);
 
   absl::Status ExecuteFfiHandler(
       RunId run_id, XLA_FFI_Handler* handler, XLA_FFI_ExecutionStage stage,
       se::Stream* stream, Thunk::ExecutionScopedState* execution_scoped_state,
       const ffi::ExecutionContext* execution_context,
+      const CustomOptions* custom_options,
       const BufferAllocations* buffer_allocations,
       const CollectiveParams* absl_nullable collective_params,
       CollectiveCliqueRequests* absl_nullable collective_clique_requests,
       CollectiveMemoryRequests* absl_nullable collective_memory_requests,
       const CollectiveCliques* absl_nullable collective_cliques,
       const CollectiveMemory* absl_nullable collective_memory,
-      absl::Span<se::Stream* const> computation_streams);
+      absl::Span<se::Stream* const> computation_streams,
+      const XLA_FFI_Extension* extension_start = nullptr);
 
   absl::Status ExecuteFfiHandler(
       RunId run_id, xla::ffi::Ffi& handler, xla::ffi::ExecutionStage stage,
       se::Stream* stream, Thunk::ExecutionScopedState* execution_scoped_state,
       const ffi::ExecutionContext* execution_context,
+      const CustomOptions* custom_options,
       const BufferAllocations* buffer_allocations,
       const CollectiveParams* absl_nullable collective_params,
       CollectiveCliqueRequests* absl_nullable collective_clique_requests,
       CollectiveMemoryRequests* absl_nullable collective_memory_requests,
       const CollectiveCliques* absl_nullable collective_cliques,
       const CollectiveMemory* absl_nullable collective_memory,
-      absl::Span<se::Stream* const> computation_streams);
+      absl::Span<se::Stream* const> computation_streams,
+      const XLA_FFI_Extension* extension_start = nullptr);
 
   std::string target_name_;
 
@@ -239,17 +301,23 @@ class CustomCallThunk : public TracedCommand {
   std::vector<NullableShapedSlice> operands_;
   std::vector<NullableShapedSlice> results_;
 
-  // XLA FFI handler bundle: either a C API bundle (from the global FFI
+  // Compact copies of the operand/result slices iterated on every execution
+  // (`NullableShapedSlice` carries a `Shape` and is too large to stream over
+  // for thousands of thunks per step).
+  std::vector<BufferArg> operand_args_;
+  std::vector<BufferArg> result_args_;
+
   // registry) or an owned bundle (from xla::ffi::Bind()).
   std::variant<XLA_FFI_Handler_Bundle, OwnedHandlerBundle> bundle_;
+  bool use_pdl_ = false;
   std::optional<xla::ffi::AttributesMap> attributes_;
 
   // Reference call frame pre-initialized at construction time.
   std::optional<ffi::CallFrame> call_frame_;
 
-  // A pool of call frames used at run time. Newly created call frames are
-  // copied from the reference call frame and updated with buffer addresses.
-  std::optional<ObjectPool<ffi::CallFrame>> call_frames_;
+  // Per-device call frames used at run time, copied from the reference call
+  // frame on first use and updated with buffer addresses on every call.
+  PerDeviceState<CallFrameSlot> call_frames_;
 
   // Execution state bound to the FFI handler instance. Optional.
   std::shared_ptr<ffi::ExecutionState> execution_state_;
@@ -263,6 +331,9 @@ class CustomCallThunk : public TracedCommand {
   // bytecode of the computation serialized to StableHLO. Today we assume that
   // custom calls that access called computation can only be linked statically.
   const HloComputation* called_computation_ = nullptr;
+
+  // Compute capability of the target device, forwarded to FFI handlers.
+  se::GpuComputeCapability gpu_compute_capability_;
 
   std::optional<xla::cpu::TargetMachineOptions> cpu_target_machine_options_;
 };

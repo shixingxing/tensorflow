@@ -15,7 +15,6 @@ limitations under the License.
 
 #include "xla/service/topk_rewriter.h"
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -27,11 +26,12 @@ limitations under the License.
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
-#include "xla/tsl/platform/status_macros.h"
+#include "xla/comparison_util.h"
 #include "xla/hlo/builder/lib/comparators.h"
 #include "xla/hlo/builder/xla_builder.h"
 #include "xla/hlo/builder/xla_computation.h"
@@ -53,9 +53,7 @@ limitations under the License.
 
 namespace xla {
 
-namespace m = match;
-
-static bool IsNanSafeGt(HloComputation* comp) {
+static std::optional<ComparisonOrder> MatchNanSafeGt(HloComputation* comp) {
   namespace m = match;
   auto match_bitcast_f32 = [](int64_t parameter_number) {
     auto param = m::Parameter(parameter_number)
@@ -159,13 +157,18 @@ static bool IsNanSafeGt(HloComputation* comp) {
     return param;
   };
 
-  auto match_compare = [](PrimitiveType type) {
-    auto param0 = m::Parameter(0).WithShape(m::Shape().WithElementType(type));
-    auto param1 = m::Parameter(1).WithShape(m::Shape().WithElementType(type));
-    return m::Gt(param0, param1);
+  auto not_weak_order = [](const HloInstruction* instr) {
+    return instr->comparison_order() != ComparisonOrder::kWeak;
   };
 
-  auto match_default_compare = [](PrimitiveType type) {
+  HloInstruction* cmp = nullptr;
+  auto match_compare = [&](PrimitiveType type) {
+    auto param0 = m::Parameter(0).WithShape(m::Shape().WithElementType(type));
+    auto param1 = m::Parameter(1).WithShape(m::Shape().WithElementType(type));
+    return m::Gt(&cmp, param0, param1).WithPredicate(not_weak_order);
+  };
+
+  auto match_default_compare = [&](PrimitiveType type) {
     auto params_with_type = [&](int i, PrimitiveType t) {
       return m::Parameter(i).WithShape(m::Shape().WithElementType(t));
     };
@@ -175,55 +178,72 @@ static bool IsNanSafeGt(HloComputation* comp) {
                      // Indices
                      params_with_type(2, S32), params_with_type(3, S32)});
     auto const_true = m::Broadcast(m::Constant());
-    auto values_gt = m::Gt(params[0], params[1]);
+    auto values_gt =
+        m::Gt(&cmp, params[0], params[1]).WithPredicate(not_weak_order);
     return m::Select(const_true, values_gt, const_true);
   };
 
   auto match_all_types = [](HloInstruction* root, auto callback) {
-    bool result = false;
     for (auto type : {BF16, F32, S32, U32}) {
-      result = result || Match(root, callback(type));
+      if (Match(root, callback(type))) {
+        return true;
+      }
     }
-    return result;
+    return false;
   };
 
-  return Match(comp->root_instruction(),
-               m::Gt(match_generic_iec559(0, F32, S32),
-                     match_generic_iec559(1, F32, S32))) ||
-         Match(comp->root_instruction(),
-               m::Gt(match_generic_iec559(0, BF16, S16),
-                     match_generic_iec559(1, BF16, S16))) ||
-         Match(comp->root_instruction(),
-               m::Gt(match_generic_iec559_with_convert(0, BF16, F32, S32),
-                     match_generic_iec559_with_convert(1, BF16, F32, S32))) ||
-         Match(comp->root_instruction(),
-               m::Gt(match_bitcast_f32(0), match_bitcast_f32(1))) ||
-         Match(comp->root_instruction(),
-               m::Gt(match_bitcast_bf16(0), match_bitcast_bf16(1))) ||
-         Match(comp->root_instruction(),
-               m::Gt(match_bitcast_f32_with_convert(0),
-                     match_bitcast_f32_with_convert(1))) ||
-         Match(comp->root_instruction(),
-               m::Gt(match_bitcast_bf16_with_convert(0),
-                     match_bitcast_bf16_with_convert(1))) ||
-         Match(comp->root_instruction(), m::Gt(match_s32(0), match_s32(1))) ||
-         match_all_types(comp->root_instruction(), match_compare) ||
-         match_all_types(comp->root_instruction(), match_default_compare);
+  if (Match(comp->root_instruction(),
+            m::Gt(match_generic_iec559(0, F32, S32),
+                  match_generic_iec559(1, F32, S32))) ||
+      Match(comp->root_instruction(),
+            m::Gt(match_generic_iec559(0, BF16, S16),
+                  match_generic_iec559(1, BF16, S16))) ||
+      Match(comp->root_instruction(),
+            m::Gt(match_generic_iec559_with_convert(0, BF16, F32, S32),
+                  match_generic_iec559_with_convert(1, BF16, F32, S32))) ||
+      Match(comp->root_instruction(),
+            m::Gt(match_bitcast_f32(0), match_bitcast_f32(1))) ||
+      Match(comp->root_instruction(),
+            m::Gt(match_bitcast_bf16(0), match_bitcast_bf16(1))) ||
+      Match(comp->root_instruction(),
+            m::Gt(match_bitcast_f32_with_convert(0),
+                  match_bitcast_f32_with_convert(1))) ||
+      Match(comp->root_instruction(),
+            m::Gt(match_bitcast_bf16_with_convert(0),
+                  match_bitcast_bf16_with_convert(1))) ||
+      Match(comp->root_instruction(), m::Gt(match_s32(0), match_s32(1)))) {
+    return ComparisonOrder::kTotal;
+  }
+  if ((match_all_types(comp->root_instruction(), match_compare) ||
+       match_all_types(comp->root_instruction(), match_default_compare)) &&
+      cmp != nullptr) {
+    return cmp->comparison_order();
+  }
+  return std::nullopt;
 }
 
 // Look for the instructions emitted from: xla/client/lib/sorting.cc
 static bool HasIota(HloSortInstruction* sort, HloInstruction* data) {
   namespace m = match;
-  const std::array<int64_t, 1> sort_dims = {
-      data->shape().dimensions(sort->sort_dimension())};
-  auto match_iota = [](auto dims) {
-    return m::Iota().WithShape(m::Shape().WithElementType(S32).WithDims(dims));
-  };
-  return Match(sort->operand(1), match_iota(data->shape().dimensions())) ||
-         Match(sort->operand(1), m::Broadcast(match_iota(sort_dims)));
+  const int64_t sort_dim = sort->sort_dimension();
+  const HloInstruction* iota = nullptr;
+  if (Match(sort->operand(1),
+            m::Iota(&iota).WithShape(m::Shape().WithElementType(S32).WithDims(
+                data->shape().dimensions())))) {
+    return Cast<HloIotaInstruction>(iota)->iota_dimension() == sort_dim;
+  }
+  if (Match(sort->operand(1),
+            m::Broadcast(m::Iota(&iota).WithElementType(S32))
+                .WithShape(m::Shape().WithElementType(S32).WithDims(
+                    data->shape().dimensions())))) {
+    return sort->operand(1)->dimensions(
+               Cast<HloIotaInstruction>(iota)->iota_dimension()) == sort_dim;
+  }
+  return false;
 }
 
-std::optional<int64_t> TopkRewriter::SortIsInTopK(HloInstruction* inst) {
+std::optional<int64_t> TopkRewriter::SortIsInTopK(HloInstruction* inst,
+                                                  ComparisonOrder* order) {
   HloSortInstruction* sort = DynCast<HloSortInstruction>(inst);
   if (sort == nullptr) {
     return std::nullopt;
@@ -236,8 +256,13 @@ std::optional<int64_t> TopkRewriter::SortIsInTopK(HloInstruction* inst) {
   if (sort->operand_count() == 2 && !HasIota(sort, data)) {
     return std::nullopt;
   }
-  if (!IsNanSafeGt(sort->to_apply())) {
+  std::optional<ComparisonOrder> matched_order =
+      MatchNanSafeGt(sort->to_apply());
+  if (!matched_order.has_value()) {
     return std::nullopt;
+  }
+  if (order != nullptr) {
+    *order = *matched_order;
   }
   const int64_t sort_dim = sort->sort_dimension();
 
@@ -258,15 +283,15 @@ std::optional<int64_t> TopkRewriter::SortIsInTopK(HloInstruction* inst) {
       supported = false;
       break;
     }
-    if (absl::c_any_of(slice->slice_starts(), [](int x) { return x != 0; }) ||
-        absl::c_any_of(slice->slice_strides(), [](int x) { return x != 1; })) {
-      // Strided slice or slicing at the beginning isn't supported.
-      supported = false;
-      break;
-    }
-    for (int64_t i = 0; i < slice->slice_limits().size(); ++i) {
-      if (i != sort_dim &&
-          slice->slice_limits(i) != slice->operand(0)->shape().dimensions(i)) {
+    for (int64_t i = 0; i < slice->slice_starts().size(); ++i) {
+      if (slice->slice_strides(i) != 1) {
+        // Strided slicing isn't supported.
+        supported = false;
+        break;
+      }
+      if (i != sort_dim && (slice->slice_starts(i) != 0 ||
+                            slice->slice_limits(i) !=
+                                slice->operand(0)->shape().dimensions(i))) {
         // Slicing along a non-sort dimension isn't supported.
         supported = false;
         break;
@@ -295,7 +320,8 @@ struct TopKCustomCall {
   HloInstruction* index_gte;
 };
 
-TopKCustomCall CreateTopKCustomCall(HloSortInstruction* sort, const int64_t k) {
+TopKCustomCall CreateTopKCustomCall(HloSortInstruction* sort, const int64_t k,
+                                    ComparisonOrder order) {
   HloInstruction* input = sort->mutable_operand(0);
   Shape data_shape = input->shape();
   PrimitiveType element_type = data_shape.element_type();
@@ -344,7 +370,8 @@ TopKCustomCall CreateTopKCustomCall(HloSortInstruction* sort, const int64_t k) {
   HloInstruction* topk = sort->AddInstruction(HloInstruction::CreateCustomCall(
       topk_shape, {input}, sort->to_apply(), "TopK"));
   topk->set_raw_backend_config_string(absl::StrFormat(
-      "{is_stable = %s}", sort->is_stable() ? "true" : "false"));
+      "{is_stable = %s, order = \"%s\"}", sort->is_stable() ? "true" : "false",
+      ComparisonOrderToShortString(order)));
   HloInstruction* value_gte =
       sort->AddInstruction(HloInstruction::CreateGetTupleElement(
           topk->shape().tuple_shapes(0), topk, 0));
@@ -378,7 +405,8 @@ TopKCustomCall CreateTopKCustomCall(HloSortInstruction* sort, const int64_t k) {
 absl::StatusOr<HloInstruction*> TopkRewriter::TransformPatternToCustomCall(
     HloInstruction* inst) {
   // Check if sort is in TopK.
-  std::optional<int64_t> k = SortIsInTopK(inst);
+  ComparisonOrder order;
+  std::optional<int64_t> k = SortIsInTopK(inst, &order);
   if (!k) {
     return nullptr;
   }
@@ -402,16 +430,28 @@ absl::StatusOr<HloInstruction*> TopkRewriter::TransformPatternToCustomCall(
     return nullptr;
   }
 
-  TopKCustomCall topkcc = CreateTopKCustomCall(sort, k.value());
+  TopKCustomCall topkcc = CreateTopKCustomCall(sort, k.value(), order);
 
-  for (HloInstruction* user : sort->users()) {
+  // If the slice starts at 0, its output matches topk_gte, so elide the slice.
+  // Else, retarget the slice to take [start:k] directly from topk_gte.
+  auto replace_slice = [](HloInstruction* slice,
+                          HloInstruction* topk_gte) -> absl::Status {
+    if (ShapeUtil::SameDimensions(slice->shape(), topk_gte->shape())) {
+      return slice->ReplaceAllUsesWith(topk_gte);
+    }
+    return slice->ReplaceOperandWithDifferentShape(0, topk_gte);
+  };
+
+  std::vector<HloInstruction*> sort_users = sort->users();
+  for (HloInstruction* user : sort_users) {
     if (sort->operand_count() == 2) {
       HloInstruction* gte = user;
-      for (HloInstruction* slice : gte->users()) {
+      std::vector<HloInstruction*> gte_users = gte->users();
+      for (HloInstruction* slice : gte_users) {
         if (gte->tuple_index() == 0) {
-          RETURN_IF_ERROR(slice->ReplaceAllUsesWith(topkcc.value_gte));
+          ABSL_RETURN_IF_ERROR(replace_slice(slice, topkcc.value_gte));
         } else if (gte->tuple_index() == 1) {
-          RETURN_IF_ERROR(slice->ReplaceAllUsesWith(topkcc.index_gte));
+          ABSL_RETURN_IF_ERROR(replace_slice(slice, topkcc.index_gte));
         } else {
           // The line below should be unreachable. SortIsInTopK() already checks
           // that sort has either 1 or 2 operands. Reaching this line indicates
@@ -421,7 +461,7 @@ absl::StatusOr<HloInstruction*> TopkRewriter::TransformPatternToCustomCall(
         }
       }
     } else {
-      RETURN_IF_ERROR(user->ReplaceAllUsesWith(topkcc.value_gte));
+      ABSL_RETURN_IF_ERROR(replace_slice(user, topkcc.value_gte));
     }
   }
 
@@ -434,7 +474,7 @@ absl::StatusOr<bool> TopkRewriter::TransformToCustomCall(
   bool changed = false;
   for (HloComputation* comp : module->computations(execution_threads)) {
     for (HloInstruction* inst : comp->MakeInstructionPostOrder()) {
-      ASSIGN_OR_RETURN(HloInstruction * topkcc,
+      ABSL_ASSIGN_OR_RETURN(HloInstruction * topkcc,
                        TransformPatternToCustomCall(inst));
       if (topkcc != nullptr) {
         VLOG(2) << "Rewritten Topk: " << topkcc->ToString();
@@ -449,7 +489,7 @@ absl::StatusOr<bool> TopkRewriter::RunImpl(
     HloModule* module,
     const absl::flat_hash_set<absl::string_view>& execution_threads) {
   bool changed = false;
-  ASSIGN_OR_RETURN(auto transform_to_customcall_changed,
+  ABSL_ASSIGN_OR_RETURN(auto transform_to_customcall_changed,
                    TransformToCustomCall(module, execution_threads));
   changed |= transform_to_customcall_changed;
   return changed;
@@ -484,19 +524,20 @@ class TopkDecomposerVisitor : public DfsHloRewriteVisitor {
     // fits in 16 bits so indices can be packed.
     constexpr int32_t kLow16BitsLimit = int32_t{1} << 16;
     if (topk->largest() && topk->operand(0)->shape().element_type() == BF16 &&
-        !HasSingleUserReadingOnlyTheValueOutput(topk) &&
         topk->operand(0)->shape().dimensions().back() < kLow16BitsLimit) {
       return DecomposeTopKWithSorting(topk);
     }
 
-    ASSIGN_OR_RETURN(HloComputation * comparator,
+    ABSL_ASSIGN_OR_RETURN(HloComputation * comparator,
                      CreateVariadicComparator(topk));
     return DecomposeTopKFallback(topk, comparator);
   }
 
  private:
   bool HasSingleUserReadingOnlyTheValueOutput(HloInstruction* inst) {
-    return inst->user_count() == 1 && inst->users().front()->tuple_index() == 0;
+    return inst->user_count() == 1 &&
+           inst->users().front()->opcode() == HloOpcode::kGetTupleElement &&
+           inst->users().front()->tuple_index() == 0;
   }
 
   absl::StatusOr<HloComputation*> CreateVariadicComparator(
@@ -513,7 +554,7 @@ class TopkDecomposerVisitor : public DfsHloRewriteVisitor {
     XlaComputation comparison = topk->largest()
                                     ? CreateScalarGtComputation(ptypes, &b)
                                     : CreateScalarLtComputation(ptypes, &b);
-    ASSIGN_OR_RETURN(
+    ABSL_ASSIGN_OR_RETURN(
         HloComputation * comparator,
         XlaComputationToHloComputation(comparison, topk->parent()->parent()));
     return comparator;
@@ -596,9 +637,14 @@ class TopkDecomposerVisitor : public DfsHloRewriteVisitor {
             s32_shape, HloOpcode::kXor, input_with_low_bits, iota));
 
     // Step 6: Sort in descending order (GT comparator on S32, unstable).
+    // Note: Even though we set is_stable=false on the HLO sort instruction,
+    // the sort is inherently stable. Because the lower 16 bits embed the
+    // unique iota index of each element, no two packed S32 keys can ever be
+    // equal. Any tie in the upper 16 bits (BF16 values) is deterministically
+    // broken by the original index order.
     XlaBuilder b(absl::StrCat("packed_comparator_", call->name()));
     XlaComputation gt_comp = CreateScalarGtComputation({S32}, &b);
-    ASSIGN_OR_RETURN(
+    ABSL_ASSIGN_OR_RETURN(
         HloComputation * comparator,
         XlaComputationToHloComputation(gt_comp, parent_comp->parent()));
 
@@ -646,7 +692,7 @@ class TopkDecomposerVisitor : public DfsHloRewriteVisitor {
             broadcast_s32(kLow16BitsMask, sliced_s32_shape)));
 
     // Step 10: Create tuple of (values, indices) and replace.
-    RETURN_IF_ERROR(ReplaceInstruction(
+    ABSL_RETURN_IF_ERROR(ReplaceInstruction(
         call, parent_comp->AddInstruction(
                   HloInstruction::CreateTuple({values, indices}))));
     return absl::OkStatus();
@@ -675,7 +721,7 @@ class TopkDecomposerVisitor : public DfsHloRewriteVisitor {
       HloInstruction* sort = call->AddInstruction(
           HloInstruction::CreateSort(input->shape(), sort_dimension, {input},
                                      variadic_comparator, is_stable));
-      RETURN_IF_ERROR(ReplaceInstruction(
+      ABSL_RETURN_IF_ERROR(ReplaceInstruction(
           call->users().front(),
           call->AddInstruction(HloInstruction::CreateSlice(
               call->shape().tuple_shapes(0), sort, zeroes,
@@ -694,7 +740,7 @@ class TopkDecomposerVisitor : public DfsHloRewriteVisitor {
                 sort->shape().tuple_shapes(index), sort, index)),
             zeroes, call->shape().tuple_shapes(index).dimensions(), ones));
       };
-      RETURN_IF_ERROR(ReplaceInstruction(
+      ABSL_RETURN_IF_ERROR(ReplaceInstruction(
           call, call->AddInstruction(HloInstruction::CreateTuple(
                     {slice_tuple(0), slice_tuple(1)}))));
     }

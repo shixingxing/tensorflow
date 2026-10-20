@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-load("@com_github_grpc_grpc//bazel:cc_grpc_library.bzl", "cc_grpc_library")
+load("@grpc//bazel:cc_grpc_library.bzl", "cc_grpc_library")
 load(
     "//tensorflow:tensorflow.bzl",
     "tf_cc_test",
@@ -714,6 +714,7 @@ cc_library(
         ":worker_client",
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core/platform:mutex",
         "//tensorflow/core/profiler/rpc:profiler_service_impl",
         "@com_google_absl//absl/strings",
     ] + tf_grpc_cc_dependencies(),

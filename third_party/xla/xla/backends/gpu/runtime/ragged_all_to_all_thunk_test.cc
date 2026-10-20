@@ -27,11 +27,11 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include "absl/base/casts.h"
 #include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
-#include "xla/tsl/platform/status_macros.h"
 #include "xla/backends/gpu/runtime/async_thunk.h"
 #include "xla/backends/gpu/runtime/collective_clique_requests.h"
 #include "xla/backends/gpu/runtime/collective_cliques.h"
@@ -54,7 +54,7 @@ limitations under the License.
 #include "xla/runtime/device_id.h"
 #include "xla/service/backend.h"
 #include "xla/service/buffer_assignment.h"
-#include "xla/service/computation_placer.h"
+#include "xla/service/device_assignment.h"
 #include "xla/service/executable.h"
 #include "xla/service/gpu/buffer_allocations.h"
 #include "xla/service/gpu/gpu_constants.h"
@@ -169,7 +169,7 @@ static RaggedAllToAllThunk MakeOneRankThunk(
     buffers.push_back(MakeBuffer(allocations[i], S64, kNumOneRankUpdates));
   }
   return RaggedAllToAllThunk(Thunk::ThunkInfo(), MakeOneRankConfig(),
-                             std::move(buffers));
+                             std::move(buffers), /*devices_per_host=*/1);
 }
 
 static std::vector<se::DeviceAddressBase> AllocateOneRankDeviceBuffers(
@@ -200,7 +200,7 @@ static std::vector<float> OneRankExpectedValues(int phase) {
 static absl::Status WriteBuffer(se::Stream& stream,
                                 se::DeviceAddressBase buffer,
                                 const std::vector<float>& data) {
-  RETURN_IF_ERROR(
+  ABSL_RETURN_IF_ERROR(
       stream.Memcpy(&buffer, data.data(), data.size() * sizeof(float)));
   return absl::OkStatus();
 }
@@ -208,7 +208,7 @@ static absl::Status WriteBuffer(se::Stream& stream,
 static absl::Status WriteBuffer(se::Stream& stream,
                                 se::DeviceAddressBase buffer,
                                 const std::vector<int64_t>& data) {
-  RETURN_IF_ERROR(
+  ABSL_RETURN_IF_ERROR(
       stream.Memcpy(&buffer, data.data(), data.size() * sizeof(int64_t)));
   return absl::OkStatus();
 }
@@ -216,29 +216,29 @@ static absl::Status WriteBuffer(se::Stream& stream,
 static absl::Status PrepareOneRankInputs(
     se::Stream& stream, absl::Span<const se::DeviceAddressBase> buffers,
     int phase) {
-  RETURN_IF_ERROR(WriteBuffer(stream, buffers[0], OneRankInputValues(phase)));
-  RETURN_IF_ERROR(WriteBuffer(stream, buffers[1],
+  ABSL_RETURN_IF_ERROR(WriteBuffer(stream, buffers[0], OneRankInputValues(phase)));
+  ABSL_RETURN_IF_ERROR(WriteBuffer(stream, buffers[1],
                               std::vector<float>(kNumOneRankElements, -1.0f)));
-  RETURN_IF_ERROR(WriteBuffer(stream, buffers[2], std::vector<int64_t>{0, 2}));
-  RETURN_IF_ERROR(WriteBuffer(stream, buffers[3], std::vector<int64_t>{1, 2}));
-  RETURN_IF_ERROR(WriteBuffer(stream, buffers[4], std::vector<int64_t>{1, 2}));
-  RETURN_IF_ERROR(WriteBuffer(stream, buffers[5], std::vector<int64_t>{1, 2}));
+  ABSL_RETURN_IF_ERROR(WriteBuffer(stream, buffers[2], std::vector<int64_t>{0, 2}));
+  ABSL_RETURN_IF_ERROR(WriteBuffer(stream, buffers[3], std::vector<int64_t>{1, 2}));
+  ABSL_RETURN_IF_ERROR(WriteBuffer(stream, buffers[4], std::vector<int64_t>{1, 2}));
+  ABSL_RETURN_IF_ERROR(WriteBuffer(stream, buffers[5], std::vector<int64_t>{1, 2}));
   return stream.BlockHostUntilDone();
 }
 
 static absl::StatusOr<std::vector<float>> ReadOneRankOutput(
     se::Stream& stream, se::DeviceAddressBase buffer) {
   std::vector<float> output(kNumOneRankElements);
-  RETURN_IF_ERROR(
+  ABSL_RETURN_IF_ERROR(
       stream.Memcpy(output.data(), buffer, output.size() * sizeof(float)));
-  RETURN_IF_ERROR(stream.BlockHostUntilDone());
+  ABSL_RETURN_IF_ERROR(stream.BlockHostUntilDone());
   return output;
 }
 
 static absl::Status VerifyOneRankOutput(se::Stream& stream,
                                         se::DeviceAddressBase buffer,
                                         int phase) {
-  ASSIGN_OR_RETURN(std::vector<float> output,
+  ABSL_ASSIGN_OR_RETURN(std::vector<float> output,
                    ReadOneRankOutput(stream, buffer));
   std::vector<float> expected = OneRankExpectedValues(phase);
   for (int i = 0; i < output.size(); ++i) {
@@ -430,12 +430,13 @@ TEST_F(GpuRaggedAllToAllTest, TestConvertToCommands) {
   // ThunkSequence Creation
   auto ra2a_start_thunk = std::make_unique<RaggedAllToAllThunk>(
       Thunk::ThunkInfo{}, ra2a_instr, std::move(buffers),
-      /*p2p_memcpy_enabled=*/false);
+      /*p2p_memcpy_enabled=*/false, /*devices_per_host=*/1);
 
   ThunkSequence start_sequence;
   start_sequence.push_back(std::move(ra2a_start_thunk));
   auto async_start = std::make_unique<AsyncStartThunk>(
-      Thunk::ThunkInfo(), CommunicationStreamId(0), std::move(start_sequence));
+      Thunk::ThunkInfo(), CommunicationStreamId(0), std::move(start_sequence),
+      /*devices_per_host=*/1);
   auto async_done = std::make_unique<AsyncDoneThunk>(
       Thunk::ThunkInfo(), async_start->async_execution());
 
@@ -539,6 +540,7 @@ TEST(CollectiveThunkTest, ProtoRoundTrip) {
           num_input_rows: 2
           num_row_elements: 5
           one_shot_kernel_enabled: true
+          enable_gxl: true
         }
       )pb");
 
@@ -551,7 +553,8 @@ TEST(CollectiveThunkTest, ProtoRoundTrip) {
   ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<RaggedAllToAllThunk> thunk,
       RaggedAllToAllThunk::FromProto(
-          thunk_info, proto.ragged_all_to_all_thunk(), buffer_allocations));
+          thunk_info, proto.ragged_all_to_all_thunk(), buffer_allocations,
+          /*devices_per_host=*/1));
 
   // We're not setting the fast interconnect slice size override in the
   // proto, so it should be nullopt in the thunk.

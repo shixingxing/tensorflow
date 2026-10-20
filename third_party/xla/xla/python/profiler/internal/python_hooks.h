@@ -15,7 +15,13 @@ limitations under the License.
 #ifndef XLA_PYTHON_PROFILER_INTERNAL_PYTHON_HOOKS_H_
 #define XLA_PYTHON_PROFILER_INTERNAL_PYTHON_HOOKS_H_
 
+#include <Python.h>
+#if PY_VERSION_HEX < 0x030b0000
+#include <frameobject.h>
+#endif
+
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -24,12 +30,11 @@ limitations under the License.
 #include <stack>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/memory/memory.h"
-#include "pybind11/cast.h"
-#include "pybind11/pybind11.h"
-#include "pybind11/pytypes.h"
+#include "absl/strings/string_view.h"
 #include "xla/tsl/platform/macros.h"
 #include "tsl/profiler/protobuf/xplane.pb.h"
 
@@ -40,8 +45,6 @@ limitations under the License.
 namespace xla {
 namespace profiler {
 
-namespace py = ::pybind11;
-
 struct PythonHooksOptions {
   bool enable_trace_python_function = false;
   bool enable_python_traceme = true;
@@ -51,6 +54,17 @@ struct PythonHooksOptions {
   // result, profiler start, end time are used respectively to the absent
   // timestamps.
   bool include_incomplete_events = true;
+};
+
+struct TraceEventInfo {
+  std::string name;
+  uint64_t start_time_ns;
+  uint64_t end_time_ns;
+};
+
+struct PerThreadConsumeData {
+  int64_t thread_id;
+  std::vector<TraceEventInfo> events;
 };
 
 struct PythonTraceEntry {
@@ -81,15 +95,18 @@ struct PythonTraceEntry {
   }
 
   ~PythonTraceEntry() {
-    Py_XDECREF(co_filename);
-    Py_XDECREF(co_name);
-    Py_XDECREF(m_module);
+    if (owns_python_refs) {
+      Py_XDECREF(co_filename);
+      Py_XDECREF(co_name);
+      Py_XDECREF(m_module);
+    }
   }
 
   PythonTraceEntry(PythonTraceEntry&& other) noexcept {
     start_time_ns = other.start_time_ns;
     end_time_ns = other.end_time_ns;
     co_firstlineno = other.co_firstlineno;
+    owns_python_refs = other.owns_python_refs;
     co_filename = other.co_filename;
     co_name = other.co_name;
     method_name = std::move(other.method_name);
@@ -100,6 +117,7 @@ struct PythonTraceEntry {
     other.m_module = nullptr;
   }
 
+  // Returns the trace event name. Requires the GIL.
   std::string Name() const;
 
   uint64_t start_time_ns;
@@ -107,6 +125,10 @@ struct PythonTraceEntry {
   PyObject* co_filename = nullptr;
   PyObject* co_name = nullptr;
   int co_firstlineno = 0;
+  // Whether this entry holds the references to `co_filename`, `co_name`, and
+  // `m_module`. Consume() takes the references over and then uses the pointers
+  // only as lookup keys, without dereferencing them.
+  bool owns_python_refs = true;
   std::string method_name;
   PyObject* m_module = nullptr;
 
@@ -128,6 +150,7 @@ class PythonHookContext {
  public:
   ~PythonHookContext();
   void Finalize(tensorflow::profiler::XSpace* space);
+  std::vector<PerThreadConsumeData> Consume();
 
   friend class ::xla::profiler::PythonHooks;
 
@@ -137,8 +160,12 @@ class PythonHookContext {
   void ProfileFast(PyFrameObject* frame, int what, PyObject* arg);
   void CollectData(tensorflow::profiler::XPlane* raw_plane);
 
-  static void SetProfilerInAllThreads();
-  static void ClearProfilerInAllThreads();
+  static bool SetProfilerInAllThreads();
+  static bool ClearProfilerInAllThreads();
+  static bool RegisterAtexitCallback();
+  static PyObject* PyProfileCallback(PyObject* self, PyObject* const* args,
+                                     Py_ssize_t nargs);
+  static PyObject* PyAtexitCallback(PyObject* self, PyObject* args);
 
   void operator=(const PythonHookContext&) = delete;
   void operator=(PythonHookContext&&) = delete;
@@ -162,6 +189,7 @@ class PythonHookContext {
   std::array<EntryShard, kNumEntryShards> entry_shards_;
   uint64_t start_timestamp_ns_;
   PythonHooksOptions options_;
+  std::atomic<bool> stopped_ = false;
   // In end to end mode, Python get uninitialized before Stop()/Finalize(), we
   // need to buffer the result.
   std::optional<tensorflow::profiler::XPlane> end_to_end_xplane_;
@@ -196,11 +224,21 @@ class PythonHooks {
     return output;
   }
 
+  std::vector<PerThreadConsumeData> Consume() {
+    if (!active_context_) {
+      return {};
+    }
+    if (Py_IsInitialized()) {
+      return active_context_->Consume();
+    }
+    return {};
+  }
+
   friend class ::xla::profiler::PythonHookContext;
 
  private:
-  void ProfileSlow(const py::object& frame, const std::string& event,
-                   const py::object& arg);
+  void ProfileSlow(PyFrameObject* frame, absl::string_view event,
+                   PyObject* arg);
 
   void ProfileFast(PyFrameObject* frame, int what, PyObject* arg) {
     if (TF_PREDICT_TRUE(active_context_)) {

@@ -29,10 +29,10 @@ limitations under the License.
 #include "absl/container/btree_map.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/ascii.h"
 #include "absl/types/span.h"
-#include "xla/tsl/platform/status_macros.h"
 #include "xla/backends/gpu/collectives/cancellation_token.h"
 #include "xla/backends/gpu/collectives/gpu_clique.h"
 #include "xla/backends/gpu/collectives/gpu_clique_key.h"
@@ -52,7 +52,7 @@ limitations under the License.
 #include "xla/future.h"
 #include "xla/runtime/device_id.h"
 #include "xla/service/buffer_assignment.h"
-#include "xla/service/computation_placer.h"
+#include "xla/service/device_assignment.h"
 #include "xla/service/gpu/buffer_allocations.h"
 #include "xla/service/platform_util.h"
 #include "xla/service/service_executable_run_options.h"
@@ -200,7 +200,7 @@ class MemzeroAllToAllThunk : public AllToAllThunk {
   MemzeroAllToAllThunk(Thunk::ThunkInfo thunk_info, AllToAllConfig config,
                        std::vector<CollectiveThunk::Buffer> buffers)
       : AllToAllThunk(std::move(thunk_info), config, std::move(buffers),
-                      /*p2p_memcpy_enabled=*/false) {}
+                      /*p2p_memcpy_enabled=*/false, /*devices_per_host=*/1) {}
 
  protected:
   absl::Status RunCollective(const ExecuteParams& params, const GpuCliqueKey&,
@@ -241,7 +241,7 @@ TEST(CollectiveThunkTest, ProtoRoundTrip) {
   ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<AllToAllThunk> thunk,
       AllToAllThunk::FromProto(thunk_info, proto.all_to_all_thunk(),
-                               buffer_allocations));
+                               buffer_allocations, /*devices_per_host=*/1));
 
   ASSERT_OK_AND_ASSIGN(ThunkProto round_trip_proto, thunk->ToProto());
 
@@ -280,11 +280,11 @@ static absl::Status InitCollectiveTestState(se::Stream* stream,
   state->run_options.mutable_run_options()->set_device_assignment(
       &state->device_assignment);
 
-  ASSIGN_OR_RETURN(
+  ABSL_ASSIGN_OR_RETURN(
       CollectiveParams collective_params,
       CollectiveParams::Create(state->run_options,
                                /*async_streams=*/{}, LocalDeviceId(0)));
-  ASSIGN_OR_RETURN(
+  ABSL_ASSIGN_OR_RETURN(
       GpuCliqueKey clique_key,
       GetGpuCliqueKey(collective_params, thunk.config().replica_groups,
                       thunk.config().group_mode, thunk.communication_id()));
@@ -307,15 +307,15 @@ static absl::Status FillDeviceBuffer(se::Stream& stream,
                                      se::DeviceAddressBase buffer,
                                      int64_t length, float value) {
   std::vector<float> data(length, value);
-  RETURN_IF_ERROR(stream.Memcpy(&buffer, data.data(), sizeof(float) * length));
+  ABSL_RETURN_IF_ERROR(stream.Memcpy(&buffer, data.data(), sizeof(float) * length));
   return stream.BlockHostUntilDone();
 }
 
 static absl::StatusOr<std::vector<float>> ReadDeviceBuffer(
     se::Stream& stream, se::DeviceAddressBase buffer, int64_t length) {
   std::vector<float> data(length);
-  RETURN_IF_ERROR(stream.Memcpy(data.data(), buffer, sizeof(float) * length));
-  RETURN_IF_ERROR(stream.BlockHostUntilDone());
+  ABSL_RETURN_IF_ERROR(stream.Memcpy(data.data(), buffer, sizeof(float) * length));
+  ABSL_RETURN_IF_ERROR(stream.BlockHostUntilDone());
   return data;
 }
 

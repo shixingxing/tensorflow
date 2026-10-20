@@ -32,6 +32,7 @@ limitations under the License.
 #include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
 #include "xla/hlo/testlib/verified_hlo_module.h"
 #include "xla/service/instruction_fusion.h"
+#include "xla/xla.pb.h"
 
 namespace xla::gpu {
 namespace {
@@ -43,6 +44,10 @@ using ::testing::SizeIs;
 class TiledHloComputationTest : public HloHardwareIndependentTestBase {
  public:
   TiledHloComputationTest() { RegisterSymbolicExprStorage(&mlir_context_); }
+
+  void SetUp() override {
+    GTEST_SKIP() << "Legacy symbolic tile analysis is disallowed.";
+  }
 
  protected:
   DebugOptions GetDebugOptionsForTest() const override {

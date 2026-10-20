@@ -24,9 +24,9 @@ limitations under the License.
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
-#include "xla/tsl/platform/status_macros.h"
 #include "xla/backends/gpu/transforms/collectives/collective_ops_utils.h"
 #include "xla/hlo/analysis/hlo_dataflow_analysis.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
@@ -37,6 +37,7 @@ limitations under the License.
 #include "xla/service/collective_ops_utils.h"
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/flag_utils.h"
+#include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/service/gpu/model/collective_interpolator.h"
 #include "xla/service/gpu/model/gpu_hlo_cost_analysis.h"
 #include "xla/service/gpu/model/gpu_performance_model.h"
@@ -62,6 +63,26 @@ bool IsSupportedCollectiveOp(const HloInstruction& instr) {
                           HloOpcode::kCollectivePermuteStart,
                           HloOpcode::kCollectivePermute, HloOpcode::kAllGather>(
       &instr);
+}
+
+bool IsTritonCollectiveFusion(const HloInstruction& instr) {
+  if (!instr.IsCustomFusion()) {
+    return false;
+  }
+  absl::StatusOr<GpuBackendConfig> gpu_config =
+      instr.backend_config<GpuBackendConfig>();
+  return gpu_config.ok() && gpu_config->fusion_backend_config().kind() ==
+                                kTritonCollectiveFusionKind;
+}
+
+bool IsAsyncTritonCollectiveFusionStart(const HloInstruction& instr) {
+  return instr.opcode() == HloOpcode::kAsyncStart &&
+         IsTritonCollectiveFusion(*instr.async_wrapped_instruction());
+}
+
+bool IsAsyncTritonCollectiveFusionDone(const HloInstruction& instr) {
+  return instr.opcode() == HloOpcode::kAsyncDone &&
+         IsTritonCollectiveFusion(*instr.async_wrapped_instruction());
 }
 
 bool IsHostOffloaded(const HloInstruction& instr) {
@@ -90,8 +111,8 @@ absl::StatusOr<HloInstructionProfileList> ReadProfiles(
     const se::DeviceDescription& device_info) {
   DeviceHloInstructionProfiles profile;
 
-  RETURN_IF_ERROR(tsl::Env::Default()->FileExists(perf_table_path));
-  RETURN_IF_ERROR(tsl::ReadTextOrBinaryProto(tsl::Env::Default(),
+  ABSL_RETURN_IF_ERROR(tsl::Env::Default()->FileExists(perf_table_path));
+  ABSL_RETURN_IF_ERROR(tsl::ReadTextOrBinaryProto(tsl::Env::Default(),
                                              perf_table_path, &profile));
   std::string key = HloOpProfiles::GetDeviceSpecificProfileName(device_info);
 
@@ -118,7 +139,7 @@ absl::StatusOr<absl::Duration> DCNCollectiveDuration(
   switch (instr.opcode()) {
     case HloOpcode::kAllGather:
     case HloOpcode::kAllGatherStart: {
-      ASSIGN_OR_RETURN(
+      ABSL_ASSIGN_OR_RETURN(
           absl::Duration runtime,
           sol_model.RingLatency(msg_size, num_participating_hosts,
                                 SolGPUCostModel::CollectiveType::kAllGather,
@@ -127,7 +148,7 @@ absl::StatusOr<absl::Duration> DCNCollectiveDuration(
       break;
     }
     case HloOpcode::kAllToAll: {
-      ASSIGN_OR_RETURN(
+      ABSL_ASSIGN_OR_RETURN(
           absl::Duration runtime,
           sol_model.AllToAllLatency(msg_size, num_participating_hosts,
                                     num_communicators));
@@ -139,7 +160,7 @@ absl::StatusOr<absl::Duration> DCNCollectiveDuration(
       result += gpu_performance_model.Get()
                     .EstimateRunTimeForInstruction(&instr, &analysis)
                     .compute_time;
-      ASSIGN_OR_RETURN(
+      ABSL_ASSIGN_OR_RETURN(
           absl::Duration runtime,
           sol_model.RingLatency(msg_size, num_participating_hosts,
                                 SolGPUCostModel::CollectiveType::kAllReduce,
@@ -151,7 +172,7 @@ absl::StatusOr<absl::Duration> DCNCollectiveDuration(
       result += gpu_performance_model.Get()
                     .EstimateRunTimeForInstruction(&instr, &analysis)
                     .compute_time;
-      ASSIGN_OR_RETURN(
+      ABSL_ASSIGN_OR_RETURN(
           absl::Duration runtime,
           sol_model.RingLatency(msg_size, num_participating_hosts,
                                 SolGPUCostModel::CollectiveType::kReduceScatter,
@@ -165,7 +186,7 @@ absl::StatusOr<absl::Duration> DCNCollectiveDuration(
                       .EstimateRunTimeForInstruction(
                           instr.async_wrapped_instruction(), &analysis)
                       .compute_time;
-        ASSIGN_OR_RETURN(absl::Duration runtime,
+        ABSL_ASSIGN_OR_RETURN(absl::Duration runtime,
                          sol_model.RingLatency(
                              msg_size, num_participating_hosts,
                              SolGPUCostModel::CollectiveType::kReduceScatter,
@@ -173,7 +194,7 @@ absl::StatusOr<absl::Duration> DCNCollectiveDuration(
         result += runtime;
       }
       if (instr.async_wrapped_opcode() == HloOpcode::kAllToAll) {
-        ASSIGN_OR_RETURN(
+        ABSL_ASSIGN_OR_RETURN(
             absl::Duration runtime,
             sol_model.AllToAllLatency(msg_size, num_participating_hosts,
                                       num_communicators));
@@ -185,7 +206,7 @@ absl::StatusOr<absl::Duration> DCNCollectiveDuration(
     case HloOpcode::kSend:
     case HloOpcode::kCollectivePermute:
     case HloOpcode::kCollectivePermuteStart: {
-      ASSIGN_OR_RETURN(
+      ABSL_ASSIGN_OR_RETURN(
           absl::Duration runtime,
           sol_model.RingLatency(msg_size, num_participating_hosts,
                                 SolGPUCostModel::CollectiveType::kSendRecv,
@@ -222,10 +243,10 @@ absl::StatusOr<absl::Duration> DispatchEstimation(
     const SolGPUCostModel::Config& sol_flags,
     const GpuHloCostAnalysis& analysis,
     const CollectiveInterpolator* collective_interpolator) {
-  RETURN_IF_ERROR(communication_type.status());
+  ABSL_RETURN_IF_ERROR(communication_type.status());
 
   GPUCommunicationType comm = *communication_type;
-  ASSIGN_OR_RETURN(auto num_groups_and_devices,
+  ABSL_ASSIGN_OR_RETURN(auto num_groups_and_devices,
                    GetReplicaGroupCountAndSize(&instr));
   if (!num_groups_and_devices.has_value()) {
     return absl::InvalidArgumentError(absl::StrCat(
@@ -251,27 +272,22 @@ absl::StatusOr<absl::Duration> DispatchEstimation(
       // If an intra-node collective kernel will be used (Triton codegen kernel
       // — uses the NVLink-based cost formula), apply the NVLink model instead
       // of the NCCL-calibrated CollectiveInterpolator.
-      absl::StatusOr<GpuBackendConfig> backend_cfg =
-          instr.backend_config<GpuBackendConfig>();
-      if (backend_cfg.ok()) {
-        const auto ks =
-            backend_cfg->collective_backend_config().kernel_strategy();
-        if (IsTritonCollectiveKernel(ks)) {
-          SolGPUCostModel sol_model(sol_flags);
-          const int num_gpus = num_groups_and_devices->second;
-          const int active_links =
-              gpu_device_info.device_interconnect_info().active_links;
-          const int64_t size_bytes =
-              static_cast<int64_t>(analysis.BytesTransferred(instr));
-          // Add HBM time (reading/writing local buffers) on top of NVLink time.
-          absl::Duration hbm_time =
-              absl::Seconds(1.0f * analysis.bytes_accessed(instr) /
-                            gpu_device_info.memory_bandwidth());
-          ASSIGN_OR_RETURN(absl::Duration nvlink_time,
-                           sol_model.IntraNodeAllReduceLatency(
-                               size_bytes, num_gpus, active_links));
-          return hbm_time + nvlink_time;
-        }
+      if (instr.IsFused() &&
+          IsTritonCollectiveFusion(*instr.parent()->FusionInstruction())) {
+        SolGPUCostModel sol_model(sol_flags);
+        const int num_gpus = num_groups_and_devices->second;
+        const int active_links =
+            gpu_device_info.device_interconnect_info().active_links;
+        const int64_t size_bytes =
+            static_cast<int64_t>(analysis.BytesTransferred(instr));
+        // Add HBM time (reading/writing local buffers) on top of NVLink time.
+        absl::Duration hbm_time =
+            absl::Seconds(1.0f * analysis.bytes_accessed(instr) /
+                          gpu_device_info.memory_bandwidth());
+        ABSL_ASSIGN_OR_RETURN(absl::Duration nvlink_time,
+                         sol_model.IntraNodeAllReduceLatency(
+                             size_bytes, num_gpus, active_links));
+        return hbm_time + nvlink_time;
       }
       // NCCL intra-node collective: use empirical CollectiveInterpolator.
       if (collective_interpolator == nullptr) {
@@ -287,7 +303,8 @@ absl::StatusOr<absl::Duration> DispatchEstimation(
 }
 
 absl::StatusOr<std::unique_ptr<CollectiveInterpolator>>
-CreateCollectiveInterpolator(int num_devices_per_host, const HloModule& module,
+CreateCollectiveInterpolator(int num_devices_per_partition,
+                             const HloModule& module,
                              const se::DeviceDescription& device_info,
                              const GpuHloCostAnalysis& analysis) {
   absl::StatusOr<HloInstructionProfileList> collective_profiles =
@@ -297,10 +314,11 @@ CreateCollectiveInterpolator(int num_devices_per_host, const HloModule& module,
                    device_info);
   std::unique_ptr<CollectiveInterpolator> collective_interpolator;
   if (collective_profiles.ok()) {
-    return CollectiveInterpolator::Create(
-        num_devices_per_host, *collective_profiles, device_info, &analysis);
+    return CollectiveInterpolator::Create(num_devices_per_partition,
+                                          *collective_profiles, device_info,
+                                          &analysis);
   }
-  return CollectiveInterpolator::Create(num_devices_per_host, device_info,
+  return CollectiveInterpolator::Create(num_devices_per_partition, device_info,
                                         &analysis);
 }
 
@@ -358,6 +376,9 @@ SolLatencyEstimator::ComputeCollectiveTime(
 
   const HloInstruction* collective =
       instr.IsAsynchronous() ? instr.async_wrapped_instruction() : &instr;
+  if (IsTritonCollectiveFusion(*collective)) {
+    collective = collective->fused_expression_root();
+  }
   if (const auto* cp = DynCast<HloCollectivePermuteInstruction>(collective)) {
     // Handles the collective-permute ops.
     int64_t partition_size = GetPartitionSize(*cp, sol_flags);
@@ -374,7 +395,7 @@ SolLatencyEstimator::ComputeCollectiveTime(
       case CollectivePermuteCostModelType::kInterPartitionTwoWayHasNonMutual: {
         // TODO(wfelix): Distinguish different types of inter-partition
         // collectives.
-        ASSIGN_OR_RETURN(
+        ABSL_ASSIGN_OR_RETURN(
             absl::Duration duration,
             DCNCollectiveDuration(/*num_participating_hosts=*/2,
                                   /*num_communicators=*/1, *cp, gpu_device_info,
@@ -389,11 +410,11 @@ SolLatencyEstimator::ComputeCollectiveTime(
                  DynCast<HloCollectiveInstruction>(collective)) {
     // Handles the collective ops.
     int64_t partition_size = GetPartitionSize(*collective_instr, sol_flags);
-    ASSIGN_OR_RETURN(
+    ABSL_ASSIGN_OR_RETURN(
         GPUCommunicationType communication_type,
         CommunicationType(partition_size, *collective_instr,
                           gpu_device_info.gpu_compute_capability()));
-    ASSIGN_OR_RETURN(absl::Duration result,
+    ABSL_ASSIGN_OR_RETURN(absl::Duration result,
                      DispatchEstimation(communication_type, *collective_instr,
                                         gpu_device_info, sol_flags, analysis,
                                         collective_interpolator));
@@ -420,16 +441,16 @@ SolLatencyEstimator::Create(
             /*min_latencies_seconds=*/{},
             /*count_multiple_input_accesses=*/true,
         });
-    RETURN_IF_ERROR(computation->Accept(cost_analysis.get()));
+    ABSL_RETURN_IF_ERROR(computation->Accept(cost_analysis.get()));
   }
   SolGPUCostModel::Config sol_config =
       SolGPUCostModel::GetConfig(computation->parent(), gpu_info);
-  ASSIGN_OR_RETURN(
+  ABSL_ASSIGN_OR_RETURN(
       std::unique_ptr<CollectiveInterpolator> collective_interpolator,
-      CreateCollectiveInterpolator(sol_config.gpus_per_node,
-                                   *computation->parent(), gpu_info,
-                                   *cost_analysis));
-  ASSIGN_OR_RETURN(std::unique_ptr<MatmulInterpolator> matmul_interpolator,
+      CreateCollectiveInterpolator(
+          GetPartitionSize(*computation->root_instruction(), sol_config),
+          *computation->parent(), gpu_info, *cost_analysis));
+  ABSL_ASSIGN_OR_RETURN(std::unique_ptr<MatmulInterpolator> matmul_interpolator,
                    CreateMatmulInterpolator(*computation->parent(), gpu_info));
   return std::unique_ptr<SolLatencyEstimator>(new SolLatencyEstimator(
       config, std::move(latency_estimator), gpu_info, std::move(cost_analysis),
@@ -439,12 +460,14 @@ SolLatencyEstimator::Create(
 
 /*static*/ bool SolLatencyEstimator::IsSupportedForModule(
     const HloModule& module, const se::DeviceDescription& gpu_device_info) {
+  const se::GpuComputeCapability& cc = gpu_device_info.gpu_compute_capability();
   bool is_supported_device =
       gpu_device_info.cuda_compute_capability().IsHopper() ||
-      gpu_device_info.cuda_compute_capability().IsBlackwell();
+      gpu_device_info.cuda_compute_capability().IsBlackwell() ||
+      (cc.IsRocm() && cc.rocm_compute_capability()->gfx9_mi300_series());
   if (IsPassEnabledAtOptimizationEffort<LatencyHidingScheduler>(module)) {
     // If the user enabled opt effort we turn the estimator on if we're
-    // compiling for Hopper/Blackwell.
+    // compiling for a supported device.
     return is_supported_device;
   }
   // If this flag is on by default then we provide users an escape hatch in case
@@ -454,8 +477,9 @@ SolLatencyEstimator::Create(
            .xla_gpu_enable_analytical_sol_latency_estimator()) {
     return false;
   }
-  // Otherwise we are more conservative and we turn it on only for
-  // Hopper/Blackwell and if `module` contains only supported collectives.
+  // Otherwise we are more conservative and we turn it on only for supported
+  // devices (Hopper/Blackwell/gfx942/gfx950) and if `module` contains only
+  // supported collectives.
   return is_supported_device && HasOnlySupportedCollectives(module);
 }
 
@@ -469,23 +493,17 @@ LatencyEstimator::TimeCost SolLatencyEstimator::GetLatencyBetween(
     return kLowLatency;
   }
 
-  // For sync intra-node AllReduce (Triton codegen kernel annotated as
-  // TRITON_ONE_SHOT / TRITON_TWO_SHOT) the kernel runs on the compute stream
-  // and fully blocks further compute — no overlap is possible between start
-  // and done.  NodeCost() already reports the full blocking latency on the
-  // critical path, so return kLowLatency here to avoid double-counting.
-  {
-    absl::StatusOr<GpuBackendConfig> cfg =
-        from.GetInstr().backend_config<GpuBackendConfig>();
-    if (cfg.ok() && cfg->collective_backend_config().is_sync()) {
-      const auto ks = cfg->collective_backend_config().kernel_strategy();
-      if (IsTritonCollectiveKernel(ks)) {
-        VLOG(10) << "GetLatencyBetween: Returning kLowLatency for sync "
-                    "intra-node AllReduce (cost already in NodeCost): "
-                 << from.GetInstr().name();
-        return kLowLatency;
-      }
-    }
+  // For sync intra-node AllReduce (Triton collective fusion) the kernel runs on
+  // the compute stream and fully blocks further compute — no overlap is
+  // possible between start and done. NodeCost() already reports the full
+  // blocking latency on the critical path, so return kLowLatency here to avoid
+  // double-counting.
+  if (IsAsyncTritonCollectiveFusionStart(from.GetInstr()) &&
+      IsGPUSyncCollective(from.GetInstr())) {
+    VLOG(10) << "GetLatencyBetween: Returning kLowLatency for sync "
+                "intra-node AllReduce (cost already in NodeCost): "
+             << from.GetInstr().name();
+    return kLowLatency;
   }
 
   if (!IsAsyncPair(from, target) && !IsSupportedCollectiveOp(from.GetInstr())) {
@@ -520,31 +538,27 @@ LatencyEstimator::TimeCost SolLatencyEstimator::NodeCost(
   if (const std::optional<TimeCost> latency = GetLatencyFromMetadata(*instr)) {
     return *latency;
   }
-  // Sync intra-node AllReduce kernels (Triton codegen, annotated as
-  // TRITON_ONE_SHOT / TRITON_TWO_SHOT) run on the compute stream and block
-  // compute entirely.  Their full latency is on the critical path, so we must
-  // report it here as NodeCost rather than as a hidden GetLatencyBetween.
-  if (hlo_query::IsAsyncCollectiveStartOp(instr, /*include_send_recv=*/true)) {
-    absl::StatusOr<GpuBackendConfig> cfg =
-        instr->backend_config<GpuBackendConfig>();
-    if (cfg.ok() && cfg->collective_backend_config().is_sync()) {
-      const auto ks = cfg->collective_backend_config().kernel_strategy();
-      if (IsTritonCollectiveKernel(ks)) {
-        absl::StatusOr<absl::Duration> t = ComputeCollectiveTime(
-            *instr, gpu_info_, shape_size_function_, sol_flags_,
-            *cost_analysis_, collective_interpolator_.get());
-        if (t.ok()) {
-          VLOG(10) << "NodeCost: Sync intra-node AllReduce cost for "
-                   << instr->name() << ": " << absl::ToDoubleMicroseconds(*t)
-                   << " us";
-          return absl::ToDoubleMicroseconds(*t);
-        }
-      }
+  // Sync intra-node AllReduce kernels (Triton collective fusions) run on the
+  // compute stream and block compute entirely. Their full latency is on the
+  // critical path, so we must report it here as NodeCost rather than as a
+  // hidden GetLatencyBetween.
+  if (IsAsyncTritonCollectiveFusionStart(*instr) &&
+      IsGPUSyncCollective(*instr)) {
+    absl::StatusOr<absl::Duration> t = ComputeCollectiveTime(
+        *instr, gpu_info_, shape_size_function_, sol_flags_, *cost_analysis_,
+        collective_interpolator_.get());
+    if (t.ok()) {
+      VLOG(10) << "NodeCost: Sync intra-node AllReduce cost for "
+               << instr->name() << ": " << absl::ToDoubleMicroseconds(*t)
+               << " us";
+      return absl::ToDoubleMicroseconds(*t);
     }
   }
 
   if (hlo_query::IsAsyncCollectiveStartOp(instr, /*include_send_recv=*/true) ||
-      hlo_query::IsAsyncCollectiveDoneOp(instr, /*include_send_recv=*/true)) {
+      hlo_query::IsAsyncCollectiveDoneOp(instr, /*include_send_recv=*/true) ||
+      IsAsyncTritonCollectiveFusionStart(*instr) ||
+      IsAsyncTritonCollectiveFusionDone(*instr)) {
     VLOG(10) << "NodeCost: Returning kLowCost for async start/done op "
              << instr->name();
     return kLowCost;

@@ -30,9 +30,9 @@ limitations under the License.
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
-#include "xla/tsl/platform/status_macros.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_module.h"
@@ -487,7 +487,8 @@ HloInstruction* PerGroupSliceFromReplicated(
     HloInstruction* replicated, HloInstruction* partition_id,
     const hlo_sharding_util::DeviceGroupTileAssignment& device_groups,
     absl::Span<const int64_t> group_dims,
-    absl::Span<const int64_t> group_dim_sizes, SpmdBuilder* b);
+    absl::Span<const int64_t> group_dim_sizes, SpmdBuilder* b,
+    std::optional<Literal> pad_value = std::nullopt);
 
 // Pad the shape from partial replicate shape for `dst_sharding`.
 // If dst_sharding needs more padding and per_shard_size increased in
@@ -900,7 +901,7 @@ absl::StatusOr<std::pair<int64_t, int64_t>> EvaluatePartitionCost(
       0, ShapeUtil::MakeShape(F32, {}), "input"));
   HloComputation* temp_entry = fake_module.AddEntryComputation(temp_b.Build());
 
-  ASSIGN_OR_RETURN(SpmdPartitioningVisitor * visitor,
+  ABSL_ASSIGN_OR_RETURN(SpmdPartitioningVisitor * visitor,
                    detail::FindSpmdPartitioningVisitor(
                        std::forward<Args>(partition_method_args)...));
   SpmdPartitioner* partitioner = visitor->partitioner();
@@ -909,7 +910,7 @@ absl::StatusOr<std::pair<int64_t, int64_t>> EvaluatePartitionCost(
   auto* fake_b = fake_visitor->builder();
   fake_b->set_visiting_hlo(temp_p);
   auto parameter_count = std::make_unique<int>(0);
-  ASSIGN_OR_RETURN(HloInstruction * new_hlo,
+  ABSL_ASSIGN_OR_RETURN(HloInstruction * new_hlo,
                    partition_method(detail::ArgModifier(
                        std::forward<Args>(partition_method_args), &fake_module,
                        parameter_count.get(), fake_visitor.get())...));
@@ -931,7 +932,7 @@ absl::StatusOr<std::pair<int64_t, int64_t>> EvaluatePartitionCost(
   fake_module.ReplaceComputations(replacement);
 
   HloDCE hlo_dce;
-  ASSIGN_OR_RETURN(auto _,
+  ABSL_ASSIGN_OR_RETURN(auto _,
                    hlo_dce.Run(&fake_module, partitioner->execution_threads()));
   (void)_;  // Suppress unused variable warning in OSS
   VLOG(5) << "Dry-run partitioning for op: " << original_hlo->ToString() << "\n"

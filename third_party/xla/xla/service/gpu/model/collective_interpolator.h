@@ -70,10 +70,7 @@ class CollectiveInterpolator {
                            h = H::combine(std::move(h), permute_type);
                          },
                          [&](const CollectiveDeviceList& device_list) {
-                           h = H::combine(std::move(h),
-                                          device_list.ToString(
-                                              /*print_full_replica_group_list=*/
-                                              true));
+                           h = H::combine(std::move(h), device_list.ToString());
                          }},
           key.collective_params);
       return h;
@@ -92,11 +89,9 @@ class CollectiveInterpolator {
                                            other.collective_params);
               },
               [&](const CollectiveDeviceList& device_list) {
-                return device_list.ToString(
-                           /*print_full_replica_group_list=*/true) ==
+                return device_list.ToString() ==
                        std::get<CollectiveDeviceList>(other.collective_params)
-                           .ToString(
-                               /*print_full_replica_group_list=*/true);
+                           .ToString();
               }},
           collective_params);
     }
@@ -109,12 +104,12 @@ class CollectiveInterpolator {
       ExactInterpolatorKey, std::unique_ptr<InterpolatorBase<int64_t, 1>>>>;
 
   static absl::StatusOr<std::unique_ptr<CollectiveInterpolator>> Create(
-      int num_devices_per_host, const HloInstructionProfileList& profiles,
+      int num_devices_per_partition, const HloInstructionProfileList& profiles,
       const se::DeviceDescription& device_info,
       const GpuHloCostAnalysis* analysis = nullptr);
 
   static absl::StatusOr<std::unique_ptr<CollectiveInterpolator>> Create(
-      int num_devices_per_host, const se::DeviceDescription& device_info,
+      int num_devices_per_partition, const se::DeviceDescription& device_info,
       const GpuHloCostAnalysis* analysis = nullptr);
 
   // Constructs the semantically correct module from the profile.
@@ -132,12 +127,12 @@ class CollectiveInterpolator {
   explicit CollectiveInterpolator(
       ExactInterpolatorMap exact_interpolators,
       FallbackInterpolatorMap fallback_interpolators,
-      const se::DeviceDescription& device_info, int num_devices_per_host,
+      const se::DeviceDescription& device_info, int num_devices_per_partition,
       const GpuHloCostAnalysis* analysis)
       : exact_interpolators_(std::move(exact_interpolators)),
         fallback_interpolators_(std::move(fallback_interpolators)),
         device_info_(device_info),
-        num_devices_per_host_(num_devices_per_host),
+        num_devices_per_partition_(num_devices_per_partition),
         analysis_(analysis) {}
 
   ExactInterpolatorMap exact_interpolators_;
@@ -147,7 +142,7 @@ class CollectiveInterpolator {
   // category is simple and exact interpolation can cover all cases.
   FallbackInterpolatorMap fallback_interpolators_;
   const se::DeviceDescription& device_info_;
-  int num_devices_per_host_;
+  int num_devices_per_partition_;
   const GpuHloCostAnalysis* analysis_;
 };
 

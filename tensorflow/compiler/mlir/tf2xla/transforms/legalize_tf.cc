@@ -685,6 +685,74 @@ static Type ChangeTensorElementType(Builder *b, Type tensor_type,
   return UnrankedTensorType::get(element_type);
 }
 
+class ConvertFloatToUnsignedCastOp : public OpRewritePattern<TF::CastOp> {
+ public:
+  explicit ConvertFloatToUnsignedCastOp(MLIRContext* context)
+      : OpRewritePattern<TF::CastOp>(context, /*benefit=*/2) {}
+
+  LogicalResult matchAndRewrite(TF::CastOp op,
+                                PatternRewriter& rewriter) const override {
+    if (op.getTruncate()) return failure();
+
+    auto input_type = mlir::dyn_cast<RankedTensorType>(op.getX().getType());
+    auto result_type = mlir::dyn_cast<RankedTensorType>(op.getType());
+    if (!input_type || !result_type) return failure();
+
+    Type input_element_type = input_type.getElementType();
+    Type result_element_type = result_type.getElementType();
+    if (!mlir::isa<FloatType>(input_element_type) ||
+        !result_element_type.isUnsignedInteger()) {
+      return failure();
+    }
+
+    // XLA convert saturates negative floats to unsigned integers at zero, while
+    // TensorFlow Cast's CPU path wraps finite negative values in the
+    // destination unsigned type. NaN and Inf casts to integral types are
+    // documented as undefined, so keep them on the direct HLO convert path.
+    int result_width = result_element_type.getIntOrFloatBitWidth();
+    int wider_width = result_width == 64 ? 64 : result_width * 2;
+    Type signed_element_type = rewriter.getIntegerType(wider_width);
+    Type unsigned_element_type =
+        IntegerType::get(rewriter.getContext(), wider_width,
+                         IntegerType::SignednessSemantics::Unsigned);
+
+    Type signed_type =
+        ChangeTensorElementType(&rewriter, op.getType(), signed_element_type);
+    Type unsigned_type =
+        ChangeTensorElementType(&rewriter, op.getType(), unsigned_element_type);
+
+    Location loc = op.getLoc();
+    auto scalar_input_type =
+        tensorflow::GetTypeFromTFTensorShape({}, input_element_type);
+    Value zero = stablehlo::ConstantOp::create(
+        rewriter, loc,
+        DenseElementsAttr::get(scalar_input_type,
+                               rewriter.getFloatAttr(input_element_type, 0.0)));
+    Value broadcast_zero = BroadcastToShapeOf(loc, zero, op.getX(), rewriter);
+    Value is_negative =
+        stablehlo::CompareOp::create(rewriter, loc, op.getX(), broadcast_zero,
+                                     stablehlo::ComparisonDirection::LT);
+    Type predicate_type =
+        ChangeTensorElementType(&rewriter, input_type, rewriter.getI1Type());
+    Value is_finite =
+        stablehlo::IsFiniteOp::create(rewriter, loc, predicate_type, op.getX());
+    Value finite_negative =
+        stablehlo::AndOp::create(rewriter, loc, is_negative, is_finite);
+
+    Value direct =
+        stablehlo::ConvertOp::create(rewriter, loc, op.getType(), op.getX());
+    Value signed_value =
+        stablehlo::ConvertOp::create(rewriter, loc, signed_type, op.getX());
+    Value unsigned_value = stablehlo::ConvertOp::create(
+        rewriter, loc, unsigned_type, signed_value);
+    Value wrapped_negative = stablehlo::ConvertOp::create(
+        rewriter, loc, op.getType(), unsigned_value);
+    rewriter.replaceOpWithNewOp<stablehlo::SelectOp>(
+        op, op.getType(), finite_negative, wrapped_negative, direct);
+    return success();
+  }
+};
+
 //===----------------------------------------------------------------------===//
 // Softmax op utilities.
 //===----------------------------------------------------------------------===//
@@ -4080,11 +4148,22 @@ class GenericConvertReductionOp : public OpRewritePattern<OpTy> {
     // to mark the reduced dimensions.
     SmallVector<bool, 4> reduced_dimensions_bitmap(input_shape.size(), false);
     SmallVector<int64_t, 4> xla_dimensions;
+    int64_t rank = input_shape.size();
     for (const APInt &index_raw : dimensions.getValues<APInt>()) {
       int64_t index = index_raw.getSExtValue();
-      int64_t rank = input_shape.size();
       if ((index < -rank || index >= rank)) return failure();
       index = (index + rank) % rank;
+      // The eager kernel and the tf2xla bridge reject duplicate reduction
+      // axes with an InvalidArgumentError. Emit the same message here so
+      // auto-clustering does not silently accept what the other two
+      // execution paths reject.
+      // https://github.com/tensorflow/tensorflow/issues/119360
+      if (reduced_dimensions_bitmap[index]) {
+        return op.emitOpError()
+               << "Invalid reduction arguments: Axes contains duplicate "
+                  "dimension: "
+               << index;
+      }
       reduced_dimensions_bitmap[index] = true;
       xla_dimensions.push_back(index);
     }
@@ -4424,6 +4503,22 @@ class ConvertTensorScatterOp : public OpRewritePattern<OpTy> {
         mlir::dyn_cast<RankedTensorType>(op.getUpdates().getType());
 
     if (!tensor_ty || !indices_ty || !updates_ty) return failure();
+
+    // The eager kernels (tensorflow/core/kernels/scatter_nd_op.cc) reject
+    // rank-0 operands with the errors below, so the same errors are emitted
+    // here to keep both paths consistent.
+    if (tensor_ty.getRank() == 0) {
+      return op.emitOpError() << "Output must be at least 1-D";
+    }
+    if (indices_ty.getRank() == 0) {
+      return op.emitOpError()
+             << "Indices shape must have rank at least one. Found:[]";
+    }
+    if (updates_ty.getRank() == 0) {
+      return op.emitOpError()
+             << "Updates shape must have rank at least one. Found:[]";
+    }
+
     // Last dimension of the indices needs to known at compile time for
     // computation of the 'update_window_dims' attribute in the dimensions
     // struct.
@@ -4432,56 +4527,14 @@ class ConvertTensorScatterOp : public OpRewritePattern<OpTy> {
 
     auto updates = op.getUpdates();
 
-    // Broadcast scalar `updates` in into expected shape as following shape:
-    // updates.shape == indices.shape[:-1] + tensor.shape[indices.shape[-1]:]
-    if (updates_ty.getRank() == 0 &&
-        (std::is_same_v<OpTy, TF::TensorScatterUpdateOp> ||
-         std::is_same_v<OpTy, TF::TensorScatterAddOp>)) {
-      if (!tensor_ty.hasStaticShape()) {
-        return failure();
-      }
-
-      if (!indices_ty.hasStaticShape()) {
-        return failure();
-      }
-
-      auto tensor_shape = tensor_ty.getShape();
-      auto indices_shape = indices_ty.getShape();
-      auto index_depth = indices_shape.back();
-      llvm::SmallVector<int64_t> expected_update_shape;
-
-      // create the expected update shape which scalar update is broadcasted to
-      expected_update_shape.append(indices_shape.begin(),
-                                   std::prev(indices_shape.end()));
-
-      expected_update_shape.append(std::next(tensor_shape.begin(), index_depth),
-                                   tensor_shape.end());
-
-      auto const_type = tensorflow::GetTypeFromTFTensorShape(
-          {static_cast<int>(expected_update_shape.size())},
-          rewriter.getIntegerType(64));
-
-      auto const_attr = GetI64ElementsAttr(expected_update_shape, &rewriter);
-
-      auto const_op =
-          TF::ConstOp::create(rewriter, op->getLoc(), const_type, const_attr);
-
-      auto broadcast_to_type = tensorflow::GetTypeFromTFTensorShape(
-          llvm::ArrayRef<int64_t>(expected_update_shape),
-          updates_ty.getElementType());
-
-      updates = TF::BroadcastToOp::create(
-          rewriter, op->getLoc(), broadcast_to_type, op.getUpdates(), const_op);
-
-      updates_ty = mlir::dyn_cast<RankedTensorType>(updates.getType());
-    }
-
     int64_t tensor_rank = tensor_ty.getRank();
     int64_t indices_rank = indices_ty.getRank();
     int64_t updates_rank =
         mlir::dyn_cast<RankedTensorType>(updates.getType()).getRank();
 
     int64_t window_dims = tensor_rank - num_index_dims;
+    if (window_dims < 0 || updates_rank < window_dims) return failure();
+
     auto dims_attr = stablehlo::ScatterDimensionNumbersAttr::get(
         rewriter.getContext(),
         llvm::to_vector<4>(
@@ -6952,6 +7005,7 @@ void PopulateLegalizeTfPatterns(MLIRContext *context,
     ConvertBiasAddOp,
     ConvertBroadcastToOp,
     ConvertBF16FloorDivOp,
+    ConvertFloatToUnsignedCastOp,
     ConvertClipByValueOp,
     ConvertConstOp,
     ConvertConv2DOp,

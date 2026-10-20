@@ -131,6 +131,10 @@ HloFusionAnalysis::EmitterFusionKind GetEmitterFusionKind(
     return HloFusionAnalysis::EmitterFusionKind::kCuDnn;
   }
 
+  if (fusion_backend_config.kind() == kTensorIrFusionKind) {
+    return HloFusionAnalysis::EmitterFusionKind::kTensorIr;
+  }
+
   std::optional<HloInstructionAdaptor> first_reduce_hero;
   for (auto [root, hero] : llvm::zip(fusion_roots, fusion_heroes)) {
     if (IsRealReductionHero(root.instruction(), hero.instruction(),
@@ -211,6 +215,18 @@ int SmallestBitWidth(const Container& args) {
   return bits;
 }
 
+std::optional<HloInstructionAdaptor> FindCollectiveHero(
+    const HloFusionAdaptor& fusion) {
+  for (HloInstructionAdaptor instr : fusion.MakeInstructionPostOrder()) {
+    if (HloPredicateIsOp<HloOpcode::kAllGather, HloOpcode::kAllReduce,
+                         HloOpcode::kAllToAll, HloOpcode::kReduceScatter>(
+            &instr.instruction())) {
+      return instr;
+    }
+  }
+  return std::nullopt;
+}
+
 }  // namespace
 
 bool IsGpuFusionKind(const HloInstruction& hlo, absl::string_view kind) {
@@ -241,8 +257,17 @@ HloFusionAnalysis HloFusionAnalysis::Create(
     const se::DeviceDescription* device_info) {
   absl::InlinedVector<HloInstructionAdaptor, 2> roots = fusion->GetRoots();
   absl::InlinedVector<HloInstructionAdaptor, 2> heroes;
-  for (auto root : roots) {
-    heroes.push_back(FindNonTrivialHero(root));
+
+  if (backend_config.kind() == kTritonCollectiveFusionKind) {
+    if (std::optional<HloInstructionAdaptor> collective_hero =
+            FindCollectiveHero(*fusion);
+        collective_hero.has_value()) {
+      heroes.push_back(collective_hero.value());
+    }
+  } else {
+    for (auto root : roots) {
+      heroes.push_back(FindNonTrivialHero(root));
+    }
   }
 
   InputOutputInfo input_output_info{

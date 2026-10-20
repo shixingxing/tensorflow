@@ -610,7 +610,7 @@ bool MMapWeightCacheProvider::LoadLastBuildStep() {
   // - or add a new mapping handle.
   {
     MMapHandle& last_mmap_handle = mmap_handles_.back();
-    const int last_mmap_size = last_mmap_handle.size();
+    const size_t last_mmap_size = last_mmap_handle.size();
     if (!last_mmap_handle.Resize(last_mmap_size +
                                  builder_.LastBuildStepSize())) {
       mmap_handles_.emplace_back();
@@ -686,9 +686,19 @@ bool MMapWeightCacheProvider::MapTensorIdentifiers(
     XNNPACK_RETURN_CHECK(index < size,
                          "Tensor index corresponds to a non existing tensor.");
     const TfLiteTensor& t = tensors[index];
-    buffer_address_to_identifier_.emplace(
-        t.data.data, OriginalBufferMetadata{identifier, t.bytes});
+    XNNPACK_RETURN_CHECK(MapBufferIdentifier(t.data.data, t.bytes, identifier));
   }
+  return true;
+}
+
+bool MMapWeightCacheProvider::MapBufferIdentifier(const void* buffer,
+                                                  size_t size,
+                                                  uint64_t identifier) {
+  if (!buffer) {
+    return false;
+  }
+  buffer_address_to_identifier_.emplace(
+      buffer, OriginalBufferMetadata{identifier, size});
   return true;
 }
 

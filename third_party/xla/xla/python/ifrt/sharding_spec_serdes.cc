@@ -14,25 +14,21 @@ limitations under the License.
 ==============================================================================*/
 
 #include <memory>
-#include <string>
 #include <utility>
 #include <vector>
 
 #include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/cord.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
-#include "xla/tsl/platform/status_macros.h"
-#include "llvm/Support/Casting.h"
-#include "llvm/Support/ExtensibleRTTI.h"
-#include "xla/python/ifrt/ir/sharding_param.h"
+#include "xla/python/ifrt/rtti.h"
 #include "xla/python/ifrt/serdes.h"
 #include "xla/python/ifrt/serdes_version.h"
 #include "xla/python/ifrt/shape.h"
 #include "xla/python/ifrt/sharding_spec.h"
 #include "xla/python/ifrt/sharding_spec_serdes.pb.h"
-#include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
 
 namespace xla {
@@ -42,7 +38,7 @@ namespace {
 
 // Serialization/deserialization for `SingleDeviceShardingSpec`.
 class SingleDeviceShardingSpecSerDes
-    : public llvm::RTTIExtends<SingleDeviceShardingSpecSerDes, SerDes> {
+    : public RTTIExtends<SingleDeviceShardingSpecSerDes, SerDes> {
  public:
   absl::string_view type_name() const override {
     return "xla::ifrt::SingleDeviceShardingSpec";
@@ -84,7 +80,7 @@ class SingleDeviceShardingSpecSerDes
 
 // Serialization/deserialization for `OpaqueShardingSpec`.
 class OpaqueShardingSpecSerDes
-    : public llvm::RTTIExtends<OpaqueShardingSpecSerDes, SerDes> {
+    : public RTTIExtends<OpaqueShardingSpecSerDes, SerDes> {
  public:
   absl::string_view type_name() const override {
     return "xla::ifrt::OpaqueShardingSpec";
@@ -100,7 +96,7 @@ class OpaqueShardingSpecSerDes
                        " for OpaqueShardingSpec serialization"));
     }
     const OpaqueShardingSpec& sharding_spec =
-        llvm::cast<OpaqueShardingSpec>(serializable);
+        cast<OpaqueShardingSpec>(serializable);
     OpaqueShardingSpecProto proto;
     proto.set_version_number(SerDesVersionNumber(0).value());
     proto.set_num_shards(sharding_spec.num_shards());
@@ -129,7 +125,7 @@ class OpaqueShardingSpecSerDes
 
 // Serialization/deserialization for `ConcreteShardingSpec`.
 class ConcreteShardingSpecSerDes
-    : public llvm::RTTIExtends<ConcreteShardingSpecSerDes, SerDes> {
+    : public RTTIExtends<ConcreteShardingSpecSerDes, SerDes> {
  public:
   absl::string_view type_name() const override {
     return "xla::ifrt::ConcreteShardingSpec";
@@ -145,7 +141,7 @@ class ConcreteShardingSpecSerDes
                        " for ConcreteShardingSpec serialization"));
     }
     const ConcreteShardingSpec& sharding_spec =
-        llvm::cast<ConcreteShardingSpec>(serializable);
+        cast<ConcreteShardingSpec>(serializable);
     if (sharding_spec.index_domains().has_value()) {
       return absl::UnimplementedError(
           "Index domains are not yet supported in ConcreteShardingSpec "
@@ -184,11 +180,11 @@ class ConcreteShardingSpecSerDes
                        " for ConcreteShardingSpec deserialization"));
     }
     if (proto.has_shape()) {
-      ASSIGN_OR_RETURN(auto shape, Shape::FromProto(proto.shape()));
+      ABSL_ASSIGN_OR_RETURN(auto shape, Shape::FromProto(proto.shape()));
       std::vector<Shape> shard_shapes;
       shard_shapes.reserve(proto.shard_shapes_size());
       for (const auto& shard_shape_proto : proto.shard_shapes()) {
-        ASSIGN_OR_RETURN(auto shard_shape, Shape::FromProto(shard_shape_proto));
+        ABSL_ASSIGN_OR_RETURN(auto shard_shape, Shape::FromProto(shard_shape_proto));
         shard_shapes.push_back(std::move(shard_shape));
       }
       return ConcreteShardingSpec::Create(std::move(shape),
@@ -198,12 +194,12 @@ class ConcreteShardingSpecSerDes
       return absl::InvalidArgumentError(
           "ConcreteShardingSpec must have Shape or DynamicShape.");
     }
-    ASSIGN_OR_RETURN(auto dynamic_shape,
+    ABSL_ASSIGN_OR_RETURN(auto dynamic_shape,
                      DynamicShape::FromProto(proto.dynamic_shape()));
     std::vector<DynamicShape> shard_dynamic_shapes;
     shard_dynamic_shapes.reserve(proto.shard_dynamic_shapes_size());
     for (const auto& shard_dynamic_shape_proto : proto.shard_dynamic_shapes()) {
-      ASSIGN_OR_RETURN(auto dynamic_shape,
+      ABSL_ASSIGN_OR_RETURN(auto dynamic_shape,
                        DynamicShape::FromProto(shard_dynamic_shape_proto));
       shard_dynamic_shapes.push_back(std::move(dynamic_shape));
     }
@@ -216,7 +212,7 @@ class ConcreteShardingSpecSerDes
 
 // Serialization/deserialization for `ConcreteEvenShardingSpec`.
 class ConcreteEvenShardingSpecSerDes
-    : public llvm::RTTIExtends<ConcreteEvenShardingSpecSerDes, SerDes> {
+    : public RTTIExtends<ConcreteEvenShardingSpecSerDes, SerDes> {
  public:
   absl::string_view type_name() const override {
     return "xla::ifrt::ConcreteEvenShardingSpec";
@@ -232,7 +228,7 @@ class ConcreteEvenShardingSpecSerDes
                        " for ConcreteEvenShardingSpec serialization"));
     }
     const ConcreteEvenShardingSpec& sharding_spec =
-        llvm::cast<ConcreteEvenShardingSpec>(serializable);
+        cast<ConcreteEvenShardingSpec>(serializable);
     ConcreteEvenShardingSpecProto proto;
     proto.set_version_number(SerDesVersionNumber(0).value());
     proto.set_num_shards(sharding_spec.num_shards());
@@ -256,58 +252,11 @@ class ConcreteEvenShardingSpecSerDes
           absl::StrCat("Unsupported ", version_number,
                        " for ConcreteEvenShardingSpec deserialization"));
     }
-    ASSIGN_OR_RETURN(auto shape, Shape::FromProto(proto.shape()));
-    ASSIGN_OR_RETURN(auto shard_shape, Shape::FromProto(proto.shard_shape()));
+    ABSL_ASSIGN_OR_RETURN(auto shape, Shape::FromProto(proto.shape()));
+    ABSL_ASSIGN_OR_RETURN(auto shard_shape, Shape::FromProto(proto.shard_shape()));
     return ConcreteEvenShardingSpec::Create(
         proto.num_shards(), std::move(shape), std::move(shard_shape),
         proto.is_fully_replicated());
-  }
-
-  static char ID;  // NOLINT
-};
-
-class ShardingParamShardingSpecSerDes
-    : public llvm::RTTIExtends<ShardingParamShardingSpecSerDes, SerDes> {
- public:
-  absl::string_view type_name() const override {
-    return "xla::ifrt::ShardingParamShardingSpec";
-  }
-
-  absl::StatusOr<absl::Cord> Serialize(
-      const Serializable& serializable,
-      std::unique_ptr<SerializeOptions> options) override {
-    const SerDesVersion version = GetRequestedSerDesVersion(options.get());
-    if (version.version_number() < SerDesVersionNumber(0)) {
-      return absl::FailedPreconditionError(
-          absl::StrCat("Unsupported ", version.version_number(),
-                       " for ShardingParamShardingSpec serialization"));
-    }
-    const ShardingParamShardingSpec& sharding_spec =
-        llvm::cast<ShardingParamShardingSpec>(serializable);
-    ShardingParamShardingSpecProto proto;
-    proto.set_version_number(SerDesVersionNumber(0).value());
-    RETURN_IF_ERROR(sharding_spec.sharding_param().ToProto(
-        *proto.mutable_sharding_param(), version));
-    return proto.SerializeAsCord();
-  }
-
-  absl::StatusOr<std::unique_ptr<Serializable>> Deserialize(
-      const absl::Cord& serialized,
-      std::unique_ptr<DeserializeOptions> options) override {
-    ShardingParamShardingSpecProto proto;
-    if (!proto.ParseFromString(serialized)) {
-      return absl::InvalidArgumentError(
-          "Failed to parse serialized ShardingParamShardingSpec");
-    }
-    const SerDesVersionNumber version_number(proto.version_number());
-    if (version_number != SerDesVersionNumber(0)) {
-      return absl::FailedPreconditionError(
-          absl::StrCat("Unsupported ", version_number,
-                       " for ShardingParamShardingSpec deserialization"));
-    }
-    ASSIGN_OR_RETURN(ShardingParam sharding_param,
-                     ShardingParam::FromProto(proto.sharding_param()));
-    return ShardingParamShardingSpec::Create(std::move(sharding_param));
   }
 
   static char ID;  // NOLINT
@@ -317,7 +266,6 @@ class ShardingParamShardingSpecSerDes
 [[maybe_unused]] char OpaqueShardingSpecSerDes::ID = 0;         // NOLINT
 [[maybe_unused]] char ConcreteShardingSpecSerDes::ID = 0;       // NOLINT
 [[maybe_unused]] char ConcreteEvenShardingSpecSerDes::ID = 0;   // NOLINT
-[[maybe_unused]] char ShardingParamShardingSpecSerDes::ID = 0;  // NOLINT
 
 // clang-format off
 bool register_single_device_sharding_spec_serdes = ([]{
@@ -338,11 +286,6 @@ bool register_concrete_sharding_spec_serdes = ([]{
 bool register_concrete_even_sharding_spec_serdes = ([]{
   RegisterSerDes<ConcreteEvenShardingSpec>(
       std::make_unique<ConcreteEvenShardingSpecSerDes>());
-}(), true);
-
-bool register_sharding_param_sharding_spec_serdes = ([]{
-  RegisterSerDes<ShardingParamShardingSpec>(
-      std::make_unique<ShardingParamShardingSpecSerDes>());
 }(), true);
 // clang-format on
 

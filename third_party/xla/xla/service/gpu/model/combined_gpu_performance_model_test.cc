@@ -28,7 +28,6 @@ limitations under the License.
 #include "xla/service/gpu/gpu_device_info_for_tests.h"
 #include "xla/service/gpu/model/fusion_analysis_cache.h"
 #include "xla/service/gpu/model/gpu_hlo_cost_analysis.h"
-#include "xla/service/gpu/model/gpu_indexing_performance_model.h"
 #include "xla/service/gpu/model/gpu_performance_model.h"
 #include "xla/service/gpu/model/gpu_performance_model_base.h"
 #include "xla/service/hlo_cost_analysis.h"
@@ -40,16 +39,12 @@ namespace xla {
 namespace gpu {
 namespace {
 
-class CombinedGpuPerformanceModelTest
-    : public HloHardwareIndependentTestBase,
-      public ::testing::WithParamInterface</*use_experimental_tiling=*/bool> {
+class CombinedGpuPerformanceModelTest : public HloHardwareIndependentTestBase {
  public:
   CombinedGpuPerformanceModelTest() : analysis_(options_, device_info_) {
     options_.count_multiple_input_accesses = true;
     RegisterSymbolicExprStorage(&mlir_context_);
   }
-
-  bool use_experimental_tiling() const { return GetParam(); }
 
   mlir::MLIRContext mlir_context_;
   GpuHloCostAnalysis::Options options_;
@@ -57,12 +52,15 @@ class CombinedGpuPerformanceModelTest
   HloFusionAnalysisCache fusion_analysis_cache_{device_info_};
   GpuHloCostAnalysis analysis_;
   CombinedGpuPerformanceModel model_{
-      device_info_, fusion_analysis_cache_, mlir_context_,
+      device_info_,
+      fusion_analysis_cache_,
+      mlir_context_,
       [](const Shape& shape) { return ShapeUtil::ByteSizeOf(shape); },
-      use_experimental_tiling()};
+      /*use_experimental_tiling=*/true,
+      /*enable_same_shape_multi_output_fusion=*/false};
 };
 
-TEST_P(CombinedGpuPerformanceModelTest,
+TEST_F(CombinedGpuPerformanceModelTest,
        ReturnsGpuPerformanceModelResultForNonTritonFusion) {
   auto module = ParseAndReturnVerifiedModule(R"(
     HloModule test_module
@@ -93,7 +91,7 @@ TEST_P(CombinedGpuPerformanceModelTest,
 }
 
 // TODO: b/493907020 Remove this after removing from GpuPerformanceModel.
-TEST_P(CombinedGpuPerformanceModelTest,
+TEST_F(CombinedGpuPerformanceModelTest,
        EstimateRunTimesMatchesGpuPerformanceModel) {
   auto module = ParseAndReturnVerifiedModule(R"(
     HloModule test_module
@@ -124,7 +122,7 @@ TEST_P(CombinedGpuPerformanceModelTest,
 }
 
 // TODO: b/493907020 Remove this after removing from GpuPerformanceModel.
-TEST_P(CombinedGpuPerformanceModelTest,
+TEST_F(CombinedGpuPerformanceModelTest,
        EstimateRunTimesForMultiOutputMatchesGpuPerformanceModel) {
   auto module = ParseAndReturnVerifiedModule(R"(
     HloModule test_module
@@ -155,7 +153,7 @@ TEST_P(CombinedGpuPerformanceModelTest,
   EXPECT_EQ(result->time_fused, expected.time_fused);
 }
 
-TEST_P(CombinedGpuPerformanceModelTest, CachesResults) {
+TEST_F(CombinedGpuPerformanceModelTest, CachesResults) {
   auto module = ParseAndReturnVerifiedModule(R"(
     HloModule test_module
     ENTRY entry_computation {
@@ -176,7 +174,7 @@ TEST_P(CombinedGpuPerformanceModelTest, CachesResults) {
   EXPECT_EQ(model_.GetCache().Get(*add)->exec_time, result->exec_time);
 }
 
-TEST_P(CombinedGpuPerformanceModelTest, InvalidatesCache) {
+TEST_F(CombinedGpuPerformanceModelTest, InvalidatesCache) {
   auto module = ParseAndReturnVerifiedModule(R"(
     HloModule test_module
     ENTRY entry_computation {
@@ -195,13 +193,6 @@ TEST_P(CombinedGpuPerformanceModelTest, InvalidatesCache) {
 
   EXPECT_FALSE(model_.GetCache().Get(*add).has_value());
 }
-
-INSTANTIATE_TEST_SUITE_P(CombinedGpuPerformanceModelTestSuite,
-                         CombinedGpuPerformanceModelTest, ::testing::Bool(),
-                         [](const ::testing::TestParamInfo<bool>& info) {
-                           return info.param ? "ExperimentalTiling"
-                                             : "SymbolicTiling";
-                         });
 
 }  // namespace
 }  // namespace gpu

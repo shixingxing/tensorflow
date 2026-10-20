@@ -24,7 +24,6 @@ limitations under the License.
 #include <utility>
 
 #include <gmock/gmock.h>
-#include "absl/memory/memory.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/optional.h"
@@ -151,7 +150,7 @@ TEST(StreamExecutor, UnifiedMemoryAllocateNotSet) {
 /*** StreamExecutor behavior tests ***/
 class StreamExecutorTest : public ::testing::Test {
  protected:
-  StreamExecutorTest() {}
+  StreamExecutorTest() = default;
   void SetUp() override {
     test_util::PopulateDefaultPlatform(&platform_, &platform_fns_);
     test_util::PopulateDefaultDeviceFns(&device_fns_);

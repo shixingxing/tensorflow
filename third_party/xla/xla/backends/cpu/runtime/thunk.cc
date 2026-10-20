@@ -25,13 +25,11 @@ limitations under the License.
 #include "absl/base/no_destructor.h"
 #include "absl/functional/function_ref.h"
 #include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
-#include "xla/tsl/platform/status_macros.h"
 #include "xla/backends/cpu/collectives/cpu_collectives.h"
 #include "xla/backends/cpu/collectives/in_process_collectives.h"
-#include "xla/backends/cpu/runtime/ynnpack/ynn_interop.h"
-#include "xla/backends/cpu/runtime/ynnpack/ynn_threadpool.h"
 #include "xla/executable_run_options.h"
 #include "xla/runtime/device_id.h"
 #include "xla/service/cpu/cpu_executable_run_options.h"
@@ -161,16 +159,6 @@ Thunk::CustomCallExecuteParams::CustomCallExecuteParams(
       intra_op_thread_pool(intra_op_thread_pool),
       ffi_execution_context(ffi_execution_context) {}
 
-absl::StatusOr<Thunk::YnnParams> Thunk::YnnParams::Create(
-    const ExecutableRunOptions* run_options) {
-  ASSIGN_OR_RETURN(YnnThreadpool threadpool,
-                   CreateYnnThreadpool(run_options->intra_op_thread_pool()));
-  return YnnParams(std::move(threadpool));
-}
-
-Thunk::YnnParams::YnnParams(YnnThreadpool threadpool)
-    : threadpool(std::move(threadpool)) {}
-
 Thunk::ExecuteSession::ExecuteSession(int64_t max_workers,
                                       int64_t split_threshold)
     : lock_(std::make_shared<std::nullopt_t>(std::nullopt)),
@@ -234,9 +222,9 @@ static void ForEach(const ThunkSequence& sequence,
 static absl::Status ForEach(const ThunkSequence& sequence,
                             absl::FunctionRef<absl::Status(const Thunk&)> fn) {
   for (auto& thunk : sequence) {
-    RETURN_IF_ERROR(fn(*thunk));
+    ABSL_RETURN_IF_ERROR(fn(*thunk));
     for (auto& [name, nested] : thunk->nested_thunks()) {
-      RETURN_IF_ERROR(ForEach(*nested, fn));
+      ABSL_RETURN_IF_ERROR(ForEach(*nested, fn));
     }
   }
   return absl::OkStatus();

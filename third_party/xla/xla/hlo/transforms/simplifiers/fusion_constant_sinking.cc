@@ -22,10 +22,10 @@ limitations under the License.
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/numbers.h"
 #include "absl/strings/string_view.h"
-#include "xla/tsl/platform/status_macros.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_opcode.h"
@@ -82,6 +82,14 @@ bool CanSink(HloInstruction* fusion, const HloInstruction* operand) {
           user_fuse_info.second == fusion_fuse_info.second)) {
       return false;
     }
+  }
+
+  // A FUSE_LIMIT operand is a fusion boundary. Custom fusions only take
+  // must-fuse operands (see above), and must-fuse takes precedence over
+  // FUSE_LIMIT.
+  if (!fusion->IsCustomFusion() &&
+      operand->frontend_attributes().map().contains(kFuseLimitAttr)) {
+    return false;
   }
 
   if (fusion->operand_count() == 1) {
@@ -147,7 +155,7 @@ absl::StatusOr<bool> FusionConstantSinking::RunImpl(
   }
 
   if (changed) {
-    ASSIGN_OR_RETURN(bool dce, HloDCE{}.Run(module, execution_threads));
+    ABSL_ASSIGN_OR_RETURN(bool dce, HloDCE{}.Run(module, execution_threads));
     changed |= dce;
   }
 

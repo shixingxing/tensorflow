@@ -18,7 +18,9 @@ cuptiActivityFlushAll
 cuptiActivityFlushPeriod
 cuptiActivityGetAttribute
 cuptiActivityGetNextRecord
+cuptiActivityGetNextRecord_v2
 cuptiActivityGetNumDroppedRecords
+cuptiActivityGetNumDroppedRecords_v2
 cuptiActivityGetNvtxExtPayloadAttr
 cuptiActivityGetNvtxExtPayloadEntryTypeInfo
 cuptiActivityPopExternalCorrelationId
@@ -91,6 +93,7 @@ cuptiGetStreamId
 cuptiGetStreamIdEx
 cuptiGetThreadIdType
 cuptiGetTimestamp
+cuptiGetTimestamp_v2
 cuptiGetVersion
 cuptiKernelReplaySubscribeUpdate
 cuptiMetricCreateEventGroupSets

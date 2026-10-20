@@ -67,22 +67,21 @@ _XLA_SHARED_OBJECT_SENSITIVE_DEPS = [
     Label("//xla/service:metrics_proto_cc_impl"),
     Label("//xla/service/gpu:backend_configs_cc_impl"),
     Label("//xla/service/gpu/model:hlo_op_profile_proto_cc_impl"),
-    Label("//xla/service/memory_space_assignment:memory_space_assignment_proto_cc_impl"),
     Label("//xla/stream_executor:device_description_proto_cc_impl"),
     Label("//xla/stream_executor:stream_executor_impl"),
     Label("//xla/stream_executor/cuda:cuda_compute_capability_proto_cc_impl"),
     Label("//xla/backends/cpu/runtime:thunk_proto_cc_impl"),
-    "//xla/tsl/framework:allocator_registry_impl",
-    "//xla/tsl/framework:allocator",
-    "//xla/tsl/platform:env_impl",
-    "//xla/tsl/profiler/backends/cpu:annotation_stack_impl",
-    "//xla/tsl/profiler/backends/cpu:traceme_recorder_impl",
+    Label("//xla/tsl/framework:allocator_registry_impl"),
+    Label("//xla/tsl/framework:allocator"),
+    "@tsl//tsl/platform:env_impl",
+    Label("//xla/tsl/profiler/backends/cpu:annotation_stack_impl"),
+    Label("//xla/tsl/profiler/backends/cpu:traceme_recorder_impl"),
     "@tsl//tsl/profiler/protobuf:profiler_options_proto_cc_impl",
     "@tsl//tsl/profiler/protobuf:xplane_proto_cc_impl",
-    "//xla/tsl/profiler/utils:time_utils_impl",
-    "//xla/tsl/protobuf:protos_all_cc_impl",
+    Label("//xla/tsl/profiler/utils:time_utils_impl"),
+    Label("//xla/tsl/protobuf:protos_all_cc_impl"),
 ] + if_rocm_is_configured([
-    "//xla/tsl/util:determinism",
+    Label("//xla/tsl/util:determinism"),
 ])
 
 def xla_cc_binary(deps = [], copts = tsl_copts(), **kwargs):
@@ -100,8 +99,15 @@ def xla_cc_test(
     Args:
       name: The name of the test.
       deps: The dependencies of the test.
-      **kwargs: Other arguments to pass to the test.
+      **kwargs: Other arguments to pass to the test, including:
+        - tags: Tags for the test.
+        - flaky: If True, retries test up to 3 times.
     """
+
+    # Set flaky attribute if "flaky" tag is present
+    existing_tags = kwargs.get("tags", [])
+    if "flaky" in existing_tags and not kwargs.get("flaky", False):
+        kwargs["flaky"] = True
 
     strict_cc_test(
         name = name,

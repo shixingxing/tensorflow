@@ -26,14 +26,15 @@ limitations under the License.
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
+#include "xla/backends/gpu/tests/collective_ops_e2e_test_base.h"
 #include "xla/literal.h"
 #include "xla/literal_util.h"
 #include "xla/service/hlo_module_config.h"
 #include "xla/service/hlo_runner_interface.h"
 #include "xla/stream_executor/platform.h"
+#include "xla/stream_executor/platform_manager.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/tests/literal_test_util.h"
-#include "xla/tests/restricted/hlo_test_base_legacy.h"
 #include "xla/tsl/platform/env.h"
 #include "xla/tsl/platform/logging.h"
 #include "xla/tsl/platform/statusor.h"
@@ -49,15 +50,19 @@ namespace {
 //
 // Several tests requires multiple GPUs. For instructions on running this
 // within Google, see go/multi-gpu-unit-test.
-class CollectiveOpsCommandBufferTest : public HloTestBaseLegacy {
+class CollectiveOpsCommandBufferTest : public CollectiveOpsE2ETestBase {
  public:
-  CollectiveOpsCommandBufferTest() {
-    VLOG(1) << "Running with " << num_devices() << " devices";
+  explicit CollectiveOpsCommandBufferTest(size_t memory_size = 128 * kMB,
+                                          size_t collectives_memory_size = 128 *
+                                                                           kMB)
+      : CollectiveOpsE2ETestBase(memory_size, collectives_memory_size) {
+    VLOG(1) << "Running with " << device_count() << " devices";
   }
 
  protected:
   DebugOptions GetDebugOptionsForTest() const override {
-    DebugOptions debug_options = HloTestBaseLegacy::GetDebugOptionsForTest();
+    DebugOptions debug_options =
+        CollectiveOpsE2ETestBase::GetDebugOptionsForTest();
     // Disable async->sync collective conversion pass to enable unit testing
     // of async collectives.
     debug_options.add_xla_disable_hlo_passes(
@@ -71,16 +76,18 @@ class CollectiveOpsCommandBufferPeerAccessTest
     : public CollectiveOpsCommandBufferTest {
  protected:
   void SetUp() override {
-    HloTestBaseLegacy::SetUp();  // Don't forget to call the base class SetUp
+    CollectiveOpsE2ETestBase::SetUp();
 
-    stream_executor::Platform* platform = GetTestPlatform();
-
-    int num_devices = platform->VisibleDeviceCount();
+    int num_devices = device_count();
     if (num_devices < 2) {
       GTEST_SKIP()
           << "Skipping test suite: Test requires at least 2 GPUs, found "
           << num_devices;
     }
+
+    ASSERT_OK_AND_ASSIGN(stream_executor::Platform * platform,
+                         stream_executor::PlatformManager::PlatformWithId(
+                             stream_executor_platform_id()));
 
     // Check P2P capability
     for (int i = 0; i < num_devices; ++i) {
@@ -131,9 +138,9 @@ TEST_F(CollectiveOpsCommandBufferPeerAccessTest, RaggedAllToAll_Simple) {
   )";
 
   const int64_t kNumReplicas = 2;
-  if (test_runner().device_count() < kNumReplicas) {
+  if (device_count() < kNumReplicas) {
     GTEST_SKIP() << "Test requires at least " << kNumReplicas << " devices ("
-                 << test_runner().device_count() << " available)";
+                 << device_count() << " available)";
   }
 
   bool run_hlo_passes = true;
@@ -157,17 +164,12 @@ TEST_F(CollectiveOpsCommandBufferPeerAccessTest, RaggedAllToAll_Simple) {
   // address changes.
   auto arg0 = LiteralUtil::CreateR1<float>({0., 1., 2., 3., 4., 5., 6., 7.});
 
-  HloRunnerInterface::ReplicatedExecuteOptions options;
-  options.num_devices = kNumReplicas;
-  options.arguments = {&arg0};
-  options.run_hlo_passes = run_hlo_passes;
-
   // Multiple executions to Warm-up (may run thunks) and
   // Create (record and execute command buffer)
   for (int i = 0; i < 3; ++i) {
     ASSERT_OK_AND_ASSIGN(std::vector<Literal> results,
-                         test_runner().ExecuteReplicatedWithExecutable(
-                             executable.get(), options));
+                         ExecuteReplicated(executable.get(), {{&arg0}, {&arg0}},
+                                           run_hlo_passes));
 
     ASSERT_EQ(results.size(), kNumReplicas);
     EXPECT_TRUE(LiteralTestUtil::Equal(
@@ -180,11 +182,10 @@ TEST_F(CollectiveOpsCommandBufferPeerAccessTest, RaggedAllToAll_Simple) {
 
   // Update (execute with new arguments to attempt buffer changes)
   auto arg2 = LiteralUtil::CreateR1<float>({7., 6., 5., 4., 3., 2., 1., 0.});
-  options.arguments = {&arg2};
 
   ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      test_runner().ExecuteReplicatedWithExecutable(executable.get(), options));
+      ExecuteReplicated(executable.get(), {{&arg2}, {&arg2}}, run_hlo_passes));
 
   ASSERT_EQ(results.size(), kNumReplicas);
   EXPECT_TRUE(LiteralTestUtil::Equal(
@@ -220,9 +221,9 @@ TEST_F(CollectiveOpsCommandBufferTest, SendRecv_Simple) {
   )";
 
   const int64_t kNumReplicas = 2;
-  if (test_runner().device_count() < kNumReplicas) {
+  if (device_count() < kNumReplicas) {
     GTEST_SKIP() << "Test requires at least " << kNumReplicas << " devices ("
-                 << test_runner().device_count() << " available)";
+                 << device_count() << " available)";
   }
 
   bool run_hlo_passes = false;
@@ -244,17 +245,12 @@ TEST_F(CollectiveOpsCommandBufferTest, SendRecv_Simple) {
   // address changes.
   auto arg0 = LiteralUtil::CreateR1<uint32_t>({10, 12});
 
-  HloRunnerInterface::ReplicatedExecuteOptions options;
-  options.num_devices = kNumReplicas;
-  options.arguments = {&arg0};
-  options.run_hlo_passes = run_hlo_passes;
-
   // Multiple executions to Warm-up (may run thunks) and
   // Create (record and execute command buffer)
   for (int i = 0; i < 3; ++i) {
     ASSERT_OK_AND_ASSIGN(std::vector<Literal> results,
-                         test_runner().ExecuteReplicatedWithExecutable(
-                             executable.get(), options));
+                         ExecuteReplicated(executable.get(), {{&arg0}, {&arg0}},
+                                           run_hlo_passes));
 
     ASSERT_EQ(results.size(), kNumReplicas);
     EXPECT_TRUE(LiteralTestUtil::Equal(
@@ -265,11 +261,10 @@ TEST_F(CollectiveOpsCommandBufferTest, SendRecv_Simple) {
 
   // Update (execute with new arguments to attempt buffer changes)
   auto arg2 = LiteralUtil::CreateR1<uint32_t>({14, 16});
-  options.arguments = {&arg2};
 
   ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      test_runner().ExecuteReplicatedWithExecutable(executable.get(), options));
+      ExecuteReplicated(executable.get(), {{&arg2}, {&arg2}}, run_hlo_passes));
 
   ASSERT_EQ(results.size(), kNumReplicas);
   EXPECT_TRUE(LiteralTestUtil::Equal(LiteralUtil::CreateR1<uint32_t>({15, 17}),
@@ -343,9 +338,9 @@ TEST_F(CollectiveOpsCommandBufferPeerAccessTest, FilterRaggedAllToAllOnly) {
   )";
 
   constexpr int64_t kNumReplicas = 2;
-  if (test_runner().device_count() < kNumReplicas) {
+  if (device_count() < kNumReplicas) {
     GTEST_SKIP() << "Test requires at least " << kNumReplicas << " devices ("
-                 << test_runner().device_count() << " available)";
+                 << device_count() << " available)";
   }
 
   ASSERT_OK_AND_ASSIGN(
@@ -375,14 +370,10 @@ TEST_F(CollectiveOpsCommandBufferPeerAccessTest, FilterRaggedAllToAllOnly) {
                        CreateExecutable(std::move(module), run_hlo_passes));
 
   auto arg0 = LiteralUtil::CreateR1<float>({0., 1., 2., 3., 4., 5., 6., 7.});
-  HloRunnerInterface::ReplicatedExecuteOptions options;
-  options.num_devices = kNumReplicas;
-  options.arguments = {&arg0};
-  options.run_hlo_passes = run_hlo_passes;
 
   ASSERT_OK_AND_ASSIGN(
       std::vector<Literal> results,
-      test_runner().ExecuteReplicatedWithExecutable(executable.get(), options));
+      ExecuteReplicated(executable.get(), {{&arg0}, {&arg0}}, run_hlo_passes));
 
   ASSERT_EQ(results.size(), kNumReplicas);
   EXPECT_TRUE(LiteralTestUtil::Equal(
@@ -408,6 +399,79 @@ TEST_F(CollectiveOpsCommandBufferPeerAccessTest, FilterRaggedAllToAllOnly) {
   EXPECT_TRUE(CheckIfCommandBufferContainsOnlyRaggedAllToAll(dump_content))
       << "Dump content:\n"
       << dump_content;
+}
+
+TEST_F(CollectiveOpsCommandBufferTest, WhileWithAsyncAllReduce) {
+  constexpr absl::string_view kHloText = R"(
+  HloModule module, replica_count=2
+
+  add {
+    lhs = f32[] parameter(0)
+    rhs = f32[] parameter(1)
+    ROOT add = f32[] add(lhs, rhs)
+  }
+
+  cond {
+    param = (s32[], f32[2]) parameter(0)
+    iter = s32[] get-tuple-element(param), index=0
+    limit = s32[] constant(2)
+    ROOT cmp = pred[] compare(iter, limit), direction=LT
+  }
+
+  body {
+    param = (s32[], f32[2]) parameter(0)
+    iter = s32[] get-tuple-element(param), index=0
+    data = f32[2] get-tuple-element(param), index=1
+    one = s32[] constant(1)
+    next_iter = s32[] add(iter, one)
+    ar = f32[2] all-reduce(data), replica_groups={{0,1}}, to_apply=add
+    ROOT out = (s32[], f32[2]) tuple(next_iter, ar)
+  }
+
+  ENTRY main {
+    c0 = s32[] parameter(0)
+    data = f32[2] parameter(1)
+    init = (s32[], f32[2]) tuple(c0, data)
+    while_res = (s32[], f32[2]) while(init), condition=cond, body=body
+    ROOT res = f32[2] get-tuple-element(while_res), index=1
+  }
+  )";
+
+  constexpr int64_t kNumReplicas = 2;
+  if (device_count() < kNumReplicas) {
+    GTEST_SKIP() << "Test requires at least " << kNumReplicas << " devices ("
+                 << device_count() << " available)";
+  }
+
+  HloModuleConfig config =
+      GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
+  config.mutable_debug_options().clear_xla_gpu_enable_command_buffer();
+  config.mutable_debug_options().add_xla_gpu_enable_command_buffer(
+      DebugOptions::FUSION);
+  config.mutable_debug_options().add_xla_gpu_enable_command_buffer(
+      DebugOptions::WHILE);
+  config.mutable_debug_options().add_xla_gpu_enable_command_buffer(
+      DebugOptions::COLLECTIVES);
+  config.mutable_debug_options().set_xla_gpu_graph_min_graph_size(1);
+  config.mutable_debug_options().add_xla_disable_hlo_passes(
+      "collective-fusion");
+
+  ASSERT_OK_AND_ASSIGN(auto module,
+                       ParseAndReturnVerifiedModule(kHloText, config));
+
+  Literal iter_init = LiteralUtil::CreateR0<int32_t>(0);
+  Literal input = LiteralUtil::CreateR1<float>({1.0f, 2.0f});
+  ASSERT_OK_AND_ASSIGN(
+      ExecutionResult execution_result,
+      ExecuteReplicated(std::move(module),
+                        std::vector<Literal*>{&iter_init, &input},
+                        /*run_hlo_passes=*/true));
+  const std::vector<Literal>& results = execution_result.results;
+  ASSERT_EQ(results.size(), kNumReplicas);
+  EXPECT_TRUE(LiteralTestUtil::Equal(LiteralUtil::CreateR1<float>({4.0f, 8.0f}),
+                                     results[0]));
+  EXPECT_TRUE(LiteralTestUtil::Equal(LiteralUtil::CreateR1<float>({4.0f, 8.0f}),
+                                     results[1]));
 }
 
 }  // namespace

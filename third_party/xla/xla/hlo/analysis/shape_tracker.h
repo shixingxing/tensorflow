@@ -41,10 +41,10 @@ class HloInstruction;
 //
 // Example usage:
 //   ShapeTracker tracker(initial_shape);
-//   RETURN_IF_ERROR(tracker.AppendReshape(new_dims));
-//   RETURN_IF_ERROR(tracker.AppendTranspose(permutation));
+//   ABSL_RETURN_IF_ERROR(tracker.AppendReshape(new_dims));
+//   ABSL_RETURN_IF_ERROR(tracker.AppendTranspose(permutation));
 //   ...
-//   ASSIGN_OR_RETURN(HloInstruction* chain,
+//   ABSL_ASSIGN_OR_RETURN(HloInstruction* chain,
 //                       tracker.ToInstructionChain(base_inst));
 //
 // This class works correctly when there are degenerate dimensions (size 1), but
@@ -142,6 +142,14 @@ class ShapeTracker {
   std::optional<std::vector<int64_t>> MapInputDimensionsToOutputUnordered(
       absl::Span<const int64_t> input_dims) const;
 
+  // Returns true if the specified input dimensions map to a single contiguous
+  // stride in the output shape. If `allow_swaps` is false (default), the
+  // dimensions must not be swapped with each other. In either case, there must
+  // be no other non-degenerate dimensions interleaved between them in the
+  // output layout.
+  bool MapsToOneStride(absl::Span<const int64_t> input_dims,
+                       bool allow_swaps = false) const;
+
   // Zips multiple ShapeTrackers into a single one.
   // For example, suppose we have two trackers:
   // [10,42] -> (reshape)[5,4,7,3] -> (transpose)[3,4,5,7]
@@ -163,7 +171,7 @@ class ShapeTracker {
   };
 
   // Returns the sequence of simplified steps represented by this tracker.
-  std::vector<Step> GetSteps() const;
+  std::vector<Step> GetSteps(bool avoid_combining_reshapes = true) const;
 
   // Returns a debug string representation of the tracked operations.
   std::string DebugString(bool avoid_combining_reshapes = true) const;

@@ -20,6 +20,8 @@ limitations under the License.
 
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -450,6 +452,10 @@ class Subgraph {
       int tensor_index, const TfLiteCustomAllocation& allocation,
       int64_t flags = kTfLiteCustomAllocationFlagsNone);
 
+  // Sets the allocator used for runtime-owned CPU buffers in this subgraph.
+  // The allocator is not owned by the subgraph and must outlive it.
+  TfLiteStatus SetAllocator(TfLiteAllocator* allocator);
+
   // WARNING: This is an experimental interface that is subject to change.
   // Clears all custom memory allocations for the tensors in the subgraph.
   // User should call this before resizing input tensors.
@@ -670,8 +676,11 @@ class Subgraph {
                                        int subgraph_index,
                                        int& last_inserted_execution_index);
 
+  using CompositeFilter =
+      std::function<bool(const TfLiteNode*, const TfLiteRegistration*)>;
+
   // Inlines the composite nodes that have not been taken by a delegate.
-  TfLiteStatus InlineCompositeNodes();
+  TfLiteStatus InlineCompositeNodes(CompositeFilter filter = nullptr);
 
  private:
 #ifndef DOXYGEN_SKIP
@@ -687,7 +696,7 @@ class Subgraph {
     // Constructor should be called with the non-nullptr profiler argument.
     SubgraphAwareProfiler(Profiler* profiler, int64_t subgraph_index)
         : profiler_(profiler), subgraph_index_(subgraph_index) {}
-    ~SubgraphAwareProfiler() override {}
+    ~SubgraphAwareProfiler() override = default;
 
     uint32_t BeginEvent(const char* tag, EventType event_type,
                         int64_t event_metadata1,
@@ -1170,6 +1179,9 @@ class Subgraph {
 
   std::unique_ptr<MemoryPlanner> memory_planner_;
 
+  // Allocator used for runtime-owned CPU buffers. Not owned.
+  TfLiteAllocator* allocator_ = nullptr;
+
   // Maps tensor index to custom allocation for all applicable tensors.
   std::map<int, TfLiteCustomAllocation> custom_allocations_;
 
@@ -1270,6 +1282,14 @@ class Subgraph {
   // Maps tensor external buffer ids used in the subgraph to a model-wide
   // identifiers.
   std::unordered_map<size_t, size_t> tensor_external_buffer_ids_;
+
+  struct FreeDeleter {
+    void operator()(char* p) const { free(p); }
+  };
+
+  // Holds aligned copies of read-only tensor buffers whose original backing
+  // memory was not naturally aligned for the tensor's element type.
+  std::vector<std::unique_ptr<char, FreeDeleter>> aligned_ro_buffers_;
 };
 
 }  // namespace tflite

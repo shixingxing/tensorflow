@@ -22,16 +22,19 @@ limitations under the License.
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
-#include "xla/tsl/platform/status_macros.h"
+#include "xla/backends/cpu/codegen/target_machine_features.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/service/collective_ops_utils.h"
 #include "xla/service/cpu/cpu_executable.h"
+#include "xla/service/cpu/dot_op_emitter.h"
+#include "xla/service/cpu/ir_emission_utils.h"
 #include "xla/service/hlo_cost_analysis.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
@@ -39,7 +42,21 @@ limitations under the License.
 
 namespace xla::cpu {
 
-static bool InstructionIsUnavailable(const HloInstruction* instr) {
+// The call thunk emitter compiles the loop with runtime calls disabled, so dots
+// and convolutions that would otherwise call Eigen fall back to a naive loop
+// nest. IrEmitter::HandleDot and HandleConvolution also reject operand types
+// that the thunk emitter supports (e.g. BF16).
+static bool OperandTypesUnsupported(const HloInstruction* instr) {
+  constexpr PrimitiveType kSupportedTypes[] = {
+      PRED, S8, U8, S16, U16, S32, U32, S64, U64, F16, F32, F64, C64, C128};
+  PrimitiveType lhs_type = instr->operand(0)->shape().element_type();
+  return lhs_type != instr->operand(1)->shape().element_type() ||
+         !absl::c_linear_search(kSupportedTypes, lhs_type);
+}
+
+static bool InstructionIsUnavailable(
+    const HloInstruction* instr,
+    const TargetMachineFeatures& target_machine_features) {
   switch (instr->opcode()) {
     // The following instructions are not currently supported by the call thunk
     // emitter due to how the legacy & thunk emitters interact; specifically,
@@ -58,6 +75,18 @@ static bool InstructionIsUnavailable(const HloInstruction* instr) {
     case HloOpcode::kFusion:
       return instr->fusion_kind() == HloInstruction::FusionKind::kCustom;
 
+    case HloOpcode::kDot:
+      return OperandTypesUnsupported(instr) ||
+             GetDotImplementationStrategy(instr->GetModule()->config(), *instr,
+                                          target_machine_features,
+                                          /*allow_runtime_calls=*/true) ==
+                 DotImplementationStrategy::kEigen;
+
+    case HloOpcode::kConvolution:
+      return OperandTypesUnsupported(instr) ||
+             PotentiallyImplementedAsEigenConvolution(*instr,
+                                                      target_machine_features);
+
     default:
       return IsCollective(instr);
   }
@@ -67,19 +96,21 @@ static bool InstructionIsUnavailable(const HloInstruction* instr) {
 // "unavailable" for the call thunk emitter.
 static bool ContainsUnavailableInstruction(
     const HloInstruction* instr,
+    const TargetMachineFeatures& target_machine_features,
     absl::flat_hash_map<const HloInstruction*, bool>& has_unavailable_instr) {
   if (const auto itr = has_unavailable_instr.find(instr);
       itr != has_unavailable_instr.end()) {
     return itr->second;
   }
 
-  if (InstructionIsUnavailable(instr)) {
+  if (InstructionIsUnavailable(instr, target_machine_features)) {
     return has_unavailable_instr.insert({instr, true}).first->second;
   }
 
   for (const HloComputation* called_comp : instr->called_computations()) {
     for (const HloInstruction* sub_instr : called_comp->instructions()) {
-      if (ContainsUnavailableInstruction(sub_instr, has_unavailable_instr)) {
+      if (ContainsUnavailableInstruction(sub_instr, target_machine_features,
+                                         has_unavailable_instr)) {
         return has_unavailable_instr.insert({instr, true}).first->second;
       }
     }
@@ -89,8 +120,10 @@ static bool ContainsUnavailableInstruction(
 }
 
 SmallWhileLoopHoistingPass::SmallWhileLoopHoistingPass(
-    int64_t small_buffer_access_size)
-    : small_buffer_access_size_(small_buffer_access_size) {}
+    int64_t small_buffer_access_size,
+    const TargetMachineFeatures* target_machine_features)
+    : small_buffer_access_size_(small_buffer_access_size),
+      target_machine_features_(target_machine_features) {}
 
 absl::StatusOr<bool> SmallWhileLoopHoistingPass::RunImpl(
     HloModule* module,
@@ -104,11 +137,12 @@ absl::StatusOr<bool> SmallWhileLoopHoistingPass::RunImpl(
   bool changed = false;
   absl::flat_hash_map<const HloInstruction*, bool> has_unavailable_instr;
   for (HloInstruction* while_instr : while_instrs) {
-    if (ContainsUnavailableInstruction(while_instr, has_unavailable_instr)) {
+    if (ContainsUnavailableInstruction(while_instr, *target_machine_features_,
+                                       has_unavailable_instr)) {
       continue;
     }
 
-    ASSIGN_OR_RETURN(bool is_small_call_site, IsSmall(while_instr));
+    ABSL_ASSIGN_OR_RETURN(bool is_small_call_site, IsSmall(while_instr));
     if (!is_small_call_site) {
       continue;
     }
@@ -118,7 +152,7 @@ absl::StatusOr<bool> SmallWhileLoopHoistingPass::RunImpl(
     std::vector<HloInstruction*> parameters;
     parameters.reserve(while_instr->operand_count());
     for (HloInstruction* operand : while_instr->operands()) {
-      ASSIGN_OR_RETURN(HloInstruction * parameter,
+      ABSL_ASSIGN_OR_RETURN(HloInstruction * parameter,
                        builder.AddParameter(HloInstruction::CreateParameter(
                            while_instr->operand_index(operand),
                            operand->shape(), operand->name())));
@@ -133,9 +167,9 @@ absl::StatusOr<bool> SmallWhileLoopHoistingPass::RunImpl(
             module->AddEmbeddedComputation(builder.Build())));
     call_instruction->add_frontend_attribute("xla_cpu_small_call", "true");
 
-    RETURN_IF_ERROR(while_instr->ReplaceAllUsesWith(call_instruction));
-    RETURN_IF_ERROR(while_instr->SafelyDropAllControlDependencies());
-    RETURN_IF_ERROR(while_instr->parent()->RemoveInstruction(while_instr));
+    ABSL_RETURN_IF_ERROR(while_instr->ReplaceAllUsesWith(call_instruction));
+    ABSL_RETURN_IF_ERROR(while_instr->SafelyDropAllControlDependencies());
+    ABSL_RETURN_IF_ERROR(while_instr->parent()->RemoveInstruction(while_instr));
 
     changed = true;
   }
@@ -146,7 +180,7 @@ absl::StatusOr<bool> SmallWhileLoopHoistingPass::RunImpl(
 absl::StatusOr<bool> SmallWhileLoopHoistingPass::IsSmall(
     const HloInstruction* instr) {
   HloCostAnalysis cost_analysis(&CpuExecutable::ShapeSizeBytes);
-  RETURN_IF_ERROR(cost_analysis.RevisitInstruction(instr));
+  ABSL_RETURN_IF_ERROR(cost_analysis.RevisitInstruction(instr));
   return cost_analysis.bytes_accessed(*instr) < small_buffer_access_size_;
 }
 

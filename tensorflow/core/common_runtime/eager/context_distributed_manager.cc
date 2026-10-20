@@ -150,6 +150,11 @@ class XlaKeyValueStore : public xla::KeyValueStoreInterface {
         absl::StrCat(key_prefix_, key), value);
   };
 
+  absl::Status Delete(absl::string_view key) override {
+    return coordination_service_agent_->DeleteKeyValue(
+        absl::StrCat(key_prefix_, key));
+  }
+
  private:
   tsl::CoordinationServiceAgent* coordination_service_agent_;
   std::string key_prefix_;
@@ -276,6 +281,19 @@ absl::Status CreateClientOnce(
     auto kv_store =
         std::make_shared<XlaKeyValueStore>(coordination_service_agent);
     xla::GpuClientOptions options;
+    // TF may simulate several workers with threads in one process (see the
+    // comment above CreateClientOnce). Only the first thread runs
+    // BuildDistributedDevices, with its own node_id; the other threads run
+    // ExchangeEmptyStreamExecutorGpuTopology, which never publishes the
+    // "topology_fingerprint" key that process 0 is expected to write. If the
+    // first thread is not node 0, fingerprint verification blocks until the
+    // 5-minute get_global_topology_timeout. The check was introduced in
+    // cl/990436201 and this path never relied on it, so disable it here.
+    // Multi-process deployments can still opt in with
+    // XLA_PJRT_GPU_VALIDATE_TOPOLOGY=true, which overrides this default.
+    // TODO(b/569388851): re-enable once the handshake also works with
+    // in-process simulated workers.
+    options.verify_topology_fingerprint = false;
     options.kv_store = kv_store;
     options.node_id = node_id;
     options.num_nodes = num_nodes;
@@ -303,27 +321,11 @@ absl::Status CreateClientOnce(
       return absl::OkStatus();
     }
 
-    std::vector<std::unique_ptr<xla::PjRtStreamExecutorDevice>> pjrt_devices;
-    auto gpu_run_options =
-        std::make_unique<xla::gpu::GpuExecutableRunOptions>();
-#if TENSORFLOW_USE_ROCM
-    auto platform_name = xla::RocmName();
-#elif TENSORFLOW_USE_SYCL
-    auto platform_name = xla::SyclName();
-#else   // TENSORFLOW_USE_ROCM
-    auto platform_name = xla::CudaName();
-#endif  // TENSORFLOW_USE_ROCM
-
-    auto kv_store =
-        std::make_shared<XlaKeyValueStore>(coordination_service_agent);
-    std::map<int, std::unique_ptr<xla::LocalDeviceState>> local_device_states;
-    // TODO(parkers): figure out why the old code was dilligently calling just
-    // this with an empty 'local_device_states' when !use_creation_info.
-    auto device_topology_pair = BuildDistributedDevices(
-        platform_name, std::move(local_device_states), node_id, num_nodes,
-        gpu_run_options.get(), kv_store, /*enable_mock_nccl=*/false);
-    if (!device_topology_pair.ok()) {
-      return device_topology_pair.status();
+    absl::Status status = ExchangeEmptyStreamExecutorGpuTopology(
+        node_id, num_nodes,
+        std::make_shared<XlaKeyValueStore>(coordination_service_agent));
+    if (!status.ok()) {
+      return status;
     }
     LOG(INFO) << "Skipping creating PJRT GPU client, another thread has "
                  "already created the client.";
@@ -849,7 +851,7 @@ absl::Status UpdateContextWithServerDef(EagerContext* context,
     if (sg.ok()) {
       // Create remote contexts on the newly added workers only if the master
       // has collected all device information from them (i.e., the
-      // GetAllRemoteDevices call returns succussfully). Note that in rare cases
+      // GetAllRemoteDevices call returns successfully). Note that in rare cases
       // GetAllRemoteDevices can still fail even with RPCs configured to wait
       // until the remote workers to become alive. If the master creates remote
       // contexts on the workers whose devices are still not collected, those

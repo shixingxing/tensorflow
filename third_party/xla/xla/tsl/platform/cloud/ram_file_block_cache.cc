@@ -20,10 +20,10 @@ limitations under the License.
 
 #include "absl/cleanup/cleanup.h"
 #include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
-#include "xla/tsl/platform/status_macros.h"
 #include "xla/tsl/platform/env.h"
 
 namespace tsl {
@@ -33,7 +33,9 @@ bool RamFileBlockCache::BlockNotStale(const std::shared_ptr<Block>& block) {
   if (block->state != FetchState::FINISHED) {
     return true;  // No need to check for staleness.
   }
-  if (max_staleness_ == 0) return true;  // Not enforcing staleness.
+  if (max_staleness_ == 0) {
+    return true;  // Not enforcing staleness.
+  }
   return env_->NowSeconds() - block->timestamp <= max_staleness_;
 }
 
@@ -47,10 +49,9 @@ std::shared_ptr<RamFileBlockCache::Block> RamFileBlockCache::Lookup(
         cache_stats_->RecordCacheHitBlockSize(entry->second->data.size());
       }
       return entry->second;
-    } else {
+    }
       // Remove the stale block and continue.
       RemoveFile_Locked(key.first);
-    }
   }
 
   // Insert a new empty block, setting the bookkeeping to sentinel values
@@ -198,8 +199,8 @@ absl::Status RamFileBlockCache::Read(const std::string& filename, size_t offset,
     // LRU iterator for the key and block.
     std::shared_ptr<Block> block = Lookup(key);
     DCHECK(block) << "No block for key " << key.first << "@" << key.second;
-    RETURN_IF_ERROR(MaybeFetch(key, block));
-    RETURN_IF_ERROR(UpdateLRU(key, block));
+    ABSL_RETURN_IF_ERROR(MaybeFetch(key, block));
+    ABSL_RETURN_IF_ERROR(UpdateLRU(key, block));
     // Copy the relevant portion of the block into the result buffer.
     const auto& data = block->data;
     if (offset >= pos + data.size()) {

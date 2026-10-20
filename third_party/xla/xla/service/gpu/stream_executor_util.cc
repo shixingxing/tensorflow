@@ -19,7 +19,6 @@ limitations under the License.
 #include <cstdint>
 #include <iterator>
 #include <limits>
-#include <map>
 #include <memory>
 #include <optional>
 #include <random>
@@ -31,18 +30,20 @@ limitations under the License.
 #include <vector>
 
 #include "absl/algorithm/container.h"
-#include "absl/base/const_init.h"
+#include "absl/base/no_destructor.h"
+#include "absl/base/optimization.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "Eigen/Core"
-#include "xla/tsl/platform/status_macros.h"
 #include "xla/autotuning.pb.h"
+#include "xla/backends/gpu/runtime/per_device_state.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/layout.h"
 #include "xla/layout_util.h"
@@ -79,26 +80,6 @@ using tsl::profiler::TraceMeLevel;
 
 namespace xla {
 namespace gpu {
-
-absl::StatusOr<se::dnn::VersionInfo> GetDnnVersionInfo(
-    stream_executor::StreamExecutor* stream_exec) {
-  if (!stream_exec) {
-    return absl::InvalidArgumentError("StreamExecutor is null");
-  }
-  stream_executor::dnn::DnnSupport* dnn = stream_exec->AsDnn();
-  if (!dnn) {
-    return absl::FailedPreconditionError(
-        "DNN library initialization failed. Look at the errors above for more "
-        "details.");
-  }
-  return dnn->GetVersion();
-}
-
-se::dnn::VersionInfo GetDnnVersionInfoOrDefault(
-    stream_executor::StreamExecutor* stream_exec,
-    se::dnn::VersionInfo fallback_version) {
-  return GetDnnVersionInfo(stream_exec).value_or(fallback_version);
-}
 
 namespace {
 
@@ -162,11 +143,11 @@ absl::StatusOr<std::tuple<Layout, Layout, Layout>>
 StreamExecutorConvLayoutsToXlaLayouts(const ConvolutionDimensionNumbers& dnums,
                                       DataLayout input, FilterLayout filter,
                                       DataLayout output) {
-  ASSIGN_OR_RETURN(Layout input_layout,
+  ABSL_ASSIGN_OR_RETURN(Layout input_layout,
                    DataLayoutToXlaLayout(input, dnums.input_batch_dimension(),
                                          dnums.input_feature_dimension(),
                                          dnums.input_spatial_dimensions()));
-  ASSIGN_OR_RETURN(Layout output_layout,
+  ABSL_ASSIGN_OR_RETURN(Layout output_layout,
                    DataLayoutToXlaLayout(input, dnums.output_batch_dimension(),
                                          dnums.output_feature_dimension(),
                                          dnums.output_spatial_dimensions()));
@@ -236,10 +217,14 @@ XlaConvShapesToStreamExecutorLayouts(const ConvolutionDimensionNumbers& dnums,
                                             DataLayout::kBatchYXDepth)
           .value();
 
+  constexpr auto layout_equal = [](const Layout& a, const Layout& b) {
+    return Layout::Equal().IgnoreMemorySpace()(a, b);
+  };
+
   DataLayout input_layout;
-  if (LayoutUtil::Equal(input.layout(), nchw_input)) {
+  if (layout_equal(input.layout(), nchw_input)) {
     input_layout = DataLayout::kBatchDepthYX;
-  } else if (LayoutUtil::Equal(input.layout(), nchw_vect_input)) {
+  } else if (layout_equal(input.layout(), nchw_vect_input)) {
     // Differentiate between VECT_4 and VECT_32 by looking at the input shape.
     int64_t vect_size = input.dimensions(input.layout().minor_to_major(0));
     if (vect_size == 4) {
@@ -253,7 +238,7 @@ XlaConvShapesToStreamExecutorLayouts(const ConvolutionDimensionNumbers& dnums,
           ShapeUtil::HumanStringWithLayout(input),
           ConvolutionDimensionNumbersToString(dnums), vect_size);
     }
-  } else if (LayoutUtil::Equal(input.layout(), nhwc_input)) {
+  } else if (layout_equal(input.layout(), nhwc_input)) {
     input_layout = DataLayout::kBatchYXDepth;
   } else {
     return Internal(
@@ -265,9 +250,9 @@ XlaConvShapesToStreamExecutorLayouts(const ConvolutionDimensionNumbers& dnums,
   }
 
   FilterLayout filter_layout;
-  if (LayoutUtil::Equal(filter.layout(), nchw_filter)) {
+  if (layout_equal(filter.layout(), nchw_filter)) {
     filter_layout = FilterLayout::kOutputInputYX;
-  } else if (LayoutUtil::Equal(filter.layout(), nchw_vect_filter)) {
+  } else if (layout_equal(filter.layout(), nchw_vect_filter)) {
     int64_t vect_size = filter.dimensions(filter.layout().minor_to_major(0));
     if (vect_size == 4) {
       filter_layout = FilterLayout::kOutputInputYX4;
@@ -280,7 +265,7 @@ XlaConvShapesToStreamExecutorLayouts(const ConvolutionDimensionNumbers& dnums,
           ShapeUtil::HumanStringWithLayout(filter),
           ConvolutionDimensionNumbersToString(dnums), vect_size);
     }
-  } else if (LayoutUtil::Equal(filter.layout(), nhwc_filter)) {
+  } else if (layout_equal(filter.layout(), nhwc_filter)) {
     filter_layout = FilterLayout::kOutputYXInput;
   } else {
     return Internal(
@@ -292,9 +277,9 @@ XlaConvShapesToStreamExecutorLayouts(const ConvolutionDimensionNumbers& dnums,
   }
 
   DataLayout output_layout;
-  if (LayoutUtil::Equal(output.layout(), nchw_output)) {
+  if (layout_equal(output.layout(), nchw_output)) {
     output_layout = DataLayout::kBatchDepthYX;
-  } else if (LayoutUtil::Equal(output.layout(), nchw_vect_output)) {
+  } else if (layout_equal(output.layout(), nchw_vect_output)) {
     int64_t vect_size = output.dimensions(output.layout().minor_to_major(0));
     if (vect_size == 4) {
       output_layout = DataLayout::kBatchDepthYX4;
@@ -307,7 +292,7 @@ XlaConvShapesToStreamExecutorLayouts(const ConvolutionDimensionNumbers& dnums,
           ShapeUtil::HumanStringWithLayout(output),
           ConvolutionDimensionNumbersToString(dnums), vect_size);
     }
-  } else if (LayoutUtil::Equal(output.layout(), nhwc_output)) {
+  } else if (layout_equal(output.layout(), nhwc_output)) {
     output_layout = DataLayout::kBatchYXDepth;
   } else {
     return Internal("Invalid output layout %s for conv with dnums %s",
@@ -358,21 +343,19 @@ FindVectorizedFeatureDims(const ConvolutionDimensionNumbers& dnums,
 
 // Returns a mutex that can be used to lock the given stream executor.
 absl::Mutex& GetGpuMutex(const se::StreamExecutor* stream_exec) {
-  static absl::Mutex mu(absl::kConstInit);
-  // se::Platform*s are global singletons guaranteed to live forever.
-  static auto* mutexes =
-      new std::map<std::pair<const se::Platform*, /*device_ordinal*/ int64_t>,
-                   absl::Mutex>();
-
-  absl::MutexLock global_lock(mu);
-  auto it = mutexes
-                ->emplace(std::piecewise_construct,
-                          std::make_tuple(stream_exec->GetPlatform(),
-                                          stream_exec->device_ordinal()),
-                          std::make_tuple())
-                .first;
-
-  return it->second;
+  // Pre-allocate 16 slots to cover standard multi-GPU host topologies
+  // (typically 8 or 16 GPUs per host) with O(1) flat vector indexing. Ordinals
+  // >= 16 fall back to PerDeviceState's dynamic copy-on-write storage.
+  static absl::NoDestructor<PerDeviceState<absl::Mutex>> mutexes(
+      /*num_devices=*/16);
+  int device_ordinal = stream_exec->device_ordinal();
+  if (ABSL_PREDICT_FALSE(device_ordinal < 0)) {
+    static absl::NoDestructor<absl::Mutex> fallback_mu;
+    return *fallback_mu;
+  }
+  absl::StatusOr<absl::Mutex*> mu = mutexes->GetOrCreate(device_ordinal);
+  CHECK_OK(mu.status());
+  return **mu;
 }
 
 absl::StatusOr<std::unique_ptr<se::Kernel>> CreateKernel(
@@ -382,7 +365,7 @@ absl::StatusOr<std::unique_ptr<se::Kernel>> CreateKernel(
       se::KernelLoaderSpec::CreateCudaPtxInMemorySpec(
           ptx, std::move(kernel_name), num_args);
 
-  ASSIGN_OR_RETURN(std::unique_ptr<se::Kernel> kernel,
+  ABSL_ASSIGN_OR_RETURN(std::unique_ptr<se::Kernel> kernel,
                    stream_exec->LoadKernel(loader_spec));
 
   se::KernelMetadata m;
@@ -400,7 +383,7 @@ absl::StatusOr<std::unique_ptr<se::Kernel>> CreateKernel(
       se::KernelLoaderSpec::CreateCudaCubinInMemorySpec(
           cubin_data, std::move(kernel_name), num_args);
 
-  ASSIGN_OR_RETURN(std::unique_ptr<se::Kernel> kernel,
+  ABSL_ASSIGN_OR_RETURN(std::unique_ptr<se::Kernel> kernel,
                    stream_exec->LoadKernel(loader_spec));
 
   se::KernelMetadata m;
@@ -424,7 +407,7 @@ absl::Status ExecuteKernelOnStream(
           return TraceMeEncode("ExecuteKernelOnStream/PackKernelArgs", {});
         },
         /*level=*/TraceMeLevel::kVerbose);
-    ASSIGN_OR_RETURN(kernel_args, se::PackKernelArgs(args, kernel.metadata()));
+    ABSL_ASSIGN_OR_RETURN(kernel_args, se::PackKernelArgs(args, kernel.metadata()));
   }
 
   return kernel.Launch(dims.thread_counts_per_block(), dims.block_counts(),

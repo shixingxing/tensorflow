@@ -23,10 +23,10 @@
 #include "absl/log/log.h"
 #include "absl/memory/memory.h"
 #include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
-#include "xla/tsl/platform/status_macros.h"
 #include "grpc/grpc.h"
 #include "grpcpp/completion_queue.h"
 #include "grpcpp/grpcpp.h"
@@ -84,7 +84,8 @@ GrpcServer::CreateFromIfrtClientFactory(
     absl::string_view address,
     absl::AnyInvocable<absl::StatusOr<std::shared_ptr<xla::ifrt::Client>>(
         AttributeMap initialization_data)>
-        backend_ifrt_client_factory) {
+        backend_ifrt_client_factory,
+    GrpcServiceImpl::Options options) {
   if (backend_ifrt_client_factory == nullptr) {
     return absl::InvalidArgumentError(
         "backend_ifrt_client_factory cannot be nullptr.");
@@ -96,11 +97,12 @@ GrpcServer::CreateFromIfrtClientFactory(
           std::shared_ptr<HostBufferStore> host_buffer_store,
           AttributeMap initialization_data) mutable
           -> absl::StatusOr<std::unique_ptr<BackendInterface>> {
-        ASSIGN_OR_RETURN(auto ifrt_client,
+        ABSL_ASSIGN_OR_RETURN(auto ifrt_client,
                          ifrt_client_factory(std::move(initialization_data)));
         return IfrtBackend::Create(version, session_id, std::move(ifrt_client),
                                    std::move(host_buffer_store));
-      });
+      },
+      std::move(options));
 
   return Create(address, std::move(service));
 }

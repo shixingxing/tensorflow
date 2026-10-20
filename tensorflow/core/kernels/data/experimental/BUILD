@@ -1,3 +1,18 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 #   Contains experimental kernels for datasets and iterators.
 
@@ -574,6 +589,7 @@ tf_kernel_library(
         "//tensorflow/core/data:name_utils",
         "//tensorflow/core/data:stats_utils",
         "//tensorflow/core/kernels:inplace_ops",
+        "//tensorflow/core/platform:env",
         "//tensorflow/core/profiler/lib:traceme",
         "//tensorflow/core/profiler/lib:traceme_encode",
     ],
@@ -632,6 +648,7 @@ tf_kernel_library(
         "//tensorflow/core/data:captured_function",
         "//tensorflow/core/data:dataset_utils",
         "//tensorflow/core/data:name_utils",
+        "//tensorflow/core/platform:env",
         "//tensorflow/core/profiler/lib:traceme",
         "//tensorflow/core/profiler/lib:traceme_encode",
     ],
@@ -666,6 +683,7 @@ tf_kernel_library(
         "//tensorflow/core/data:stats_utils",
         "//tensorflow/core/kernels:ragged_tensor_variant",
         "//tensorflow/core/kernels/data:parallel_map_dataset_op",
+        "//tensorflow/core/platform:env",
         "//tensorflow/core/profiler/lib:traceme",
         "//tensorflow/core/profiler/lib:traceme_encode",
         "@com_google_absl//absl/synchronization",
@@ -831,10 +849,33 @@ tf_kernel_library(
         "//tensorflow/core:lib_internal",
         "//tensorflow/core/framework:attr_value_proto_cc",
         "//tensorflow/core/framework:dataset_options_proto_cc",
+        "//tensorflow/core/util:overflow",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
+    ],
+)
+
+tf_cc_test(
+    name = "sliding_window_dataset_op_test",
+    size = "small",
+    srcs = ["sliding_window_dataset_op_test.cc"],
+    deps = [
+        ":sliding_window_dataset_op",
+        "//tensorflow/core:experimental_dataset_ops_op_lib",
+        "//tensorflow/core:framework",
+        "//tensorflow/core:test_main",
+        "//tensorflow/core/data:dataset_test_base",
+        "//tensorflow/core/data:name_utils",
+        "//tensorflow/core/framework:types_proto_cc",
+        "//tensorflow/core/kernels/data:range_dataset_op",
+        "//tensorflow/core/platform:status",
+        "//tensorflow/core/platform:types",
+        "@com_google_absl//absl/status",
+        "@com_google_googletest//:gtest_main",
+        "@xla//xla/tsl/lib/core:status_test_util",
+        "@xla//xla/tsl/platform:status_matchers",
     ],
 )
 

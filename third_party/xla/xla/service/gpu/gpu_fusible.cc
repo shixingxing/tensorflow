@@ -587,6 +587,12 @@ FusionDecision IsProducerMultiOutputFusible(
     return FusionDecision::Forbid("Producer is a multi-output fusion");
   }
 
+  // Custom fusions cannot be fused into consumers. Their consumers can still be
+  // sibling-fused.
+  if (producer.IsCustomFusion()) {
+    return FusionDecision::Forbid("Producer is a custom fusion");
+  }
+
   // Allowing multi-output fusions that contain in-place operations makes code
   // generation more difficult. For the generated loop to iterate over all
   // outputs in parallel, it must find an iteration order that guarantees that
@@ -1084,6 +1090,48 @@ int ComputeLoopFusionConfig(const HloFusionAnalysis& analysis,
   VLOG(2) << "Unroll factor: " << unroll_factor;
 
   return unroll_factor;
+}
+
+static bool ContainsScanNoCache(const HloInstruction& instr) {
+  if (instr.opcode() == HloOpcode::kScan) {
+    return true;
+  }
+  if (instr.opcode() != HloOpcode::kFusion) {
+    return false;
+  }
+  return absl::c_any_of(
+      instr.fused_instructions_computation()->instructions(),
+      [](const HloInstruction* node) { return ContainsScanNoCache(*node); });
+}
+
+bool FusionInfoCache::ContainsScan(const HloInstruction& instr) {
+  if (instr.opcode() == HloOpcode::kScan) {
+    return true;
+  }
+  if (instr.opcode() != HloOpcode::kFusion) {
+    return false;
+  }
+
+  {
+    absl::MutexLock lock(mutex_);
+    auto it = contains_scan_.find(&instr);
+    if (it != contains_scan_.end()) {
+      return it->second;
+    }
+  }
+
+  bool contains_scan = ContainsScanNoCache(instr);
+
+  absl::MutexLock lock(mutex_);
+  contains_scan_.emplace(&instr, contains_scan);
+  return contains_scan;
+}
+
+bool ContainsScan(const HloInstruction& instr, FusionInfoCache* cache) {
+  if (cache == nullptr) {
+    return ContainsScanNoCache(instr);
+  }
+  return cache->ContainsScan(instr);
 }
 
 }  // namespace gpu

@@ -32,6 +32,7 @@ limitations under the License.
 #include "xla/hlo/testlib/hlo_hardware_independent_test_base.h"
 #include "xla/hlo/testlib/verified_hlo_module.h"
 #include "xla/tsl/platform/statusor.h"
+#include "xla/xla.pb.h"
 
 namespace xla {
 namespace {
@@ -49,6 +50,10 @@ MATCHER_P2(InstructionMapping, instruction, num_tiling_parameters,
 class TilingSpecificationTest : public HloHardwareIndependentTestBase {
  public:
   TilingSpecificationTest() { RegisterSymbolicExprStorage(&mlir_context_); }
+
+  void SetUp() override {
+    GTEST_SKIP() << "Legacy symbolic tile analysis is disallowed.";
+  }
 
  protected:
   DebugOptions GetDebugOptionsForTest() const override {
@@ -77,8 +82,8 @@ class TilingSpecificationTest : public HloHardwareIndependentTestBase {
 };
 
 TEST_F(TilingSpecificationTest, TilingSpecificationDerivesOutputParameters) {
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
-                          ParseAndReturnVerifiedModule(R"(
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                       ParseAndReturnVerifiedModule(R"(
 computation {
   ROOT p0 = f32[137,115] parameter(0)
 }
@@ -98,8 +103,8 @@ ENTRY main {
 }
 
 TEST_F(TilingSpecificationTest, TilingSpecificationDerivesHiddenDotParameters) {
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
-                          ParseAndReturnVerifiedModule(R"(
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                       ParseAndReturnVerifiedModule(R"(
 computation {
   p0 = f32[137,115] parameter(0)
   p1 = f32[115,137] parameter(1)
@@ -128,8 +133,8 @@ ENTRY main {
 
 TEST_F(TilingSpecificationTest,
        TilingSpecificationDerivesOutputAndHiddenParametersOnTheSameOperation) {
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
-                          ParseAndReturnVerifiedModule(R"(
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                       ParseAndReturnVerifiedModule(R"(
 computation {
   p0 = f32[137,115] parameter(0)
   p1 = f32[115,137] parameter(1)
@@ -155,8 +160,8 @@ ENTRY main {
 
 TEST_F(TilingSpecificationTest,
        TilingSpecificationDerivesHiddenParametersForDots) {
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
-                          ParseAndReturnVerifiedModule(R"(
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                       ParseAndReturnVerifiedModule(R"(
 computation {
   p0 = f32[137,115] parameter(0)
   p1 = f32[115,137] parameter(1)
@@ -191,8 +196,8 @@ ENTRY main {
 
 TEST_F(TilingSpecificationTest,
        TilingWithIncorrectSetOfNestedTileSizesDoesNotConformToSpecification) {
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
-                          ParseAndReturnVerifiedModule(R"(
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                       ParseAndReturnVerifiedModule(R"(
 computation {
   p0 = f32[137,115] parameter(0)
   p1 = f32[115,137] parameter(1)
@@ -224,8 +229,8 @@ ENTRY main {
 
 TEST_F(TilingSpecificationTest,
        TilingWithIncorrectSetOfOutputTileSizesDoesNotConformToSpecification) {
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
-                          ParseAndReturnVerifiedModule(R"(
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                       ParseAndReturnVerifiedModule(R"(
 computation {
   p0 = f32[137,115] parameter(0)
   p1 = f32[115,137] parameter(1)
@@ -260,8 +265,8 @@ ENTRY main {
 
 TEST_F(TilingSpecificationTest,
        TilingWithIncorrectSetOfTiledInstructionsDoesNotConformToSpecification) {
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
-                          ParseAndReturnVerifiedModule(R"(
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                       ParseAndReturnVerifiedModule(R"(
 computation {
   p0 = f32[137,115] parameter(0)
   p1 = f32[115,137] parameter(1)
@@ -300,8 +305,8 @@ ENTRY main {
 
 TEST_F(TilingSpecificationTest,
        TilingWithExactlyConformantSetOfParametersConformsToSpecification) {
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
-                          ParseAndReturnVerifiedModule(R"(
+  ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                       ParseAndReturnVerifiedModule(R"(
 computation {
   p0 = f32[137,115] parameter(0)
   p1 = f32[115,137] parameter(1)

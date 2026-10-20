@@ -18,19 +18,17 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "ynnpack/include/ynnpack.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
-#include "xla/tsl/platform/status_macros.h"
 #include "xla/backends/cpu/runtime/buffer_allocations.h"
 #include "xla/backends/cpu/runtime/thunk.h"
 #include "xla/backends/cpu/runtime/thunk_testlib.h"
 #include "xla/backends/cpu/runtime/ynnpack/ynn_interop.h"
-#include "xla/backends/cpu/runtime/ynnpack/ynn_threadpool.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/literal_util.h"
 #include "xla/service/buffer_assignment.h"
@@ -52,7 +50,7 @@ namespace {
 static absl::StatusOr<YnnSubgraph> BuildBinaryAddSubgraph(
     absl::Span<const YnnFusionThunk::Argument> arguments,
     absl::Span<const YnnFusionThunk::Result> results) {
-  ASSIGN_OR_RETURN(YnnSubgraph subgraph,
+  ABSL_ASSIGN_OR_RETURN(YnnSubgraph subgraph,
                    CreateYnnSubgraph([&](ynn_subgraph_t* subgraph) {
                      return ynn_create_subgraph(
                          /*external_value_ids=*/3,
@@ -92,7 +90,7 @@ static absl::StatusOr<YnnSubgraph> BuildBinaryAddSubgraph(
 static absl::StatusOr<YnnSubgraph> BuildIotaSubgraph(
     absl::Span<const YnnFusionThunk::Argument> arguments,
     absl::Span<const YnnFusionThunk::Result> results) {
-  ASSIGN_OR_RETURN(YnnSubgraph subgraph,
+  ABSL_ASSIGN_OR_RETURN(YnnSubgraph subgraph,
                    CreateYnnSubgraph([&](ynn_subgraph_t* subgraph) {
                      return ynn_create_subgraph(
                          /*external_value_ids=*/1,
@@ -160,22 +158,24 @@ TEST_P(YnnFusionThunkTest, ElementwiseAdd) {
                       reinterpret_cast<HloInstruction*>(0xDEADBEEF),
                       {lhs_arg, rhs_arg}, {out_res}, &BuildBinaryAddSubgraph));
 
-  YnnThreadpool threadpool;
-  if (use_threadpool()) {
-    TF_ASSERT_OK_AND_ASSIGN(threadpool, CreateYnnThreadpool(&device));
-  }
-  Thunk::YnnParams ynn_params(std::move(threadpool));
-
   Thunk::ExecuteParams params;
   params.buffer_allocations = &allocations;
   params.intra_op_threadpool = use_threadpool() ? &device : nullptr;
-  params.ynn_params = &ynn_params;
 
   auto execute_event = thunk->Execute(params);
   tsl::BlockUntilReady(execute_event);
   ASSERT_FALSE(execute_event.IsError()) << execute_event.GetError();
 
   EXPECT_EQ(out, LiteralUtil::CreateR1<float>({5.0, 5.0, 5.0, 5.0}));
+
+  bool factory_called = false;
+  const YnnThreadpool& threadpool =
+      params.ynn_params.GetOrCreateThreadpool([&] {
+        factory_called = true;
+        return YnnThreadpool(nullptr, nullptr);
+      });
+  EXPECT_EQ(factory_called, !use_threadpool());
+  EXPECT_EQ(threadpool != nullptr, use_threadpool());
 }
 
 TEST_P(YnnFusionThunkTest, Iota) {
@@ -200,16 +200,9 @@ TEST_P(YnnFusionThunkTest, Iota) {
                       reinterpret_cast<HloInstruction*>(0xDEADBEEF), {},
                       {out_res}, &BuildIotaSubgraph));
 
-  YnnThreadpool threadpool;
-  if (use_threadpool()) {
-    TF_ASSERT_OK_AND_ASSIGN(threadpool, CreateYnnThreadpool(&device));
-  }
-  Thunk::YnnParams ynn_params(std::move(threadpool));
-
   Thunk::ExecuteParams params;
   params.buffer_allocations = &allocations;
   params.intra_op_threadpool = use_threadpool() ? &device : nullptr;
-  params.ynn_params = &ynn_params;
 
   auto execute_event = thunk->Execute(params);
   tsl::BlockUntilReady(execute_event);

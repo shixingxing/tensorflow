@@ -69,6 +69,9 @@ const char kXlaStreamAnnotationAttr[] = "_xla_stream_annotation";
 
 const char kXlaCollectiveStreamAnnotation[] = "collective";
 
+const char kCollectiveCommunicationDomainAttr[] =
+    "collective_communication_domain";
+
 const char kXlaCollectiveMatmulAttr[] = "_xla_collective_matmul";
 
 const char kXlaCollectiveMatmulLhsAg[] = "lhs_ag";
@@ -91,9 +94,23 @@ const char kFuseLimitAttr[] = "FUSE_LIMIT";
 
 const char kMaximalFuseAttr[] = "MAXIMAL_FUSE";
 
+const char kBufferingLevelAttr[] = "buffering_level";
+
+const char kOutputWindowBoundsAttr[] = "output_window_bounds";
+
+const char kKernelWindowBoundsAttr[] = "kernel_window_bounds";
+
+const char kScopedVmemLimitKibAttr[] = "scoped_vmem_limit_kib";
+
+const char kIntegerAttr[] = "integer";
+
 const char kXlaCseSafeZeroOperandAttr[] = "_xla_cse_safe_zero_operand";
 
-const char kCollectivesGroupAttr[] = "_collectives_group";
+const char kCollectiveGroupKeyAttr[] = "collective_group_key";
+
+const char kCollectiveGroupMarkerAttr[] = "_collectives_group";
+
+const char kCombinerKeyAttr[] = "combiner_key";
 
 const char kNumSlotVariables[] = "_num_slot_variables";
 
@@ -107,7 +124,7 @@ const char kXlaVocabSizeAttr[] = "_xla_vocab_size";
 const char kXlaFeatureWidthAttr[] = "_xla_feature_width";
 const char kXlaSampleCountAttr[] = "_xla_sample_count";
 
-const char kCombinerKeyAttr[] = "combiner_key";
+const char kIsPipelineableAttr[] = "is_pipelineable";
 
 const char kXlaLoopUnrollAttr[] = "_xla_loop_unroll_strategy";
 

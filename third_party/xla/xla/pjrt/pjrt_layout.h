@@ -16,16 +16,18 @@ limitations under the License.
 #ifndef XLA_PJRT_PJRT_LAYOUT_H_
 #define XLA_PJRT_PJRT_LAYOUT_H_
 
+#include <cstdint>
 #include <memory>
 #include <ostream>
 #include <string>
 #include <utility>
 
+#include "absl/algorithm/container.h"
 #include "absl/log/check.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
-#include "xla/tsl/platform/status_macros.h"
 #include "xla/hlo/parser/hlo_parser.h"
 #include "xla/layout.h"
 #include "tsl/platform/statusor.h"
@@ -39,6 +41,17 @@ class PjRtLayout {
     // Strip memory space and set it to the default. PJRT tracks memory space
     // separately from layout.
     xla_layout_.set_memory_space(xla::Layout::kDefaultMemorySpace);
+
+    for (const auto& tile : xla_layout_.tiles()) {
+      CHECK(absl::c_none_of(tile.dimensions(),
+                            [](int64_t d) {
+                              return d == xla::Tile::kCombineDimension ||
+                                     d == xla::Tile::kMatchDimension;
+                            }))
+          << "Runtime buffers must not have layouts with `kCombineDimension` "
+             "or `kMatchDimension` in tile dimensions, but got "
+          << xla_layout_;
+    }
   }
 
   PjRtLayout(PjRtLayout& other) = delete;
@@ -46,7 +59,7 @@ class PjRtLayout {
 
   static absl::StatusOr<std::shared_ptr<const PjRtLayout>> Deserialize(
       absl::string_view serialized) {
-    ASSIGN_OR_RETURN(Layout xla_layout, ParseLayout(serialized));
+    ABSL_ASSIGN_OR_RETURN(Layout xla_layout, ParseLayout(serialized));
     return std::make_shared<PjRtLayout>(std::move(xla_layout));
   }
 
@@ -59,7 +72,7 @@ class PjRtLayout {
   std::string ToString() const { return xla_layout_.ToString(); }
 
   bool operator==(const PjRtLayout& other) const {
-    return xla_layout_ == other.xla_layout_;
+    return this == &other || xla_layout_ == other.xla_layout_;
   }
 
   bool operator!=(const PjRtLayout& other) const { return !(*this == other); }

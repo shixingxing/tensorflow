@@ -22,6 +22,10 @@ load("@xla//third_party/rules_python/python:py_library.bzl", "py_library")
 
 load("@xla//xla:xla.default.bzl", "xla_py_proto_library")
 load("@xla//xla/service/cpu:build_defs.bzl", "runtime_copts")
+load(
+    "@xla//xla/tsl:tsl.bzl",
+    "internal_visibility",
+)
 load("@xla//xla/tsl/mkl:build_defs.bzl", "mkl_deps")
 load("@xla//xla/tsl/platform:build_config_root.bzl", "if_static")
 load(
@@ -45,16 +49,20 @@ package(
 
 package_group(
     name = "internal",
-    packages = [
-        "//tensorflow/compiler/aot/...",
-        "//tensorflow/compiler/jit/...",
-        "//tensorflow/compiler/mlir/...",
-        "//tensorflow/compiler/tests/...",
-        "//tensorflow/compiler/tf2xla/...",
-        "//tensorflow/core/tpu/...",
-        "//tensorflow/python/compiler/...",
-        "//tensorflow/python/util/...",
-    ],
+    packages = internal_visibility(
+        [
+            "//tensorflow/compiler/aot/...",
+            "//tensorflow/compiler/jit/...",
+            "//tensorflow/compiler/mlir/...",
+            "//tensorflow/compiler/tests/...",
+            "//tensorflow/compiler/tf2xla/...",
+            "//tensorflow/contrib/compiler/...",
+            "//tensorflow/core/tpu/...",
+            "//tensorflow/python/compiler/...",
+            "//tensorflow/python/util/...",
+        ],
+        ["public"],
+    ),
 )
 
 package_group(
@@ -429,6 +437,12 @@ cc_library(
 #         "//tensorflow/core/platform:thread_annotations",
 #         "//tensorflow/core/platform:tstring",
 #         "//tensorflow/core/platform:types",
+#         "@xla//xla/backends/cpu/runtime:work_queue",
+#         "@xla//xla/tsl/concurrency:async_value",
+#         "@xla//xla/tsl/concurrency:concurrent_vector",
+#         "@xla//xla/tsl/concurrency:executor",
+#         "@xla//xla/tsl/concurrency:ref_count",
+#         "@xla//xla/tsl/util:safe_reinterpret_cast",
 #         "@xla//xla/tsl:empty",
 #     ]),
 #     dont_match_regexp = "|".join(["//tensorflow"]),
@@ -680,7 +694,7 @@ cc_library(
         "@xla//xla/hlo/builder:xla_computation",
         "@xla//xla/hlo/ir:hlo",
         "@xla//xla/hlo/translate/mhlo_to_hlo:layout_util",
-        "@xla//xla/service:computation_placer_hdr",
+        "@xla//xla/service:device_assignment",
         "@xla//xla/service:hlo_proto_cc",
         "@xla//xla/service/spmd/shardy:constants",
         "@xla//xla/service/spmd/shardy:utils",
@@ -887,7 +901,7 @@ cc_library(
         "@xla//xla/hlo/builder:xla_computation",
         "@xla//xla/hlo/ir:hlo",
         "@xla//xla/hlo/translate/mhlo_to_hlo:layout_util",
-        "@xla//xla/service:computation_placer_hdr",
+        "@xla//xla/service:device_assignment",
         "@xla//xla/service/gpu:gpu_executable_run_options",
         "@xla//xla/stream_executor:stream",
         "@xla//xla/stream_executor:stream_executor_h",
@@ -998,10 +1012,10 @@ cc_library(
     ],
     visibility = [":friends"],
     deps = [
-        "//tensorflow/core:core_cpu_internal",
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core/common_runtime:dma_helper",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -1220,6 +1234,9 @@ tf_cc_test(
         "//tensorflow/cc:ops",
         "//tensorflow/cc:resource_variable_ops",
         "//tensorflow/cc:scope",
+        "//tensorflow/compiler/jit:common",
+        "//tensorflow/compiler/tf2xla/kernels:xla_call_module_loader",
+        "//tensorflow/compiler/tf2xla/kernels:xla_dummy_ops",
         "//tensorflow/compiler/tf2xla/kernels:xla_ops",
         "//tensorflow/core:core_cpu_internal",
         "//tensorflow/core:framework",
@@ -1237,6 +1254,7 @@ tf_cc_test(
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest",
+        "@llvm-project//mlir:IR",
         "@tsl//tsl/platform:statusor",
         "@xla//xla:array",
         "@xla//xla:debug_options_flags",
@@ -1249,6 +1267,7 @@ tf_cc_test(
         "@xla//xla/client:client_library",
         "@xla//xla/client:local_client",
         "@xla//xla/hlo/builder:xla_builder",
+        "@xla//xla/hlo/builder:xla_computation",
         "@xla//xla/hlo/ir:hlo",
         "@xla//xla/hlo/ir:hlo_sharding",
         "@xla//xla/hlo/testlib:filecheck",
@@ -1635,11 +1654,13 @@ tf_cc_test(
     srcs = ["xla_op_registry_test.cc"],
     deps = [
         ":xla_compiler",
+        "//tensorflow/compiler/tf2xla/kernels:xla_ops",
         "//tensorflow/core:framework",
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
         "@com_google_absl//absl/log",
+        "@com_google_googletest//:gtest",
     ],
 )
 

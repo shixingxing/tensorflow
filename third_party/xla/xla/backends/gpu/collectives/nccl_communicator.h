@@ -23,6 +23,7 @@ limitations under the License.
 #include <string>
 #include <utility>
 
+#include "absl/base/nullability.h"
 #include "absl/base/thread_annotations.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/functional/any_invocable.h"
@@ -42,6 +43,7 @@ limitations under the License.
 #include "xla/core/collectives/registered_memory.h"
 #include "xla/core/collectives/symmetric_memory.h"
 #include "xla/debug_options_flags.h"
+#include "xla/ffi/api/record_c_api.h"
 #include "xla/future.h"
 #include "xla/stream_executor/device_address.h"
 #include "xla/stream_executor/kernel_args.h"
@@ -56,6 +58,10 @@ limitations under the License.
 #include "third_party/nccl/nccl.h"
 #include "third_party/nccl/nccl_device.h"  // IWYU pragma: keep
 
+namespace xla::ffi {
+struct RecordContext;
+}  // namespace xla::ffi
+
 namespace xla::gpu {
 
 using NcclSignalDesc = GpuSignalDesc;
@@ -63,6 +69,8 @@ using NcclSignalDesc = GpuSignalDesc;
 struct NcclCapabilities {
   bool supports_device_comm;
   bool supports_one_sided_comm;
+  bool supports_gin;
+  std::optional<int> lsa_size;
 
   // Reason one-sided comm is not supported, cached at construction. Empty
   // if one-sided comm is supported.
@@ -110,6 +118,8 @@ class NcclCommunicator : public GpuCommunicator {
   }
 
   bool SupportsDeviceComm() const final;
+  bool SupportsGin() const final;
+  std::optional<int> LsaSize() const final;
 
   GxlCommunicator* gxl_communicator() const final {
     return gxl_communicator_.get();
@@ -213,6 +223,12 @@ class NcclCommunicator : public GpuCommunicator {
                                PrimitiveType dtype, size_t count, RankId root,
                                const Executor& executor) final;
 
+  absl::Status LaunchReduce(se::DeviceAddressBase send_buffer,
+                            se::DeviceAddressBase recv_buffer,
+                            PrimitiveType dtype, size_t count,
+                            ReductionKind reduction_kind, RankId root,
+                            const Executor& executor) final;
+
   absl::Status LaunchReduceScatter(se::DeviceAddressBase send_buffer,
                                    se::DeviceAddressBase recv_buffer,
                                    PrimitiveType dtype, size_t count,
@@ -261,6 +277,10 @@ class NcclCommunicator : public GpuCommunicator {
 
   absl::Status LaunchMultiGpuBarrier(const Executor& executor) final;
 
+  absl::StatusOr<const XLA_FFI_Command*> RecordMultiGpuBarrier(
+      xla::ffi::RecordContext& record_ctx,
+      const XLA_FFI_Command* absl_nullable cmd) final;
+
   void InitializeCrossDeviceBarrier(
       tsl::TiedRef<se::MemoryAllocation> tied_signal_value,
       tsl::TiedRef<se::MemoryAllocation> tied_signal,
@@ -270,6 +290,15 @@ class NcclCommunicator : public GpuCommunicator {
     absl::MutexLock lock(barrier_mu_);
     return is_cross_device_barrier_initiated_;
   }
+
+  absl::StatusOr<stream_executor::DeviceAddressBase> GetCliqueSemaphore(
+      RankId peer_rank, int64_t collective_id) const final;
+
+  void InitializeCliqueSemaphore(
+      tsl::TiedRef<se::MemoryAllocation> tied_semaphore,
+      tsl::TiedRef<SymmetricMemory> tied_symmetric_memory) final;
+
+  bool IsCliqueSemaphoreInitialized() const final;
 
   // Executes f on executor_, or calls f directly if executor_ is null.
   Future<> Execute(absl::AnyInvocable<absl::Status() &&> f) const;
@@ -331,6 +360,12 @@ class NcclCommunicator : public GpuCommunicator {
       ABSL_GUARDED_BY(barrier_mu_);
   tsl::TiedRef<SymmetricMemory> tied_cross_device_barrier_symmetric_memory_
       ABSL_GUARDED_BY(barrier_mu_);
+
+  mutable absl::Mutex semaphore_mu_;
+  tsl::TiedRef<se::MemoryAllocation> tied_clique_semaphores_
+      ABSL_GUARDED_BY(semaphore_mu_);
+  tsl::TiedRef<SymmetricMemory> tied_clique_symmetric_memory_
+      ABSL_GUARDED_BY(semaphore_mu_);
 };
 
 //===----------------------------------------------------------------------===//

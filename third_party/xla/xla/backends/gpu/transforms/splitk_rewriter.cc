@@ -28,10 +28,10 @@ limitations under the License.
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
-#include "xla/tsl/platform/status_macros.h"
 #include "xla/hlo/ir/dfs_hlo_visitor_with_default.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
 #include "xla/hlo/ir/hlo_computation.h"
@@ -98,7 +98,15 @@ DotDimensions GetDotDimensions(const HloInstruction* instr) {
   };
 
   auto get_side_size = [](const HloInstruction* instr) {
-    while (instr->IsElementwise() && instr->operand_count() == 1) {
+    // Follow unary elementwise ops and same-type transposes/reshapes/bitcasts
+    // to find the element size at the fusion edge.
+    while (instr->operand_count() == 1 &&
+           (instr->IsElementwise() ||
+            ((instr->opcode() == HloOpcode::kBitcast ||
+              instr->opcode() == HloOpcode::kReshape ||
+              instr->opcode() == HloOpcode::kTranspose) &&
+             ShapeUtil::SameElementType(instr->shape(),
+                                        instr->operand(0)->shape())))) {
       instr = instr->operand(0);
     }
     return ShapeUtil::ElementSizeInBits(instr->shape());
@@ -246,13 +254,15 @@ HloInstruction* PadInstruction(HloInstruction* instr, int64_t dimension_idx,
       HloInstruction::CreatePad(new_shape, instr, zero, padding_config));
 }
 
-// Returns the padded K dimension so that it is a multiple of split_k and 16B.
+// Returns the padded K dimension so that it is a multiple of split_k and 16B,
+// using the dot's own operand element sizes rather than the pre-convert sizes
+// at the fusion edge.
 int64_t GetPaddedK(HloInstruction& dot, int64_t split_k) {
-  DotDimensions dims = GetDotDimensions(&dot);
   const int64_t alignment_in_bits = 16 * 8;
-  int64_t min_element_size_in_bits = std::min(
-      {alignment_in_bits, dims.lhs_element_bits, dims.rhs_element_bits});
-  return RoundUpTo(dims.k,
+  const int64_t min_element_size_in_bits = std::min(
+      {alignment_in_bits, ShapeUtil::ElementSizeInBits(dot.operand(0)->shape()),
+       ShapeUtil::ElementSizeInBits(dot.operand(1)->shape())});
+  return RoundUpTo(GetDotDimensions(&dot).k,
                    split_k * alignment_in_bits / min_element_size_in_bits);
 }
 
@@ -333,33 +343,33 @@ absl::StatusOr<HloInstruction*> SplitKDimensionOfDot(HloDotInstruction* src_dot,
 
   // Update the dot's dimension numbers accordingly (shifting right all the
   // dimensions starting from the K dimension and inserting new batch dims).
-  ASSIGN_OR_RETURN(auto dims, DotOperandDims::FromDot(src_dot));
+  ABSL_ASSIGN_OR_RETURN(auto dims, DotOperandDims::FromDot(src_dot));
   // We need to insert the dimension at the same index in both operands.
   // InsertDimension inserts at "natural" location by default which may be
   // different for lhs and rhs. Therefore, we take the index from the lhs and
   // insert at the same index in the rhs.
   std::optional<int64_t> insertion_idx = std::nullopt;
   for (size_t i : {0, 1}) {
-    ASSIGN_OR_RETURN(insertion_idx, dims[i].InsertDimension(
+    ABSL_ASSIGN_OR_RETURN(insertion_idx, dims[i].InsertDimension(
                                         DotOperandDims::kBatch, k_incices[i],
                                         split_k, insertion_idx));
-    RETURN_IF_ERROR(dims[i].SetShape(operands[i]->shape()));
+    ABSL_RETURN_IF_ERROR(dims[i].SetShape(operands[i]->shape()));
   }
 
-  ASSIGN_OR_RETURN(DotDimensionNumbers new_dnums,
+  ABSL_ASSIGN_OR_RETURN(DotDimensionNumbers new_dnums,
                    DotOperandDims::CreateDotDimensionNumbers(dims));
-  ASSIGN_OR_RETURN(HloInstruction * new_dot,
+  ABSL_ASSIGN_OR_RETURN(HloInstruction * new_dot,
                    MakeDotHlo(operands[0], operands[1], new_dnums,
                               src_dot->precision_config(), accumulator_type,
                               &src_dot->metadata()));
 
   // Reduce along the new batch dimension. Batch dimensions are first in the dot
   // result, so we use index within the batch category to get it.
-  ASSIGN_OR_RETURN(
+  ABSL_ASSIGN_OR_RETURN(
       int64_t splitk_dim_idx,
       dims[0].IndexWithinCategory(DotOperandDims::kBatch, k_incices[0]));
 
-  ASSIGN_OR_RETURN(HloInstruction * splitk_root,
+  ABSL_ASSIGN_OR_RETURN(HloInstruction * splitk_root,
                    ReduceDimension(new_dot, splitk_dim_idx));
   *splitk_root->mutable_shape()->mutable_layout() = src_dot->shape().layout();
   if (output_type != accumulator_type) {
@@ -399,9 +409,9 @@ class SplitkRewriterVisitor : public DfsHloRewriteVisitor {
     if (split_k == 1) {
       return absl::OkStatus();
     }
-    ASSIGN_OR_RETURN(HloInstruction * new_dot,
+    ABSL_ASSIGN_OR_RETURN(HloInstruction * new_dot,
                      SplitKDimensionOfDot(dot, split_k));
-    RETURN_IF_ERROR(ReplaceInstruction(instr, new_dot));
+    ABSL_RETURN_IF_ERROR(ReplaceInstruction(instr, new_dot));
     return absl::OkStatus();
   }
 
@@ -417,7 +427,7 @@ absl::StatusOr<bool> SplitkRewriter::RunImpl(
   for (HloComputation* computation :
        module->MakeNonfusionComputations(execution_threads)) {
     SplitkRewriterVisitor visitor(device_description_);
-    RETURN_IF_ERROR(computation->Accept(&visitor));
+    ABSL_RETURN_IF_ERROR(computation->Accept(&visitor));
     changed |= visitor.changed();
   }
   return changed;

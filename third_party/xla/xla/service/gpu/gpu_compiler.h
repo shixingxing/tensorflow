@@ -38,7 +38,6 @@ limitations under the License.
 #include "xla/hlo/pass/hlo_pass_pipeline.h"
 #include "xla/hlo/transforms/simplifiers/algebraic_simplifier.h"
 #include "xla/pjrt/distributed/key_value_store_interface.h"
-#include "xla/runtime/object_pool.h"
 #include "xla/service/compilation_stats.h"
 #include "xla/service/compiled_module.h"
 #include "xla/service/compiler.h"
@@ -46,6 +45,7 @@ limitations under the License.
 #include "xla/service/gpu/alias_info.h"
 #include "xla/service/gpu/compile_module_to_llvm_ir.h"
 #include "xla/service/gpu/ir_emission_utils.h"
+#include "xla/service/gpu/mlir_context_pool.h"
 #include "xla/service/gpu_topology.h"
 #include "xla/service/hlo.pb.h"
 #include "xla/service/hlo_cost_analysis.h"
@@ -103,11 +103,11 @@ class GpuCompiler : public LLVMCompiler {
   absl::StatusOr<std::unique_ptr<CompiledModule>> Export(
       Executable* executable) override;
 
-  absl::Status RunPostSchedulingPipelines(HloModule* module,
-                                          int64_t scheduler_mem_limit,
-                                          const GpuTopology& gpu_topology,
-                                          const GpuAliasInfo* alias_info,
-                                          mlir::MLIRContext* mlir_context);
+  absl::Status RunPostSchedulingPipelines(
+      HloModule* module, int64_t scheduler_mem_limit,
+      const GpuTopology& gpu_topology, const GpuAliasInfo* alias_info,
+      mlir::MLIRContext* mlir_context,
+      tsl::thread::ThreadPool* thread_pool = nullptr);
 
   std::string target_triple() const { return target_triple_; }
   std::string data_layout() const { return data_layout_; }
@@ -146,10 +146,6 @@ class GpuCompiler : public LLVMCompiler {
   static AlgebraicSimplifierOptions GetAlgebraicSimplifierOptions(
       AlgebraicSimplifierMode mode, const DebugOptions& debug_options,
       bool is_rocm);
-
-  absl::StatusOr<std::unique_ptr<Executable>> LoadExecutableFromLegacyAotResult(
-      const CompiledModule& aot_result,
-      const se::DeviceDescription& device_description) override;
 
   // Returns the LLVM command line options that we use for compilation.
   // THey need to be set globally whenever we call into LLVM.
@@ -191,11 +187,11 @@ class GpuCompiler : public LLVMCompiler {
   // thread_pool is used to speed up compilation during autotuning.
   virtual absl::Status OptimizeHloPostLayoutAssignment(
       HloModule* hlo_module, se::StreamExecutor* stream_exec,
-      const CompileOptions& options, const GpuTargetConfig& gpu_target_config,
+      const CompileOptions& options, const GpuTopology& gpu_topology,
       const GpuAliasInfo* alias_info, tsl::thread::ThreadPool* thread_pool,
       CompilationStats* compilation_stats, mlir::MLIRContext* mlir_context);
 
-  virtual absl::Status AddAutotunerPass(
+  virtual absl::Status AddConfigAssignerPass(
       HloPassPipeline* pipeline, HloModule* hlo_module,
       const se::GpuComputeCapability& gpu_version,
       const CompileOptions& options, tsl::thread::ThreadPool* thread_pool,
@@ -287,16 +283,6 @@ class GpuCompiler : public LLVMCompiler {
       se::StreamExecutor* absl_nullable executor,
       const CompileOptions& compile_options);
 
-  // New AOT compilation which compiles up the the Thunk generation stage.
-  absl::StatusOr<std::vector<std::unique_ptr<CompiledModule>>>
-  NewCompileAheadOfTime(std::unique_ptr<HloModule> hlo_module,
-                        se::StreamExecutor* executor,
-                        const CompileOptions& compile_options);
-  // Legacy AOT compilation.
-  absl::StatusOr<std::vector<std::unique_ptr<CompiledModule>>>
-  LegacyCompileAheadOfTime(std::unique_ptr<HloModule> hlo_module,
-                           const AotCompilationOptions& options);
-
   se::Platform::Id platform_id_;
 
   // The triple that represents our target.
@@ -314,8 +300,13 @@ class GpuCompiler : public LLVMCompiler {
   absl::Mutex user_asm_hook_m_;
   AsmModuleHook user_asm_hook_ ABSL_GUARDED_BY(user_asm_hook_m_);
 
-  ObjectPool<std::unique_ptr<mlir::MLIRContext>> mlir_context_pool_;
+  MlirContextPool mlir_context_pool_;
 };
+
+void GpuCollectiveBufferAnalysis(
+    HloModule* module, const HloAliasAnalysis& alias_analysis,
+    std::function<void(HloInstruction*, const ShapeIndex&)> add_index_to_copy,
+    const GpuTopology* gpu_topology = nullptr);
 
 }  // namespace gpu
 }  // namespace xla

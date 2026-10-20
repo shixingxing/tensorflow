@@ -21,18 +21,20 @@ limitations under the License.
 #include <numeric>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "absl/algorithm/container.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/types/span.h"
-#include "xla/tsl/platform/status_macros.h"
 #include "xla/autotuning.pb.h"
+#include "xla/hlo/analysis/shape_tracker.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_opcode.h"
 #include "xla/permutation_util.h"
@@ -105,9 +107,9 @@ absl::StatusOr<int64_t> ContractingDimensionIndex(const HloInstruction& dot,
 
 absl::StatusOr<int64_t> NonContractingDimensionIndex(const HloInstruction& dot,
                                                      const int operand_number) {
-  ASSIGN_OR_RETURN(int64_t contracting_dim,
+  ABSL_ASSIGN_OR_RETURN(int64_t contracting_dim,
                    ContractingDimensionIndex(dot, operand_number));
-  ASSIGN_OR_RETURN(
+  ABSL_ASSIGN_OR_RETURN(
       std::vector<int64_t> non_contracting_dims,
       GetNonContractingDims(dot.operand(operand_number)->shape(),
                             BatchDimensionsForOperand(dot, operand_number),
@@ -130,23 +132,23 @@ DotOperandDims::DotOperandDims(Shape shape,
 
 absl::StatusOr<std::array<DotOperandDims, 2>> DotOperandDims::FromDot(
     const HloInstruction* dot) {
-  ASSIGN_OR_RETURN(auto lhs_dims, FromDotOperand(dot, 0));
-  ASSIGN_OR_RETURN(auto rhs_dims, FromDotOperand(dot, 1));
+  ABSL_ASSIGN_OR_RETURN(auto lhs_dims, FromDotOperand(dot, 0));
+  ABSL_ASSIGN_OR_RETURN(auto rhs_dims, FromDotOperand(dot, 1));
   return std::array<DotOperandDims, 2>{lhs_dims, rhs_dims};
 }
 
 absl::StatusOr<std::array<DotOperandDims, 4>> DotOperandDims::FromScaledDot(
     const HloInstruction* scaled_dot) {
-  ASSIGN_OR_RETURN(auto lhs_dims, FromDotOperand(scaled_dot, 0));
+  ABSL_ASSIGN_OR_RETURN(auto lhs_dims, FromDotOperand(scaled_dot, 0));
   DotOperandDims lhs_scale_dims;
   if (!ShapeUtil::IsScalar(scaled_dot->operand(2)->shape())) {
-    ASSIGN_OR_RETURN(lhs_scale_dims, FromDotOperand(scaled_dot, 2));
+    ABSL_ASSIGN_OR_RETURN(lhs_scale_dims, FromDotOperand(scaled_dot, 2));
   }
 
-  ASSIGN_OR_RETURN(auto rhs_dims, FromDotOperand(scaled_dot, 1));
+  ABSL_ASSIGN_OR_RETURN(auto rhs_dims, FromDotOperand(scaled_dot, 1));
   DotOperandDims rhs_scale_dims;
   if (!ShapeUtil::IsScalar(scaled_dot->operand(3)->shape())) {
-    ASSIGN_OR_RETURN(rhs_scale_dims, FromDotOperand(scaled_dot, 3));
+    ABSL_ASSIGN_OR_RETURN(rhs_scale_dims, FromDotOperand(scaled_dot, 3));
   }
 
   return std::array<DotOperandDims, 4>{lhs_dims, rhs_dims, lhs_scale_dims,
@@ -159,7 +161,7 @@ absl::StatusOr<DotOperandDims> DotOperandDims::FromDotOperand(
   const auto& batch_dims = BatchDimensionsForOperand(*dot, operand_number);
   const auto& contracting_dims =
       ContractingDimensionsForOperand(*dot, operand_number);
-  ASSIGN_OR_RETURN(std::vector<int64_t> non_contracting_dims,
+  ABSL_ASSIGN_OR_RETURN(std::vector<int64_t> non_contracting_dims,
                    GetNonContractingDims(shape, batch_dims, contracting_dims));
   return DotOperandDims(shape, batch_dims, non_contracting_dims,
                         contracting_dims);
@@ -229,7 +231,7 @@ int64_t DotOperandDims::TotalSize(Category category) const {
 
 std::vector<DotOperandDims::Category> DotOperandDims::Categories() const {
   std::vector<Category> categories(shape_.dimensions().size(),
-                                   static_cast<Category>(-1));
+                                   Category::kInvalid);
   for (Category category : {kBatch, kNonContracting, kContracting}) {
     for (int64_t dim : Indices(category)) {
       categories[dim] = category;
@@ -253,6 +255,10 @@ DotOperandDims DotOperandDims::GetPermuted(
   DotOperandDims copy = *this;
   copy.ApplyPermutation(permutation);
   return copy;
+}
+
+bool DotOperandDims::IsSorted(Category category) const {
+  return absl::c_is_sorted(dim_numbers_[category]);
 }
 
 bool DotOperandDims::IsConsecutive(Category category) const {
@@ -320,7 +326,7 @@ std::string DotOperandDims::ToString() const {
 absl::Status DotOperandDims::RemoveDegenerateDimensions() {
   for (int64_t i = shape_.dimensions().size() - 1; i >= 0; --i) {
     if (shape_.dimensions(i) == 1) {
-      RETURN_IF_ERROR(EraseDimensions(i, i + 1));
+      ABSL_RETURN_IF_ERROR(EraseDimensions(i, i + 1));
     }
   }
   return absl::OkStatus();
@@ -336,7 +342,7 @@ absl::Status DotOperandDims::MergeAdjacentDimensions() {
       const int64_t dim_idx = dims[i - 1];
       shape_.set_dimensions(
           dim_idx, shape_.dimensions(dim_idx) * shape_.dimensions(dim_idx + 1));
-      RETURN_IF_ERROR(EraseDimensions(dim_idx + 1, dim_idx + 2));
+      ABSL_RETURN_IF_ERROR(EraseDimensions(dim_idx + 1, dim_idx + 2));
     }
   }
   return absl::OkStatus();
@@ -409,8 +415,8 @@ absl::StatusOr<std::optional<DotOperandDims>> DotOperandDims::Reshape(
   }
 
   DotOperandDims merged_dims = *this;
-  RETURN_IF_ERROR(merged_dims.RemoveDegenerateDimensions());
-  RETURN_IF_ERROR(merged_dims.MergeAdjacentDimensions());
+  ABSL_RETURN_IF_ERROR(merged_dims.RemoveDegenerateDimensions());
+  ABSL_RETURN_IF_ERROR(merged_dims.MergeAdjacentDimensions());
 
   // If the source contains just one element (e.g. scalar), and the target is
   // something like [1, 1, 1], assign all dimensions to non-contracting.
@@ -498,6 +504,49 @@ absl::StatusOr<std::optional<DotOperandDims>> DotOperandDims::MapForward(
           absl::StrCat("Unsupported opcode for MapForward: ",
                        HloOpcodeString(inst->opcode())));
   }
+}
+
+absl::StatusOr<std::optional<DotOperandDims>> DotOperandDims::MapForward(
+    const ShapeTracker& tracker) const {
+  TF_RET_CHECK(tracker.input_shape().dimensions() == shape_.dimensions());
+  DotOperandDims dims = *this;
+  for (const ShapeTracker::Step& step : tracker.GetSteps()) {
+    if (step.type == ShapeTracker::Step::Type::kTranspose) {
+      dims.ApplyPermutation(step.dimensions);
+      continue;
+    }
+    ABSL_ASSIGN_OR_RETURN(std::optional<DotOperandDims> reshaped,
+                     dims.Reshape(ShapeUtil::MakeShape(shape_.element_type(),
+                                                       step.dimensions)));
+    if (!reshaped.has_value()) {
+      return std::nullopt;
+    }
+    dims = *std::move(reshaped);
+  }
+  ABSL_RETURN_IF_ERROR(dims.SetShape(tracker.output_shape()));
+  return dims;
+}
+
+absl::StatusOr<std::optional<DotOperandDims>> DotOperandDims::MapBackward(
+    const ShapeTracker& tracker) const {
+  ABSL_ASSIGN_OR_RETURN(ShapeTracker inverted, tracker.GetInverted());
+  return MapForward(inverted);
+}
+
+absl::StatusOr<std::optional<DotOperandDims>> DotOperandDims::FoldBackward(
+    const ShapeTracker& tracker) const {
+  ABSL_ASSIGN_OR_RETURN(std::optional<DotOperandDims> dims, MapBackward(tracker));
+  if (!dims.has_value() || !dims->IsSorted(kNonContracting)) {
+    return std::nullopt;
+  }
+  // Ensure within-category dimension sizes are preserved so the dot's output
+  // shape and dimension pairing with the other operand remain unchanged.
+  for (Category category : {kBatch, kNonContracting, kContracting}) {
+    if (dims->Sizes(category) != Sizes(category)) {
+      return std::nullopt;
+    }
+  }
+  return dims;
 }
 
 absl::StatusOr<int64_t> DotOperandDims::IndexWithinCategory(

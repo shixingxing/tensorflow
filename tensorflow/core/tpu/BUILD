@@ -17,6 +17,10 @@
 
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
 load(
+    "@xla//xla/tsl:tsl.bzl",
+    "internal_visibility",
+)
+load(
     "//tensorflow:tensorflow.bzl",
     "if_libtpu",
     "if_windows",
@@ -26,26 +30,20 @@ load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
-    default_visibility = [
+    default_visibility = internal_visibility([
         "//tensorflow/compiler/mlir/tf2xla:__subpackages__",
         "//tensorflow/core/tpu:__subpackages__",
         "//tensorflow/dtensor:__subpackages__",
-    ],
+    ]),
     licenses = ["notice"],
 )
 
 cc_library(
     name = "tpu_embedding_configuration_utils",
-    srcs = ["tpu_embedding_configuration_utils.cc"],
     hdrs = ["tpu_embedding_configuration_utils.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":tpu_embedding_optimization_parameters_utils",
-        "//tensorflow/core/protobuf/tpu:optimization_parameters_proto_cc",
-        "//tensorflow/core/protobuf/tpu:tpu_embedding_configuration_proto_cc",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings:str_format",
+        "@xla//xla/tpu/protobuf:tpu_embedding_configuration_utils",
     ],
 )
 
@@ -86,16 +84,9 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//tensorflow/core:framework",
-        "//tensorflow/core:lib",
-        "//tensorflow/core:lib_proto_parsing",
-        "//tensorflow/core/protobuf/tpu:optimization_parameters_proto_cc",
-        "@com_google_absl//absl/base",
-        "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/status",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:str_format",
-        "@xla//xla:xla_data_proto_cc",
-        "@xla//xla/service:hlo_proto_cc",
+        "@xla//xla/tpu/protobuf:tpu_embedding_optimization_parameters_utils",
+        "@xla//xla/tsl/platform:errors",
     ],
 )
 
@@ -181,12 +172,9 @@ cc_library(
 
 cc_library(
     name = "tpu_compile_interface",
-    srcs = ["tpu_compile_interface.cc"],
     hdrs = ["tpu_compile_interface.h"],
     deps = [
-        "//tensorflow/core:lib",
-        "@com_google_absl//absl/log",
-        "@com_google_absl//absl/strings",
+        "@xla//xla/tpu:tpu_compile_interface",
     ],
 )
 

@@ -121,7 +121,7 @@ class CollectiveThunk : public Command {
   static std::string GetDeviceString(const CollectiveParams& params);
 
   virtual CollectiveCliqueRequests::CliqueRequirements GetCliqueRequirements(
-      const GpuCliqueKey& clique_key) {
+      const GpuCliqueKey& clique_key, const PrepareParams& params) {
     return {};
   }
 
@@ -130,7 +130,6 @@ class CollectiveThunk : public Command {
   bool requires_warmup() const override { return true; }
 
   absl::Status Prepare(const PrepareParams& params) override;
-  absl::Status Initialize(const InitializeParams& params) override;
   absl::Status ExecuteOnStream(const ExecuteParams& params) override;
   absl::StatusOr<const se::CommandBuffer::Command*> Record(
       const ExecuteParams& execute_params, const RecordParams& record_params,
@@ -171,15 +170,6 @@ class CollectiveThunk : public Command {
     return absl::OkStatus();
   }
 
-  // Initializes collective operation for execution.
-  //
-  // At this stage it is possible to resolve buffer slices from a buffer
-  // assignment, but the content of all buffers is undefined.
-  virtual absl::Status InitializeCollective(const InitializeParams& params,
-                                            const GpuCliqueKey& clique_key) {
-    return absl::OkStatus();
-  }
-
   // Run collective operation on a given stream.
   //
   // A collective thunk is normally an independent operation in a sense that
@@ -199,6 +189,11 @@ class CollectiveThunk : public Command {
   virtual const CollectiveConfig& config() const = 0;
 
   virtual bool CanUseSymmetricBuffer() const { return false; }
+
+  const absl::StatusOr<std::vector<std::vector<GlobalDeviceId>>>&
+  device_groups() const {
+    return device_groups_;
+  }
 
  private:
   // Rendezvous with other local participants before/after the first call to
@@ -293,6 +288,12 @@ absl::StatusOr<std::vector<DeviceBufferPair>> ConvertToDeviceBuffers(
     const BufferAllocations* buffer_allocations,
     const std::vector<CollectiveThunk::Buffer>& buffers,
     const std::vector<PrimitiveType>& element_types);
+
+// Builds the buffers for the given collective instruction.
+absl::StatusOr<std::vector<CollectiveThunk::Buffer>> GetCollectiveBuffers(
+    const BufferAssignment& buffer_assignment, const HloInstruction* inst,
+    Thunk::Kind kind, bool has_dynamic_root);
+
 }  // namespace xla::gpu
 
 #endif  // XLA_BACKENDS_GPU_RUNTIME_COLLECTIVE_THUNK_H_

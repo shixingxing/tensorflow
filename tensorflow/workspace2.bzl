@@ -1,9 +1,26 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# =============================================================================
+
 """TensorFlow workspace initialization. Consult the WORKSPACE on how to use it."""
 
 load("@bazel_features//:deps.bzl", "bazel_features_deps")
 load("@bazel_skylib//lib:versions.bzl", "versions")
 load("@bazel_tools//tools/build_defs/repo:utils.bzl", "maybe")
 load("@rules_jvm_external//:defs.bzl", "maven_install")
+load("@rules_ml_toolchain//cc/llvms/local:local_clang_configure.bzl", "local_clang_configure")
+load("@rules_ml_toolchain//cc/sysroots:local_sysroot_configure.bzl", "local_sysroot_configure")
 load("@rules_ml_toolchain//gpu/rocm:hipcc_configure.bzl", "hipcc_configure")
 load("@tf_runtime//:dependencies.bzl", "tfrt_dependencies")
 load("@xla//third_party/absl:workspace.bzl", absl = "repo")
@@ -11,6 +28,7 @@ load("@xla//third_party/benchmark:workspace.bzl", benchmark = "repo")
 load("@xla//third_party/clang_toolchain:cc_configure_clang.bzl", "cc_download_clang_toolchain")
 load("@xla//third_party/compute_library:workspace.bzl", compute_library = "repo")
 load("@xla//third_party/cpuinfo:workspace.bzl", cpuinfo = "repo")
+load("@xla//third_party/cuda_tile:workspace.bzl", cuda_tile = "repo")
 load("@xla//third_party/cudnn_frontend:workspace.bzl", cudnn_frontend = "repo")
 load("@xla//third_party/cutlass:workspace.bzl", cutlass = "repo")
 load("@xla//third_party/dlpack:workspace.bzl", dlpack = "repo")
@@ -46,10 +64,12 @@ load("@xla//third_party/shardy:workspace.bzl", shardy = "repo")
 load("@xla//third_party/slinky:workspace.bzl", slinky = "repo")
 load("@xla//third_party/spdlog:workspace.bzl", spdlog = "repo")
 load("@xla//third_party/stablehlo:workspace.bzl", stablehlo = "repo")
+load("@xla//third_party/tensor_ir:workspace.bzl", tensor_ir = "repo")
 load("@xla//third_party/tensorrt:tensorrt_configure.bzl", "tensorrt_configure")
 load("@xla//third_party/tensorrt:workspace.bzl", tensorrt = "repo")
 load("@xla//third_party/triton:workspace.bzl", triton = "repo")
 load("@xla//third_party/xnnpack:workspace.bzl", xnnpack = "repo")
+load("@xla//third_party/xz:workspace.bzl", xz = "repo")
 load("@xla//tools/def_file_filter:def_file_filter_configure.bzl", "def_file_filter_configure")
 load("@xla//tools/toolchains:cpus/aarch64/aarch64_compiler_configure.bzl", "aarch64_compiler_configure")
 load("@xla//tools/toolchains:cpus/arm/arm_compiler_configure.bzl", "arm_compiler_configure")
@@ -108,6 +128,7 @@ def _initialize_third_party():
     bazel_features_deps()
     benchmark()
     com_google_highway()
+    cuda_tile()
     ducc()
     dlpack()
     eigen3()
@@ -145,6 +166,7 @@ def _initialize_third_party():
     spdlog()
     sobol_data()
     stablehlo()
+    tensor_ir()
     vulkan_headers()
     tensorrt()
     nvshmem()
@@ -164,8 +186,14 @@ def _tf_toolchains():
     git_configure(name = "local_config_git")
     syslibs_configure(name = "local_config_syslibs")
     python_configure(name = "local_config_python")
-    hipcc_configure(name = "config_rocm_hipcc")  # Must be before rocm_configure.
     rocm_configure(name = "local_config_rocm")
+    hipcc_configure(
+        name = "config_rocm_hipcc",
+        rocm_dist = "@local_config_rocm//rocm:toolchain_data",
+    )
+
+    local_clang_configure(name = "local_config_clang")
+    local_sysroot_configure(name = "local_sysroot_config")
     sycl_configure(name = "local_config_sycl")
     remote_execution_configure(name = "local_config_remote_execution")
 
@@ -232,13 +260,14 @@ def _tf_repositories():
     )
 
     xnnpack()
+    xz()
 
     # XNNPack dependency.
     tf_http_archive(
         name = "KleidiAI",
-        sha256 = "cbdacbcc10c79056105c8a2aee0c7737cabb8ad1f56fda4acd38cd728bcaa248",
-        strip_prefix = "kleidiai-b87ef9c94f45f11c81a6b1fdaed1b2b45ea58c0c",
-        urls = tf_mirror_urls("https://github.com/ARM-software/kleidiai/archive/b87ef9c94f45f11c81a6b1fdaed1b2b45ea58c0c.zip"),
+        sha256 = "a424e81535ebb6d0117e9282fba45d70aee0bedb481f603df55e1805bed0e21b",
+        strip_prefix = "kleidiai-5147983e14600ce7f8a6583dc04ba07753ac54c4",
+        urls = tf_mirror_urls("https://gitlab.arm.com/kleidi/kleidiai/-/archive/5147983e14600ce7f8a6583dc04ba07753ac54c4/kleidiai-5147983e14600ce7f8a6583dc04ba07753ac54c4.zip"),
     )
 
     FXdiv()
@@ -297,6 +326,13 @@ def _tf_repositories():
         repo_mapping = {
             "@abseil-cpp": "@com_google_absl",
         },
+    )
+
+    tf_http_archive(
+        name = "rules_foreign_cc",
+        sha256 = "476303bd0f1b04cc311fc258f1708a5f6ef82d3091e53fd1977fa20383425a6a",
+        strip_prefix = "rules_foreign_cc-0.10.1",
+        urls = tf_mirror_urls("https://github.com/bazelbuild/rules_foreign_cc/releases/download/0.10.1/rules_foreign_cc-0.10.1.tar.gz"),
     )
 
     tf_http_archive(
@@ -370,6 +406,10 @@ def _tf_repositories():
         # The patch path is relative to third_party/tensorflow.
         patch_file = ["@xla//third_party/googletest:googletest.patch"],
         urls = tf_mirror_urls("https://github.com/google/googletest/archive/d72f9c8aea6817cdf1ca0ac10887f328de7f3da29.zip"),
+        repo_mapping = {
+            "@abseil-cpp": "@com_google_absl",
+            "@re2": "@com_googlesource_code_re2",
+        },
     )
 
     tf_http_archive(
@@ -389,20 +429,23 @@ def _tf_repositories():
     tf_http_archive(
         name = "curl",
         build_file = "@xla//third_party:curl.BUILD",
-        sha256 = "264537d90e58d2b09dddc50944baf3c38e7089151c8986715e2aaeaaf2b8118f",
-        strip_prefix = "curl-8.11.0",
+        sha256 = "d54dd598bf05927a726deb38df31c6a255ba83ff1de57c5d1464dac3ed8f44a1",
+        strip_prefix = "curl-8.22.0",
         system_build_file = "//third_party/systemlibs:curl.BUILD",
-        urls = tf_mirror_urls("https://curl.se/download/curl-8.11.0.tar.gz"),
+        urls = tf_mirror_urls("https://curl.se/download/curl-8.22.0.tar.gz"),
     )
 
     tf_http_archive(
-        name = "com_github_grpc_grpc",
+        name = "grpc",
         sha256 = "41b695614b26652ff9e97ce50cfd4a6c7a3d45a9fe598d1454407746499bbf2c",
         strip_prefix = "grpc-1.81.0",
         system_build_file = "//third_party/systemlibs:grpc.BUILD",
         patch_file = [
             "@xla//third_party/grpc:grpc.patch",
         ],
+        repo_mapping = {
+            "@com_github_grpc_grpc": "@grpc",
+        },
         urls = tf_mirror_urls("https://github.com/grpc/grpc/archive/refs/tags/v1.81.0.tar.gz"),
     )
 

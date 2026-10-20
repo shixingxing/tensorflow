@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -24,7 +25,6 @@ limitations under the License.
 #include "xla/backends/gpu/runtime/command_buffer_thunk.h"
 #include "xla/backends/gpu/runtime/command_executor.h"
 #include "xla/backends/gpu/runtime/conditional_thunk.h"
-#include "xla/backends/gpu/runtime/dynamic_slice_thunk.h"
 #include "xla/backends/gpu/runtime/sequential_thunk.h"
 #include "xla/backends/gpu/runtime/thunk.h"
 #include "xla/backends/gpu/runtime/thunk.pb.h"
@@ -37,7 +37,6 @@ limitations under the License.
 namespace xla::gpu {
 namespace {
 
-using ::testing::IsSupersetOf;
 using ::testing::UnorderedElementsAre;
 
 // Invokes `Walk` on the `root` and returns a `vector` containing all
@@ -65,22 +64,6 @@ TEST(ThunkWalkTest, SingleThunk) {
   EXPECT_THAT(GetAllThunks(&thunk), UnorderedElementsAre(&thunk));
 }
 
-TEST(ThunkWalkTest, DynamicSliceThunk) {
-  auto thunk = std::make_unique<DummyThunk>();
-  Thunk* thunk_ptr = thunk.get();
-
-  auto thunk_sequence = std::make_unique<ThunkSequence>();
-  thunk_sequence->push_back(std::move(thunk));
-
-  DynamicSliceThunk dynamic_slice_thunk(
-      Thunk::ThunkInfo(), std::move(thunk_sequence), {}, {}, {}, {}, {}, {});
-  EXPECT_THAT(GetAllThunks(&dynamic_slice_thunk),
-              // `DynamicSliceThunk` wraps the `embedded_thunk` in a
-              // `SequentialThunk`, which is why iterate over more than the
-              // two expected `Thunks`.
-              IsSupersetOf<const Thunk*>({thunk_ptr, &dynamic_slice_thunk}));
-}
-
 TEST(ThunkWalkTest, CommandBufferThunk) {
   auto thunk = std::make_unique<DummyThunk>();
   Thunk* thunk_ptr = thunk.get();
@@ -93,6 +76,7 @@ TEST(ThunkWalkTest, CommandBufferThunk) {
   Thunk* sequential_thunk_ptr = sequential_thunk.get();
 
   CommandBufferThunk command_buffer_thunk(CommandExecutor(), Thunk::ThunkInfo(),
+                                          /*devices_in_process=*/1,
                                           std::move(sequential_thunk));
   EXPECT_THAT(GetAllThunks(&command_buffer_thunk),
               UnorderedElementsAre(thunk_ptr, &command_buffer_thunk,
@@ -113,7 +97,8 @@ TEST(ThunkWalkTest, ConditionalThunk) {
   std::vector<ThunkSequence> branch_thunks;
   branch_thunks.push_back(std::move(thunk_sequence));
   ConditionalThunk conditional_thunk(Thunk::ThunkInfo(), {slice, shape},
-                                     std::move(branch_thunks));
+                                     std::move(branch_thunks),
+                                     /*devices_per_host=*/1);
 
   EXPECT_THAT(GetAllThunks(&conditional_thunk),
               UnorderedElementsAre(thunk_ptr, &conditional_thunk));
@@ -134,7 +119,8 @@ TEST(ThunkWalkTest, WhileThunk) {
 
   WhileThunk while_thunk(Thunk::ThunkInfo(), BufferAllocation::Slice(),
                          std::move(condition_thunk_sequence),
-                         std::move(body_thunk_sequence));
+                         std::move(body_thunk_sequence),
+                         /*trip_count=*/std::nullopt, /*devices_per_host=*/1);
 
   EXPECT_THAT(
       GetAllThunks(&while_thunk),

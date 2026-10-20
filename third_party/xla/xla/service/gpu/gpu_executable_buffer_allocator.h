@@ -48,11 +48,11 @@ class ThunkExecutor;
 //
 // This base class implements the ALWAYS_UPDATE command buffer update mode,
 // which needs no allocation-address policy beyond global constants. The
-// SKIP_TEMP update mode is implemented by GpuExecutableVaRemapAllocator (see
-// gpu_executable_va_remap_allocator.h), which assigns stable addresses to
-// selected command-buffer allocations via VMM VA remapping. The base-class
-// behavior also serves as the runtime fallback for that mode when VA
-// remapping is unavailable for an execution.
+// SKIP_TEMP and SKIP_PROFILED update modes are implemented by
+// GpuExecutableVaRemapAllocator (see gpu_executable_va_remap_allocator.h),
+// which assigns stable addresses to selected command-buffer allocations via
+// VMM VA remapping. The base-class behavior also serves as the runtime
+// fallback for those modes when VA remapping is unavailable for an execution.
 class GpuExecutableBufferAllocator {
  public:
   struct ParameterBuffer {
@@ -94,7 +94,9 @@ class GpuExecutableBufferAllocator {
     // Builds the BufferAllocations for an execution. Entry-computation
     // parameter buffers are obtained from `get_parameter_buffer`; all other
     // allocations are resolved internally, including alignment checking and
-    // any subclass allocation-address policy.
+    // any subclass allocation-address policy. Collective memory (S(1))
+    // buffers are allocated before all other transient buffers, in allocation
+    // index order within each group.
     absl::StatusOr<BufferAllocations> GenerateBufferAllocations(
         const ServiceExecutableRunOptions* run_options,
         ParameterBufferResolver get_parameter_buffer,
@@ -157,13 +159,13 @@ class GpuExecutableBufferAllocator {
 
   // Creates the buffer allocator implementing
   // `debug_options->xla_gpu_command_buffer_update_mode()`: this class for
-  // ALWAYS_UPDATE, GpuExecutableVaRemapAllocator for SKIP_TEMP. Check-fails
-  // on any other mode.
+  // ALWAYS_UPDATE, GpuExecutableVaRemapAllocator for SKIP_TEMP and
+  // SKIP_PROFILED. Check-fails on any other mode.
   static std::unique_ptr<GpuExecutableBufferAllocator> Create(
       absl::string_view module_name,
       absl::Span<const BufferAllocation* const> allocations,
       const Shape& result_shape, const DebugOptions* debug_options,
-      ThunkExecutor* thunk_executor);
+      ThunkExecutor* thunk_executor, int num_devices);
 
   GpuExecutableBufferAllocator(
       absl::string_view module_name,

@@ -32,7 +32,7 @@ class OpBuilder;
 // API is experimental and subject to change.
 class TensorID {
  public:
-  TensorID() {}
+  TensorID() = default;
   TensorID(int node, int output_id) : node_(node), output_id_(output_id) {}
 
   std::string ToString() const;
@@ -53,7 +53,8 @@ class TensorID {
 // API is experimental and subject to change.
 class GraphBuilder {
  public:
-  explicit GraphBuilder(int coreml_version) : coreml_version_(coreml_version) {}
+  explicit GraphBuilder(int coreml_version);
+  ~GraphBuilder();
 
   // Returns pointer to the created builder. Ownership still belongs
   // to the GraphBuilder.
@@ -98,7 +99,7 @@ class OpBuilder {
  public:
   explicit OpBuilder(GraphBuilder* graph_builder)
       : graph_builder_(graph_builder) {}
-  virtual ~OpBuilder() {}
+  virtual ~OpBuilder() = default;
 
   // Returns the Layer this builder responsible for.
   // Ownership is transferred to caller.

@@ -18,7 +18,6 @@ limitations under the License.
 #include <vector>
 
 #include "absl/log/check.h"
-#include "absl/memory/memory.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "tensorflow/core/framework/device_attributes.pb.h"
@@ -104,7 +103,7 @@ class GPUCompatibleCPUDevice : public ThreadPoolDevice {
           options.config.gpu_options().force_gpu_compatible();
     }
   }
-  ~GPUCompatibleCPUDevice() override {}
+  ~GPUCompatibleCPUDevice() override = default;
 
   Allocator* GetAllocator(AllocatorAttributes attr) override {
     GPUProcessState* ps = GPUProcessState::singleton();

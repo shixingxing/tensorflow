@@ -109,6 +109,18 @@ py_test(
     ],
 )
 
+py_test(
+    name = "heartbeat_test",
+    srcs = [
+        "heartbeat_test.py",
+    ],
+    strict_deps = True,
+    deps = [
+        "//tensorflow/dtensor/python:heartbeat",
+        "//tensorflow/python/platform:client_testlib",
+    ],
+)
+
 # TODO(b/301286466): Investigate why python annotation type mismatch is not catptured by the type
 # strict BUILD rules.
 
@@ -566,8 +578,11 @@ dtensor_test(
     env = {
         "DTENSOR_GPU_USE_NCCL_COMMUNICATION": "1",
         "NCCL_P2P_DISABLE": "1",  # FIXME(b/251183104): p2p detection in cuda 10.1+ is broken.
+        "TF_FORCE_GPU_ALLOW_GROWTH": "true",
+        "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
     },
     tags = [
+        "exclusive-if-local",
         "no_windows",
         "nosan",  # b/195537906
     ],
@@ -612,8 +627,11 @@ dtensor_test(
         "DTENSOR_GPU_USE_NCCL_COMMUNICATION": "1",
         "NCCL_P2P_DISABLE": "1",  # FIXME(b/251183104): p2p detection in cuda 10.1+ is broken.
         "NCCL_CUMEM_HOST_ENABLE": "0",  # TODO(b/414413290): workaround for cuda 12.8.1 failure.
+        "TF_FORCE_GPU_ALLOW_GROWTH": "true",
+        "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
     },
     tags = [
+        "exclusive-if-local",
         "no_windows",
         "nosan",  # b/195537906
     ],
@@ -684,8 +702,15 @@ dtensor_test(
     main = "numpy_util_test.py",
     deps = [
         ":test_util",
+        "//tensorflow/dtensor/python:api",
         "//tensorflow/dtensor/python:layout",
         "//tensorflow/dtensor/python:numpy_util",
+        "//tensorflow/python/eager/polymorphic_function",
+        "//tensorflow/python/framework:config",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:dtypes",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:array_ops_stack",
         "//tensorflow/python/platform:client_testlib",
         "//third_party/py/numpy",
     ],
@@ -757,7 +782,7 @@ dtensor_test(
     },
     main = "spmd_test.py",
     shard_count = {
-        "cpu": 25,
+        "cpu": 50,
         "gpu": 10,
         "tpu": 10,
         TPU_V3_DONUT_BACKEND: 32,
@@ -926,6 +951,7 @@ dtensor_test(
         "//tensorflow/python/ops:math_ops",
         "//tensorflow/python/ops:stateless_random_ops",
         "//tensorflow/python/platform:client_testlib",
+        "//tensorflow/python/trackable:base",
         "//third_party/py/numpy",
         "@absl_py//absl/testing:parameterized",
     ],

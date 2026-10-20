@@ -149,6 +149,7 @@ cc_library(
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/log:vlog_is_on",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings:string_view",
         "@llvm-project//llvm:Support",
@@ -206,9 +207,7 @@ cc_library(
     hdrs = ["register_common_dialects.h"],
     deps = [
         "//tensorflow/compiler/mlir/tensorflow",
-        "//tensorflow/compiler/mlir/tensorflow:mlprogram_util",
         "//tensorflow/compiler/mlir/tools/kernel_gen/ir:tf_framework_ops",
-        "//tensorflow/core/ir/types:Dialect",
         "@llvm-project//mlir:AllExtensions",
         "@llvm-project//mlir:AllPassesAndDialects",
         "@llvm-project//mlir:IR",

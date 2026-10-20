@@ -21,6 +21,7 @@ limitations under the License.
 #include <cstdint>
 #include <functional>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stack>
@@ -36,6 +37,7 @@ limitations under the License.
 #include "absl/functional/overload.h"
 #include "absl/memory/memory.h"
 #include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/strings/cord.h"
 #include "absl/strings/escaping.h"
 #include "absl/strings/match.h"
@@ -48,8 +50,6 @@ limitations under the License.
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
-#include "xla/tsl/platform/status_macros.h"
-#include "llvm/ADT/STLExtras.h"
 #include "xla/debug_options_flags.h"
 #include "xla/hlo/ir/backend_config.h"
 #include "xla/hlo/ir/hlo_clone_context.h"
@@ -65,17 +65,19 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_schedule.h"
 #include "xla/hlo/ir/hlo_sharding.h"
 #include "xla/hlo/ir/stack_frames.h"
+#include "xla/hlo/parser/hlo_lexer.h"
 #include "xla/map_util.h"
 #include "xla/printer.h"
 #include "xla/service/compilation_environments.h"
 #include "xla/service/computation_layout.h"
-#include "xla/service/computation_placer.h"
+#include "xla/service/device_assignment.h"
 #include "xla/service/hlo.pb.h"
 #include "xla/service/hlo_module_config.h"
 #include "xla/service/mapped_ptr_container_sorter.h"
 #include "xla/service/name_uniquer.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
+#include "xla/sort_json.h"
 #include "xla/status_macros.h"
 #include "xla/tsl/lib/gtl/map_util.h"
 #include "xla/tsl/platform/env.h"
@@ -134,7 +136,7 @@ HloModule::~HloModule() {
 
 absl::Status HloModule::set_schedule(HloSchedule schedule) {
   TF_RET_CHECK(schedule.module() == this);
-  RETURN_IF_ERROR(schedule.Verify());
+  ABSL_RETURN_IF_ERROR(schedule.Verify());
   schedule_ = std::move(schedule);
   return absl::OkStatus();
 }
@@ -202,19 +204,21 @@ HloComputation* HloModule::AddComputationInternal(
   }
 
   computation->set_parent(this);
-  topological_sort_.AddNode(computation.get());
-  for (auto& [caller, count] : computation->caller_computations_) {
-    if (caller->parent() == this) {
-      topological_sort_.AddEdge(caller, computation.get());
-    }
-  }
-  for (auto& [callee, count] : computation->callee_computations_) {
-    if (callee->parent() == this) {
-      topological_sort_.AddEdge(computation.get(), callee);
-    }
-  }
+  computation->index_in_module_ = computations_.size();
+  HloComputation* computation_raw_ptr = computation.get();
   computations_.push_back(std::move(computation));
-  return computations_.back().get();
+  topological_sort_.AddNode(computation_raw_ptr);
+  for (auto& [caller, count] : computation_raw_ptr->caller_computations_) {
+    if (caller->parent() == this) {
+      topological_sort_.AddEdge(caller, computation_raw_ptr);
+    }
+  }
+  for (auto& [callee, count] : computation_raw_ptr->callee_computations_) {
+    if (callee->parent() == this) {
+      topological_sort_.AddEdge(computation_raw_ptr, callee);
+    }
+  }
+  return computation_raw_ptr;
 }
 
 HloComputation* HloModule::AddEntryComputation(
@@ -399,6 +403,22 @@ void HloModule::Print(
     AppendCat(printer, ", frontend_attributes=",
               FrontendAttributesToString(frontend_attributes_));
   }
+  if (options.print_backend_config() && has_backend_config()) {
+    absl::string_view config = raw_backend_config_string();
+    std::string sorted_config;
+    if (options.sort_backend_config()) {
+      sorted_config = SortJson(config).value_or(std::string(config));
+      config = sorted_config;
+    }
+    printer->Append(", backend_config=");
+    if (printer->is_hasher() || LexesAsJsonDict(config)) {
+      printer->Append(config);
+    } else {
+      printer->Append("\"");
+      printer->Append(absl::CEscape(config));
+      printer->Append("\"");
+    }
+  }
   if (!original_value_recovery_table_.empty()) {
     HloPrintOptions new_options = options;
     new_options.set_indent_amount(options.indent_amount() + 1);
@@ -538,32 +558,31 @@ void HloModule::PrintStackFrameIndex(Printer* printer,
   }
   const auto& proto = stack_frames_.proto();
   printer->Append("\n\nFileNames\n");
-  for (const auto& [index, file_name] : llvm::enumerate(proto.file_names())) {
-    printer->Append(
-        absl::StrFormat("%d \"%s\"\n", index + 1, absl::CEscape(file_name)));
+  for (int i = 0; i < proto.file_names_size(); ++i) {
+    printer->Append(absl::StrFormat("%d \"%s\"\n", i + 1,
+                                    absl::CEscape(proto.file_names(i))));
   }
   printer->Append("\nFunctionNames\n");
-  for (const auto& [index, function_name] :
-       llvm::enumerate(proto.function_names())) {
-    printer->Append(absl::StrFormat("%d \"%s\"\n", index + 1,
-                                    absl::CEscape(function_name)));
+  for (int i = 0; i < proto.function_names_size(); ++i) {
+    printer->Append(absl::StrFormat("%d \"%s\"\n", i + 1,
+                                    absl::CEscape(proto.function_names(i))));
   }
   printer->Append("\nFileLocations\n");
-  for (const auto& [index, file_location] :
-       llvm::enumerate(proto.file_locations())) {
-    printer->Append(
-        absl::StrFormat("%d {file_name_id=%d function_name_id=%d line=%d "
-                        "end_line=%d column=%d end_column=%d}\n",
-                        index + 1, file_location.file_name_id(),
-                        file_location.function_name_id(), file_location.line(),
-                        file_location.end_line(), file_location.column(),
-                        file_location.end_column()));
+  for (int i = 0; i < proto.file_locations_size(); ++i) {
+    const auto& file_location = proto.file_locations(i);
+    printer->Append(absl::StrFormat(
+        "%d {file_name_id=%d function_name_id=%d line=%d "
+        "end_line=%d column=%d end_column=%d}\n",
+        i + 1, file_location.file_name_id(), file_location.function_name_id(),
+        file_location.line(), file_location.end_line(), file_location.column(),
+        file_location.end_column()));
   }
   printer->Append("\nStackFrames\n");
-  for (const auto& [index, frame] : llvm::enumerate(proto.stack_frames())) {
-    printer->Append(absl::StrFormat(
-        "%d {file_location_id=%d parent_frame_id=%d}\n", index + 1,
-        frame.file_location_id(), frame.parent_frame_id() + 1));
+  for (int i = 0; i < proto.stack_frames_size(); ++i) {
+    const auto& frame = proto.stack_frames(i);
+    printer->Append(
+        absl::StrFormat("%d {file_location_id=%d parent_frame_id=%d}\n", i + 1,
+                        frame.file_location_id(), frame.parent_frame_id() + 1));
   }
 }
 
@@ -580,6 +599,7 @@ std::string HloModule::ToString() const {
   print_options.set_print_inline_stack_frames(
       db_options.xla_hlo_print_inline_stack_frames());
   print_options.set_compact_gte(db_options.xla_dump_compact_gte());
+  print_options.set_sort_backend_config(true);
   return ToString(print_options);
 }
 
@@ -612,6 +632,18 @@ void HloModule::ToProto(HloModuleProto* proto, HloProtoOptions options) const {
     proto->set_entry_computation_id(entry_computation_->unique_id());
     *proto->mutable_host_program_shape() =
         entry_computation_layout().ComputeProgramShape().ToProto();
+  }
+
+  // Deduplicate backend configs if requested via options or via XLA flag.
+  // Do not override options where it's already manually set by the caller.
+  if (!options.deduplicate_backend_config &&
+      config().debug_options().has_xla_deduplicate_backend_configs_min_size()) {
+    int64_t min_size =
+        config().debug_options().xla_deduplicate_backend_configs_min_size();
+    if (min_size >= 0 && min_size < std::numeric_limits<int64_t>::max()) {
+      options.deduplicate_backend_config = true;
+      options.min_backend_config_size = min_size;
+    }
   }
 
   // Instantiate one shared deduplicator when either option is enabled.
@@ -729,6 +761,10 @@ void HloModule::ToProto(HloModuleProto* proto, HloProtoOptions options) const {
   if (!config().device_type().empty()) {
     proto->set_device_type(config().device_type());
   }
+
+  if (has_backend_config()) {
+    proto->set_backend_config(raw_backend_config_string());
+  }
 }
 
 void HloModule::ToProtoWithConfig(HloModuleProtoWithConfig* proto,
@@ -825,7 +861,7 @@ absl::StatusOr<HloModuleProto> HloModule::RemapInstructionIds(
                                     << " not found in computation proto.";
     computation_proto.set_root_id(new_root_id);
     // Fix schedule.
-    RETURN_IF_ERROR(UpdateIdsInSchedule(proto_copy, computation_proto.id(),
+    ABSL_RETURN_IF_ERROR(UpdateIdsInSchedule(proto_copy, computation_proto.id(),
                                         old_instr_id_to_new_id));
   }
   return proto_copy;
@@ -968,7 +1004,7 @@ absl::StatusOr<std::unique_ptr<HloModule>> HloModule::CreateFromProto(
   // the entry parameters and root.
   TF_RET_CHECK(proto.has_host_program_shape())
       << "No program shape found in the proto";
-  ASSIGN_OR_RETURN(ProgramShape expected_program_shape,
+  ABSL_ASSIGN_OR_RETURN(ProgramShape expected_program_shape,
                    ProgramShape::FromProto(proto.host_program_shape()));
   TF_RET_CHECK(expected_program_shape.parameters_size() ==
                module_config.entry_computation_layout().parameter_count());
@@ -1010,7 +1046,7 @@ absl::StatusOr<std::unique_ptr<HloModule>> HloModule::CreateFromProto(
     // computation and potentially changed. Only used for fixing the schedule
     // or buffer assignment later.
     absl::flat_hash_map<int64_t, int64_t> id_remap_map;
-    ASSIGN_OR_RETURN(
+    ABSL_ASSIGN_OR_RETURN(
         std::unique_ptr<HloComputation> computation,
         HloComputation::CreateFromProto(
             computation_proto, computation_map, prohibit_empty_literal,
@@ -1052,30 +1088,30 @@ absl::StatusOr<std::unique_ptr<HloModule>> HloModule::CreateFromProto(
                                    /*preserve_entry_layouts=*/false);
   }
   TF_RET_CHECK(module->entry_computation_ != nullptr);
-  ASSIGN_OR_RETURN(
+  ABSL_ASSIGN_OR_RETURN(
       module->input_output_alias_config_,
       HloInputOutputAliasConfig::CreateFromProto(
           entry->ComputeProgramShape().result(), proto.input_output_alias()));
-  ASSIGN_OR_RETURN(module->buffer_donor_config_,
+  ABSL_ASSIGN_OR_RETURN(module->buffer_donor_config_,
                    HloBufferDonorConfig::CreateFromProto(proto.buffer_donor()));
 
-  RETURN_IF_ERROR(
+  ABSL_RETURN_IF_ERROR(
       module->CheckUniqueNamesAndIdsForComputationsAndInstructions());
 
   if (proto.has_schedule()) {
-    ASSIGN_OR_RETURN(
+    ABSL_ASSIGN_OR_RETURN(
         HloSchedule schedule,
         HloSchedule::CreateFromProto(module.get(), proto.schedule(),
                                      preserve_instruction_ids
                                          ? nullptr
                                          : &computation_id_to_id_remap_map));
-    RETURN_IF_ERROR(module->set_schedule(std::move(schedule)));
+    ABSL_RETURN_IF_ERROR(module->set_schedule(std::move(schedule)));
   }
 
   // If a pointer to a buffer assignment proto is provided, that means we need
   // to keep the HloModule and the Buffer Assignment proto consistent.
   if (buffer_assignment_needs_remap) {
-    RETURN_IF_ERROR(UpdateBufferAssignmentProto(
+    ABSL_RETURN_IF_ERROR(UpdateBufferAssignmentProto(
         buffer_assignment_proto, computation_id_to_id_remap_map));
   }
 
@@ -1093,14 +1129,14 @@ absl::StatusOr<std::unique_ptr<HloModule>> HloModule::CreateFromProto(
   }
 
   if (proto.has_spmd_output_sharding()) {
-    ASSIGN_OR_RETURN(HloSharding hlo_sharding,
+    ABSL_ASSIGN_OR_RETURN(HloSharding hlo_sharding,
                      HloSharding::FromProto(proto.spmd_output_sharding()));
     module->set_spmd_output_sharding(hlo_sharding);
   }
 
   std::vector<HloSharding> param_shardings;
   for (const auto& sharding_proto : proto.spmd_parameters_shardings()) {
-    ASSIGN_OR_RETURN(HloSharding sharding,
+    ABSL_ASSIGN_OR_RETURN(HloSharding sharding,
                      HloSharding::FromProto(sharding_proto));
     param_shardings.push_back(sharding);
   }
@@ -1115,7 +1151,7 @@ absl::StatusOr<std::unique_ptr<HloModule>> HloModule::CreateFromProto(
   }
   if (proto.has_device_assignment()) {
     if (!module->config().has_static_device_assignment()) {
-      ASSIGN_OR_RETURN(
+      ABSL_ASSIGN_OR_RETURN(
           std::unique_ptr<DeviceAssignment> device_assignment,
           DeviceAssignment::Deserialize(proto.device_assignment()));
       module->mutable_config().set_static_device_assignment(*device_assignment);
@@ -1123,10 +1159,10 @@ absl::StatusOr<std::unique_ptr<HloModule>> HloModule::CreateFromProto(
   }
 
   module->CanonicalizeStackFrameIds(proto.stack_frame_index());
-  RETURN_IF_ERROR(module->ReorderComputationsToPostOrder());
+  ABSL_RETURN_IF_ERROR(module->ReorderComputationsToPostOrder());
 
   if (proto.has_original_value_recovery_table()) {
-    ASSIGN_OR_RETURN(module->original_value_recovery_table_,
+    ABSL_ASSIGN_OR_RETURN(module->original_value_recovery_table_,
                      HloModule::OriginalValueRecoveryTable::FromProto(
                          proto.original_value_recovery_table()));
   }
@@ -1157,8 +1193,12 @@ absl::StatusOr<std::unique_ptr<HloModule>> HloModule::CreateFromProto(
 
   DeduplicateOriginalValues(module.get());
 
-  RETURN_IF_ERROR(
+  ABSL_RETURN_IF_ERROR(
       InlineMetadataPayloadsFromProtoPayloadTable(module.get(), proto));
+
+  if (!proto.backend_config().empty()) {
+    module->set_raw_backend_config_string(proto.backend_config());
+  }
 
   return module;
 }
@@ -1222,10 +1262,6 @@ absl::StatusOr<HloModuleConfig> HloModule::CreateModuleConfigFromShape(
     module_config.set_auto_spmd_partitioning_mesh_ids(std::vector<int64_t>(
         execution_options->auto_spmd_partitioning_mesh_ids().begin(),
         execution_options->auto_spmd_partitioning_mesh_ids().end()));
-    module_config.set_exec_time_optimization_effort(
-        execution_options->exec_time_optimization_effort());
-    module_config.set_memory_fitting_effort(
-        execution_options->memory_fitting_effort());
     module_config.set_optimization_level(
         execution_options->optimization_level());
     module_config.set_memory_fitting_level(
@@ -1242,7 +1278,7 @@ absl::StatusOr<HloModuleConfig> HloModule::CreateModuleConfigFromShape(
           execution_options->allow_spmd_sharding_propagation_to_output());
     }
     if (execution_options->has_device_assignment()) {
-      ASSIGN_OR_RETURN(std::unique_ptr<DeviceAssignment> device_assignment,
+      ABSL_ASSIGN_OR_RETURN(std::unique_ptr<DeviceAssignment> device_assignment,
                        DeviceAssignment::Deserialize(
                            execution_options->device_assignment()));
       module_config.set_static_device_assignment(*device_assignment);
@@ -1272,11 +1308,11 @@ absl::StatusOr<HloModuleConfig> HloModule::CreateModuleConfigFromShape(
   ComputationLayout* entry_layout =
       module_config.mutable_entry_computation_layout();
   for (int64_t i = 0; i < entry_layout->parameter_count(); ++i) {
-    RETURN_IF_ERROR(
+    ABSL_RETURN_IF_ERROR(
         entry_layout->mutable_parameter_layout(i)->CopyLayoutFromShape(
             program_shape.parameters(i)));
   }
-  RETURN_IF_ERROR(entry_layout->mutable_result_layout()->CopyLayoutFromShape(
+  ABSL_RETURN_IF_ERROR(entry_layout->mutable_result_layout()->CopyLayoutFromShape(
       program_shape.result()));
   return module_config;
 }
@@ -1288,9 +1324,9 @@ absl::StatusOr<HloModuleConfig> HloModule::CreateModuleConfigFromProto(
   if (!module.has_host_program_shape()) {
     return absl::FailedPreconditionError("No program shape found in the proto");
   }
-  ASSIGN_OR_RETURN(ProgramShape program_shape,
+  ABSL_ASSIGN_OR_RETURN(ProgramShape program_shape,
                    ProgramShape::FromProto(module.host_program_shape()));
-  ASSIGN_OR_RETURN(HloModuleConfig config,
+  ABSL_ASSIGN_OR_RETURN(HloModuleConfig config,
                    CreateModuleConfigFromShape(program_shape, debug_options,
                                                execution_options));
   if (!module.device_type().empty()) {
@@ -1299,7 +1335,7 @@ absl::StatusOr<HloModuleConfig> HloModule::CreateModuleConfigFromProto(
   if (!config.has_static_device_assignment()) {
     if (module.has_device_assignment()) {
       // Get the proto from the execution options rather than the module proto.
-      ASSIGN_OR_RETURN(
+      ABSL_ASSIGN_OR_RETURN(
           std::unique_ptr<DeviceAssignment> device_assignment,
           DeviceAssignment::Deserialize(module.device_assignment()));
       config.set_static_device_assignment(*device_assignment);
@@ -1324,7 +1360,7 @@ absl::StatusOr<std::unique_ptr<HloModule>> HloModule::CreateFromProtoWithConfig(
     bool preserve_instruction_ids,
     BufferAssignmentProto* buffer_assignment_proto) {
   const auto& hlo_module_proto = proto.hlo_module();
-  ASSIGN_OR_RETURN(std::unique_ptr<HloModuleConfig> config_ptr,
+  ABSL_ASSIGN_OR_RETURN(std::unique_ptr<HloModuleConfig> config_ptr,
                    HloModuleConfig::CreateFromProto(proto.config()));
   return HloModule::CreateFromProto(
       hlo_module_proto, *config_ptr, prohibit_empty_literal,
@@ -1348,12 +1384,18 @@ void HloModule::CleanupComputations() {
   if (to_be_deleted_computations_.empty()) {
     return;
   }
+  std::vector<int> old_to_new(computations_.size(), -1);
   computations_.erase(
       std::remove_if(computations_.begin(), computations_.end(),
                      [](const std::unique_ptr<HloComputation>& comp) {
                        return comp == nullptr;
                      }),
       computations_.end());
+  for (size_t i = 0; i < computations_.size(); ++i) {
+    old_to_new[computations_[i]->index_in_module_] = i;
+    computations_[i]->index_in_module_ = i;
+  }
+  topological_sort_.Reindex(old_to_new);
   to_be_deleted_computations_.clear();
 }
 
@@ -1383,13 +1425,18 @@ absl::Status HloModule::ReorderComputationsToPostOrder() {
     comp_map[comp_ptr] = std::move(comp);
   }
 
+  std::vector<int> old_to_new(computations_.size(), -1);
   computations_.clear();
   computations_.reserve(post_order.size());
-  for (HloComputation* comp : post_order) {
+  for (size_t i = 0; i < post_order.size(); ++i) {
+    HloComputation* comp = post_order[i];
     auto it = comp_map.find(comp);
     TF_RET_CHECK(it != comp_map.end()) << "Computation not found in module";
+    old_to_new[comp->index_in_module_] = i;
+    comp->index_in_module_ = i;
     computations_.push_back(std::move(it->second));
   }
+  topological_sort_.Reindex(old_to_new);
 
   TF_RET_CHECK(computations_.size() == comp_map.size())
       << "Lost computations during reordering. Original count: "
@@ -1587,16 +1634,18 @@ std::vector<HloComputation*> HloModule::MakeComputationPostOrder(
   for (auto it = topological_sort_.rbegin(); it != topological_sort_.rend();
        ++it) {
     ++num_computations;
+    HloComputation* computation = computations_[*it].get();
     if (execution_threads.empty() ||
-        execution_threads.contains(it->execution_thread())) {
-      post_order.push_back(&*it);
+        execution_threads.contains(computation->execution_thread())) {
+      post_order.push_back(computation);
     }
   }
 
   if (num_computations != computation_count()) {
-    for (HloComputation& computation : topological_sort_) {
-      LOG(ERROR) << "Reverse postorder: " << computation.name() << " ("
-                 << computation.parent()->name() << ")";
+    for (int32_t idx : topological_sort_) {
+      HloComputation* computation = computations_[idx].get();
+      LOG(ERROR) << "Reverse postorder: " << computation->name() << " ("
+                 << computation->parent()->name() << ")";
     }
     for (const HloComputation* computation : computations()) {
       LOG(ERROR) << "Computations: " << computation->name() << " ("
@@ -1728,6 +1777,7 @@ void HloModule::Clone(const std::string& suffix, HloCloneContext* context,
   module->set_is_dynamic(is_dynamic());
   module->set_hlo_passes_started(hlo_passes_started());
   module->set_frontend_attributes(frontend_attributes());
+  module->backend_config_ = backend_config_;
   *module->metadata() = metadata();
   // The canonical module id should be the same as the unique id from the
   // module. We don't want to copy the id from the other metadata.
@@ -1778,6 +1828,12 @@ void HloModule::Clone(const std::string& suffix, HloCloneContext* context,
     LOG(ERROR) << "Failed to sort module computations for " << name() << "; "
                << status;
   }
+  std::vector<int> old_to_new(module->computations_.size(), -1);
+  for (size_t i = 0; i < module->computations_.size(); ++i) {
+    old_to_new[module->computations_[i]->index_in_module_] = i;
+    module->computations_[i]->index_in_module_ = i;
+  }
+  module->topological_sort_.Reindex(old_to_new);
 }
 
 std::unique_ptr<HloModule> HloModule::Clone(
@@ -1819,7 +1875,7 @@ absl::Status HloModule::RemoveUnusedComputations() {
 
   for (auto it = computations_.begin(); it != computations_.end(); ++it) {
     if (*it != nullptr && to_remove.contains(it->get())) {
-      RETURN_IF_ERROR(RemoveEmbeddedComputation(it));
+      ABSL_RETURN_IF_ERROR(RemoveEmbeddedComputation(it));
     }
   }
   CleanupComputations();
@@ -1971,10 +2027,10 @@ HloModule::OriginalValueRecoveryTable::FromProto(
     std::unique_ptr<HloModule> recovery_module;
     if (entry.has_recovery_module()) {
       const HloModuleProto proto = entry.recovery_module();
-      ASSIGN_OR_RETURN(HloModuleConfig config,
+      ABSL_ASSIGN_OR_RETURN(HloModuleConfig config,
                        HloModule::CreateModuleConfigFromProto(
                            proto, GetDebugOptionsFromFlags()));
-      ASSIGN_OR_RETURN(recovery_module,
+      ABSL_ASSIGN_OR_RETURN(recovery_module,
                        HloModule::CreateFromProto(proto, config));
     }
     original_value_recovery_table.table_[old_original_array] =
@@ -2095,5 +2151,12 @@ void HloModule::OriginalValueRecoveryTable::BuildAndAddRecoveryComputation(
 }
 
 /* static */ std::atomic<int> HloModule::next_unique_module_id_(0);
+
+bool HloModule::IsEntryComputationUnboundedDynamic() const {
+  if (computations().begin() == computations().end()) {
+    return false;
+  }
+  return (*computations().begin())->IsEntryInstUnboundedDynamic();
+}
 
 }  // namespace xla

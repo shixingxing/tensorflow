@@ -25,17 +25,6 @@ class XTile_Attr<string name, list<Trait> traits = []> :
       AttrDef<XTileDialect, name, traits> {
 }
 
-def XTile_TilingInfoAttr : XTile_Attr<"TilingInfo"> {
-  let summary = "Contains auxillary information about how a program is tiled.";
-  let mnemonic = "tiling_info";
-  let parameters = (ins "int32_t":$tile_count, "int32_t":$tiles_per_workgroup);
-
-  let assemblyFormat = [{
-    `<` `tile_count` `:` $tile_count `,`
-    `tiles_per_workgroup` `:` $tiles_per_workgroup `>`
-  }];
-}
-
 def XTile_LayoutAttr : XTile_Attr<"Layout", [
     DeclareAttrInterfaceMethods<MemRefLayoutAttrInterface>]> {
   let mnemonic = "layout";
@@ -47,6 +36,22 @@ def XTile_LayoutAttr : XTile_Attr<"Layout", [
     mlir::LogicalResult getStridesAndOffset(
         mlir::ArrayRef<int64_t> shape, mlir::SmallVectorImpl<int64_t>& strides, int64_t& offset) const;
   }];
+}
+
+def XTile_CollectiveStrategy : I32EnumAttr<
+    "CollectiveStrategy",
+    "Collective kernel emission strategy.",
+    [
+      I32EnumAttrCase<"kOneShot", 0, "one_shot">,
+      I32EnumAttrCase<"kTwoShot", 1, "two_shot">,
+    ]> {
+  let genSpecializedAttr = 0;
+  let cppNamespace = "::xla::xtile";
+}
+
+def XTile_CollectiveStrategyAttr :
+    EnumAttr<XTileDialect, XTile_CollectiveStrategy, "collective_strategy"> {
+  let assemblyFormat = "`<` $value `>`";
 }
 
 #endif // XLA_CODEGEN_XTILE_IR_XTILE_ATTRS

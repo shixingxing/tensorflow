@@ -45,14 +45,20 @@ limitations under the License.
 #include "mlir/Support/LLVM.h"  // from @llvm-project
 #include "tensorflow/compiler/mlir/tensorflow/dialect_registration.h"
 #include "tensorflow/compiler/mlir/tfrt/transforms/ifrt/ifrt_types.h"
+#include "xla/pjrt/mlir_to_hlo.h"
 #include "xla/python/ifrt/array.h"
 #include "xla/python/ifrt/client.h"
+#include "xla/python/ifrt/executable.h"
+#include "xla/python/ifrt/hlo/hlo_program.h"
+#include "xla/python/ifrt/test_util.h"
+#include "xla/python/pjrt_ifrt/xla_compiler.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/tsl/concurrency/future.h"
 #include "xla/tsl/framework/serving_device_selector.h"
 #include "xla/tsl/framework/test_util/mock_serving_device_selector.h"
 #include "xla/tsl/lib/core/status_test_util.h"
+#include "xla/tsl/lib/monitoring/cell_reader.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/threadpool.h"
 #include "xla/xla_data.pb.h"
@@ -75,10 +81,13 @@ using tensorflow::ifrt_serving::test_utils::GetMlirModulePath;
 using ::tensorflow::test::AsTensor;
 using ::tensorflow::test::TensorEq;
 using ::testing::_;
+using ::testing::AllOf;
 using ::testing::ElementsAre;
 using ::testing::HasSubstr;
 using ::testing::NiceMock;
+using ::testing::Not;
 using ::testing::Return;
+using ::tsl::monitoring::testing::CellReader;
 
 // Helper to set up a mock expectation for `ReserveDevice`.
 // It returns device reservations in a round-robin fashion, cycling through
@@ -171,6 +180,9 @@ class IfrtServingExecutableTest : public ::testing::TestWithParam<bool> {
   explicit IfrtServingExecutableTest() {
     helper_ = std::make_unique<test_utils::IfrtServingExecutableTestHelper>(
         &selector_);
+    ifrt_execution_count_reader_ =
+        std::make_unique<tsl::monitoring::testing::CellReader<int64_t>>(
+            "/tensorflow/tfrt/ifrt/execution_count");
   }
 
   absl::StatusOr<std::vector<tensorflow::Tensor>> Execute(
@@ -188,6 +200,8 @@ class IfrtServingExecutableTest : public ::testing::TestWithParam<bool> {
 
   tsl::test_util::MockServingDeviceSelector selector_;
   std::unique_ptr<test_utils::IfrtServingExecutableTestHelper> helper_;
+  std::unique_ptr<tsl::monitoring::testing::CellReader<int64_t>>
+      ifrt_execution_count_reader_;
 };
 
 INSTANTIATE_TEST_SUITE_P(IfrtServingExecutableTests, IfrtServingExecutableTest,
@@ -214,6 +228,9 @@ TEST_P(IfrtServingExecutableTest, Basic) {
       AsTensor<int32_t>({14}, tensorflow::TensorShape({1, 1}));
 
   EXPECT_THAT(result, ElementsAre(TensorEq(expected_out)));
+
+  EXPECT_EQ(ifrt_execution_count_reader_->Delta("test"),
+            helper_->num_cores() + 1);
 }
 
 TEST_P(IfrtServingExecutableTest, MultipleShapes) {
@@ -253,6 +270,9 @@ TEST_P(IfrtServingExecutableTest, MultipleShapes) {
   EXPECT_THAT(outputs1, ElementsAre(TensorEq(expected_out1)));
 
   EXPECT_THAT(outputs2, ElementsAre(TensorEq(expected_out2)));
+
+  EXPECT_EQ(ifrt_execution_count_reader_->Delta("test"),
+            helper_->num_cores() + 6);
 }
 
 TEST_P(IfrtServingExecutableTest, ReturnFailOnUncompiledShapeAfterFrozen) {
@@ -293,6 +313,9 @@ TEST_P(IfrtServingExecutableTest, ReturnFailOnUncompiledShapeAfterFrozen) {
 
   EXPECT_THAT(status,
               absl_testing::StatusIs(absl::StatusCode::kFailedPrecondition));
+
+  EXPECT_EQ(ifrt_execution_count_reader_->Delta("test"),
+            helper_->num_cores() + 3);
 }
 
 TEST_P(IfrtServingExecutableTest,
@@ -338,6 +361,68 @@ TEST_P(IfrtServingExecutableTest,
   EXPECT_THAT(error_message, HasSubstr("Already compiled:"));
   EXPECT_THAT(error_message, HasSubstr("[1,3]"));
   EXPECT_THAT(error_message, HasSubstr("[3,1]"));
+
+  // A frozen executable with compilation enabled is not a
+  // "compilation-disabled" cache miss.
+  EXPECT_THAT(error_message,
+              Not(HasSubstr(kXlaCompilationDisabledErrorMarker)));
+
+  EXPECT_EQ(ifrt_execution_count_reader_->Delta("test"),
+            helper_->num_cores() + 1);
+}
+
+TEST_P(IfrtServingExecutableTest,
+       CompilationDisabledErrorContainsMarkerAndIsNotCached) {
+  int64_t program_id = 123456;
+  SetUpMockDeviceReservation(selector_, program_id, helper_->num_cores());
+  auto executable =
+      helper_->MakeExecutable(program_id, GetMlirModulePath("executable.mlir"));
+
+  // Warm up with shape {1, 3} x {3, 1}.
+  auto x1 = AsTensor<int32_t>({1, 2, 3}, tensorflow::TensorShape({1, 3}));
+  auto y1 = AsTensor<int32_t>({1, 2, 3}, tensorflow::TensorShape({3, 1}));
+  const auto expected_out1 =
+      AsTensor<int32_t>({14}, tensorflow::TensorShape({1, 1}));
+  std::vector<tensorflow::Tensor> inputs1{x1, y1};
+  for (int i = 0; i < helper_->num_cores(); i++) {
+    TF_ASSERT_OK_AND_ASSIGN(
+        auto result, Execute(executable.get(), absl::MakeSpan(inputs1), {}));
+  }
+
+  // Simulate `ScopedTpuCompileDisabler` being active.
+  helper_->SetXlaCompilationDisabled(true);
+
+  // Already compiled shapes still work.
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto outputs1, Execute(executable.get(), absl::MakeSpan(inputs1), {}));
+  EXPECT_THAT(outputs1, ElementsAre(TensorEq(expected_out1)));
+
+  // A new, uncompiled shape {1, 4} x {4, 1} fails with the marker that model
+  // servers use to identify compilation-disabled cache misses.
+  auto x2 = AsTensor<int32_t>({1, 2, 3, 4}, tensorflow::TensorShape({1, 4}));
+  auto y2 = AsTensor<int32_t>({1, 2, 3, 4}, tensorflow::TensorShape({4, 1}));
+  const auto expected_out2 =
+      AsTensor<int32_t>({30}, tensorflow::TensorShape({1, 1}));
+  std::vector<tensorflow::Tensor> inputs2{x2, y2};
+  EXPECT_THAT(Execute(executable.get(), absl::MakeSpan(inputs2), {}),
+              absl_testing::StatusIs(
+                  absl::StatusCode::kFailedPrecondition,
+                  AllOf(HasSubstr(kXlaCompilationDisabledErrorMarker),
+                        HasSubstr("already frozen: 0"),
+                        HasSubstr("XLA compilation disabled by "
+                                  "ScopedTpuCompileDisabler: 1"))));
+  EXPECT_EQ(executable->num_executables(), 1);
+
+  // Re-enabling compilation (e.g. the dry-run retry in the model server) can
+  // still compile the new shape, i.e. the failure above was not cached.
+  helper_->SetXlaCompilationDisabled(false);
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto outputs2, Execute(executable.get(), absl::MakeSpan(inputs2), {}));
+  EXPECT_THAT(outputs2, ElementsAre(TensorEq(expected_out2)));
+  EXPECT_EQ(executable->num_executables(), 2);
+
+  EXPECT_EQ(ifrt_execution_count_reader_->Delta("test"),
+            helper_->num_cores() + 3);
 }
 
 TEST_P(IfrtServingExecutableTest, Spmd) {
@@ -362,6 +447,8 @@ TEST_P(IfrtServingExecutableTest, Spmd) {
       auto result, Execute(executable.get(), absl::MakeSpan(inputs), {}));
 
   EXPECT_THAT(result, ElementsAre(TensorEq(expected_out)));
+
+  EXPECT_EQ(ifrt_execution_count_reader_->Delta("test"), 1);
 }
 
 TEST_P(IfrtServingExecutableTest, SpmdTwoReturns) {
@@ -390,6 +477,8 @@ TEST_P(IfrtServingExecutableTest, SpmdTwoReturns) {
 
   EXPECT_THAT(result,
               ElementsAre(TensorEq(expected_out0), TensorEq(expected_out1)));
+
+  EXPECT_EQ(ifrt_execution_count_reader_->Delta("test"), 1);
 }
 
 TEST_P(IfrtServingExecutableTest, SpmdXlaCallModuleShardy) {
@@ -416,6 +505,8 @@ TEST_P(IfrtServingExecutableTest, SpmdXlaCallModuleShardy) {
 
   EXPECT_THAT(result,
               ElementsAre(TensorEq(expected_out0), TensorEq(expected_out1)));
+
+  EXPECT_EQ(ifrt_execution_count_reader_->Delta("test"), 1);
 }
 
 TEST_F(IfrtServingExecutableTest, EncodeLayout) {
@@ -478,6 +569,9 @@ TEST_P(IfrtServingExecutableTest, NoReturn) {
       auto result, Execute(executable.get(), absl::MakeSpan(inputs), {}));
 
   ASSERT_EQ(result.size(), 0);
+
+  EXPECT_EQ(ifrt_execution_count_reader_->Delta("test"),
+            helper_->num_cores() + 1);
 }
 
 TEST_P(IfrtServingExecutableTest, CompilationFailureFulfillsPromise) {
@@ -513,6 +607,8 @@ TEST_P(IfrtServingExecutableTest, CompilationFailureFulfillsPromise) {
                                  absl::StatusCode::kInvalidArgument,
                                  ::testing::HasSubstr("Dtype mismatched!")));
   EXPECT_EQ(executable->num_executables(), 1);
+
+  EXPECT_EQ(ifrt_execution_count_reader_->Delta("test"), 2);
 }
 
 TEST_P(IfrtServingExecutableTest, StaticShape) {
@@ -605,6 +701,9 @@ TEST_P(IfrtServingExecutableTest, StaticShape) {
   // Verify that only one executable was created, since both test cases use
   // the same `shape_tensor` for static shape.
   EXPECT_EQ(executable->num_executables(), 1);
+
+  EXPECT_EQ(ifrt_execution_count_reader_->Delta("test"),
+            helper_->num_cores() + 2);
 }
 
 TEST_P(VariableInputTest, InterleaveVariable) {
@@ -788,6 +887,57 @@ INSTANTIATE_TEST_SUITE_P(
                 },
             }),
         ::testing::Bool()));
+
+constexpr absl::string_view kAliasedInputModule = R"(
+module {
+  func.func @main(%arg0: tensor<2x2xf32> {tf.aliasing_output = 0 : i32},
+                  %arg1: tensor<2x2xf32>) -> tensor<2x2xf32> {
+    %0 = mhlo.add %arg0, %arg1 : tensor<2x2xf32>
+    return %0 : tensor<2x2xf32>
+  }
+})";
+
+absl::StatusOr<xla::ifrt::LoadedExecutableRef> CompileModuleText(
+    xla::ifrt::Client& client, absl::string_view module_text) {
+  mlir::MLIRContext context;
+  TF_ASSIGN_OR_RETURN(mlir::OwningOpRef<mlir::ModuleOp> module,
+                      xla::ParseMlirModuleString(module_text, context));
+  auto program = std::make_unique<xla::ifrt::HloProgram>(module.get());
+  TF_ASSIGN_OR_RETURN(
+      auto device_list,
+      client.MakeDeviceList({client.addressable_devices().front()}));
+  auto options = std::make_unique<xla::ifrt::XlaCompileOptions>(
+      xla::CompileOptions(), std::move(device_list));
+  return client.GetDefaultCompiler()
+      ->CompileAndLoad(std::move(program), std::move(options))
+      .Await();
+}
+
+TEST(GetInputDonationMaskTest, AliasedInputIsDonatable) {
+  ASSERT_OK_AND_ASSIGN(std::shared_ptr<xla::ifrt::Client> client,
+                       xla::ifrt::test_util::GetClient());
+  ASSERT_OK_AND_ASSIGN(auto loaded_executable,
+                       CompileModuleText(*client, kAliasedInputModule));
+
+  ASSERT_OK_AND_ASSIGN(
+      std::vector<bool> mask,
+      GetInputDonationMask(*loaded_executable, /*num_inputs=*/2));
+  EXPECT_THAT(mask, ::testing::ElementsAre(true, false));
+}
+
+TEST(GetInputDonationMaskTest, OutOfRangeDonatedParameterFails) {
+  ASSERT_OK_AND_ASSIGN(std::shared_ptr<xla::ifrt::Client> client,
+                       xla::ifrt::test_util::GetClient());
+  ASSERT_OK_AND_ASSIGN(auto loaded_executable,
+                       CompileModuleText(*client, kAliasedInputModule));
+
+  // Parameter 0 is aliased but num_inputs claims 0 inputs: the numbering
+  // mismatch must fail detection rather than produce a wrong mask.
+  EXPECT_EQ(GetInputDonationMask(*loaded_executable, /*num_inputs=*/0)
+                .status()
+                .code(),
+            absl::StatusCode::kInternal);
+}
 
 }  // namespace
 }  // namespace ifrt_serving
